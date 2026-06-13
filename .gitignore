@@ -1,0 +1,16 @@
+node_modules/
+*.log
+.DS_Store
+.claude/
+.playwright-mcp/
+package-lock.json
+
+# Lokale Browser-/Screenshot-Artefakte aus manuellen Verifikationslaeufen.
+/*.png
+/*.jpg
+/*.jpeg
+/*.webp
+/*.gif
+/*.mp4
+/*.mov
+/.codex-*

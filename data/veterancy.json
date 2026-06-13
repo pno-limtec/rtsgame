@@ -1,0 +1,13 @@
+{
+  "_comment": "Veteranenstufen (Phase 3). Einheiten sammeln XP durch Abschüsse; XP-Wert eines Ziels = baseMaxHp * killValueFactor (Gebäude reduziert). Boni sind kumulativ pro Rang.",
+  "killValueFactor": 0.4,
+  "buildingValueFactor": 0.05,
+  "regenAfterHitDelay": 5,
+  "promoteHealFraction": 0.2,
+  "ranks": [
+    { "name": "Rekrut",  "xp": 0,   "dmgMult": 1.0,  "hpMult": 1.0,  "sightMult": 1.0,  "regen": 0 },
+    { "name": "Veteran", "xp": 55,  "dmgMult": 1.15, "hpMult": 1.15, "sightMult": 1.1,  "regen": 0 },
+    { "name": "Elite",   "xp": 160, "dmgMult": 1.3,  "hpMult": 1.25, "sightMult": 1.2,  "regen": 0 },
+    { "name": "Held",    "xp": 340, "dmgMult": 1.5,  "hpMult": 1.4,  "sightMult": 1.3,  "regen": 5 }
+  ]
+}

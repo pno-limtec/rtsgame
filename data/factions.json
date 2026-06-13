@@ -1,0 +1,20 @@
+{
+  "HLX": {
+    "label": "Helix-Kollektiv",
+    "color": "#36c5f0",
+    "modifiers": { "air": { "hpMult": 1.12, "costMult": 0.85 }, "infantry": { "costMult": 0.86 }, "research": 1.25 },
+    "desc": "Drohnen- und Energiewirtschaft. Schnelle Produktion, günstige Infanterie-Schwärme und starke Luftwaffe."
+  },
+  "KBN": {
+    "label": "Karbon-Pakt",
+    "color": "#f08a24",
+    "modifiers": { "vehicle": { "costMult": 0.9, "hpMult": 1.03 }, "air": { "costMult": 1.15 } },
+    "desc": "Schwerindustrie. Billige, robuste Panzer; teure, schwache Luftwaffe."
+  },
+  "FLG": {
+    "label": "Freie Flutgilde",
+    "color": "#2ecc71",
+    "modifiers": { "naval": { "costMult": 0.86, "hpMult": 1.08 }, "hydro": 1.5 },
+    "desc": "Wasser- und Amphibik-Spezialisten. Beherrschen dynamische Wasserläufe."
+  }
+}

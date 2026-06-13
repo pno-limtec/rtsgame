@@ -1,0 +1,21 @@
+{
+  "name": "iron-frontier-rts",
+  "version": "0.2.0",
+  "description": "Iron Frontier — a browser-based multiplayer real-time strategy game (original IP).",
+  "type": "module",
+  "scripts": {
+    "server": "node server/index.js",
+    "test": "node test/sim-test.js",
+    "ai-coverage": "node test/ai-coverage.js",
+    "balance": "node test/balance-check.js",
+    "smoke": "node test/smoke.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "ws": "^8.21.0"
+  },
+  "author": "Iron Frontier dev team",
+  "license": "MIT"
+}

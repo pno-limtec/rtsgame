@@ -1,0 +1,9 @@
+{
+  "ore":          { "label": "Erz",            "start": 2000, "kind": "primary", "note": "DIE Währung: vom Bagger an Hängen abgebaut, von LKWs eingelagert; Lager begrenzen den Vorrat" },
+  "energy":       { "label": "Energie",         "start": 0,    "kind": "flow", "note": "Erzeugung minus Verbrauch; Defizit drosselt Produktion" },
+  "oil":          { "label": "Öl",              "start": 0,    "kind": "stock", "note": "Bohrtürme fördern sichtbare Ölflecken leer; Transport nur per Pipeline zum Öldepot" },
+  "fuel":         { "label": "Treibstoff",      "start": 500,  "kind": "stock" },
+  "ammo":         { "label": "Munition",        "start": 500,  "kind": "stock" },
+  "materials":    { "label": "Erde/Baumaterial", "start": 400, "kind": "stock", "note": "Aushub aus Gräben/Tunneln; für Wälle, Deiche, Dämme, Brücken" },
+  "water":        { "label": "Wasser",          "start": 150,  "kind": "stock", "note": "Kühlung für Ölkraftwerke; Pumpwerke liefern nur per Pipeline zum Wasserturm" }
+}

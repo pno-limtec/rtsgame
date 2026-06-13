@@ -1,0 +1,187 @@
+{
+  "hq": {
+    "label": "Bauhof", "role": "command",
+    "hp": 2000, "cost": { "ore": 0 }, "buildTime": 0,
+    "power": -20, "buildRadius": 18, "size": 3,
+    "integratedStorage": { "ore": 1600, "materials": 800, "water": 250 },
+    "provides": ["build"], "produces_units": ["builder"], "sight": 14,
+    "desc": "Zentrale. Definiert den Bauradius, baut Ersatz-Bagger und enthält kleine integrierte Lager für Erz, Erde/Baumaterial und Wasser. Verlust = schwerer Rückschlag."
+  },
+  "power_plant": {
+    "label": "Ölkraftwerk", "role": "economy",
+    "hp": 600, "cost": { "ore": 300 }, "buildTime": 8,
+    "power": 120, "size": 2, "sight": 6, "burnsFuel": true,
+    "desc": "Verbrennt Öl und braucht Wasser zur Kühlung — ohne beides bricht die Leistung ein."
+  },
+  "solar_plant": {
+    "label": "Solarfeld", "role": "economy",
+    "hp": 400, "cost": { "ore": 350 }, "buildTime": 7,
+    "power": 100, "size": 2, "sight": 5, "solar": true,
+    "desc": "Strom aus Sonne: voller Ertrag nur tagsüber bei klarem Himmel — nachts und bei Regen nichts."
+  },
+  "water_pump": {
+    "label": "Pumpwerk", "role": "economy",
+    "hp": 450, "cost": { "ore": 300 }, "buildTime": 8,
+    "power": -10, "size": 2, "sight": 5, "pump": true, "buildOnWater": true, "requiresWater": true, "mustStandInWater": true, "remoteBuild": true,
+    "desc": "Kann direkt im Wasser als Außenposten gebaut werden. Fördert Wasser erst mit Pipeline zum Wasserturm."
+  },
+  "pipe": {
+    "label": "Pipeline", "role": "economy",
+    "hp": 150, "cost": { "ore": 30, "materials": 5 }, "buildTime": 1,
+    "power": 0, "size": 1, "sight": 2, "pipe": true, "buildRadius": 3,
+    "desc": "Verbindet Pumpwerke mit Wassertürmen und Bohrtürme mit Öldepots. Verwundbar — Leitungsbruch stoppt die Förderung."
+  },
+  "refinery": {
+    "label": "Raffinerie", "role": "economy",
+    "hp": 900, "cost": { "ore": 800 }, "buildTime": 14,
+    "power": -30, "size": 3, "sight": 7,
+    "storage": { "ore": 1000 },
+    "desc": "Verarbeitet Erz aus dem Erzlager zu Credits. Erz wird von Erz-LKWs angeliefert."
+  },
+  "ore_depot": {
+    "label": "Erzlager", "role": "logistics",
+    "hp": 650, "cost": { "ore": 350, "materials": 20 }, "buildTime": 8,
+    "power": -5, "size": 2, "sight": 5, "resourceDepot": "ore", "storage": { "ore": 2500 },
+    "desc": "Annahmestelle für Erz-LKWs. Von hier verarbeitet die Raffinerie Erz zu Credits."
+  },
+  "material_depot": {
+    "label": "Baumateriallager", "role": "logistics",
+    "hp": 650, "cost": { "ore": 300, "materials": 15 }, "buildTime": 8,
+    "power": -5, "size": 2, "sight": 5, "resourceDepot": "materials", "storage": { "materials": 2200 },
+    "desc": "Lager fuer Erde und Baumaterial aus Gräben, Tunneln und Abgrabungen. Baustellen und Fabriken ziehen Material von hier."
+  },
+  "water_tower": {
+    "label": "Wasserturm", "role": "logistics",
+    "hp": 550, "cost": { "ore": 300, "materials": 30 }, "buildTime": 8,
+    "power": -5, "size": 2, "sight": 6, "resourceDepot": "water", "storage": { "water": 1500 },
+    "desc": "Speichert Kühlwasser. Pumpwerke liefern nur, wenn eine Pipeline zum Wasserturm besteht."
+  },
+  "oil_depot": {
+    "label": "Öldepot", "role": "logistics",
+    "hp": 650, "cost": { "ore": 350, "materials": 25 }, "buildTime": 8,
+    "power": -5, "size": 2, "sight": 6, "resourceDepot": "oil", "storage": { "oil": 1500 },
+    "desc": "Speichert Rohöl. Bohrtürme fördern nur, wenn eine Pipeline zum Öldepot besteht."
+  },
+  "oil_derrick": {
+    "label": "Bohrturm", "role": "economy",
+    "hp": 500, "cost": { "ore": 400 }, "buildTime": 10,
+    "power": -15, "size": 2, "sight": 6,
+    "produces": { "oil": 0.8 }, "pipelineResource": "oil", "requiresOil": true, "remoteBuild": true,
+    "desc": "Kann direkt auf Ölflecken als Außenposten gebaut werden. Fördert Öl erst mit Pipeline zum Öldepot."
+  },
+  "barracks": {
+    "label": "Kaserne", "role": "production",
+    "hp": 700, "cost": { "ore": 400 }, "buildTime": 10,
+    "power": -20, "size": 2, "sight": 6,
+    "produces_category": "infantry",
+    "desc": "Bildet Infanterie und Pioniere aus."
+  },
+  "factory": {
+    "label": "Fahrzeugfabrik", "role": "production",
+    "hp": 1000, "cost": { "ore": 1000 }, "buildTime": 16,
+    "power": -40, "size": 3, "sight": 6,
+    "produces_category": "vehicle",
+    "desc": "Produziert Fahrzeuge: Kampffahrzeuge sowie Bagger und LKWs für Bau- und Rohstofflogistik."
+  },
+  "airbase": {
+    "label": "Luftbasis", "role": "production",
+    "hp": 800, "cost": { "ore": 500 }, "buildTime": 12,
+    "power": -50, "size": 3, "sight": 7,
+    "produces_category": "air",
+    "desc": "Baut und betankt Luftfahrzeuge."
+  },
+  "shipyard": {
+    "label": "Werft", "role": "production",
+    "hp": 900, "cost": { "ore": 450 }, "buildTime": 12,
+    "power": -40, "size": 3, "sight": 7, "requiresWater": true, "buildOnWater": true,
+    "produces_category": "naval",
+    "desc": "Baut Wassereinheiten. Kann direkt im Wasser gebaut werden."
+  },
+  "depot": {
+    "label": "Nachschubdepot", "role": "logistics",
+    "hp": 600, "cost": { "ore": 500 }, "buildTime": 10,
+    "power": -10, "size": 2, "sight": 6, "supplyRadius": 12,
+    "resupply": { "ammo": 4, "fuel": 4 },
+    "desc": "Versorgt nahe Einheiten mit Munition und Treibstoff."
+  },
+  "turret": {
+    "label": "Kanonenturm", "role": "defense",
+    "hp": 800, "cost": { "ore": 600 }, "buildTime": 10,
+    "power": -25, "size": 1, "sight": 10, "weapon": "turret_cannon",
+    "desc": "Stationäre Kanonenverteidigung gegen Fahrzeuge, Gebäude und Schiffe in Küstennähe."
+  },
+  "mg_turret": {
+    "label": "MG-Turm", "role": "defense",
+    "hp": 520, "cost": { "ore": 350 }, "buildTime": 7,
+    "power": -15, "size": 1, "sight": 9, "weapon": "turret_mg",
+    "desc": "Günstiger Schutzturm gegen Infanterie und leichte Ziele."
+  },
+  "flak_turret": {
+    "label": "Flak-Turm", "role": "defense",
+    "hp": 650, "cost": { "ore": 650 }, "buildTime": 9,
+    "power": -25, "size": 1, "sight": 12, "weapon": "turret_flak",
+    "desc": "Stationäre Rohr-Flak. Hält Luftangriffe auf Distanz und kann leichte Ziele stören."
+  },
+  "sam_site": {
+    "label": "SAM-Stellung", "role": "defense",
+    "hp": 600, "cost": { "ore": 700 }, "buildTime": 10,
+    "power": -25, "size": 1, "sight": 12, "weapon": "sam_missile",
+    "desc": "Stationäre Raketen-Flugabwehr mit hoher Reichweite."
+  },
+  "sonar": {
+    "label": "Sonarstation", "role": "defense",
+    "hp": 500, "cost": { "ore": 600 }, "buildTime": 10,
+    "power": -20, "size": 1, "sight": 8, "requiresWater": true, "sonarRange": 22,
+    "desc": "Ortet getauchte U-Boote im Umkreis und macht sie für die eigene Flotte angreifbar."
+  },
+  "road": {
+    "label": "Straße", "role": "infrastructure",
+    "hp": 250, "cost": { "ore": 20, "materials": 4 }, "buildTime": 1,
+    "power": 0, "size": 1, "sight": 1, "roadBuilt": true, "buildRadius": 4, "earthYield": 2,
+    "desc": "Befestigte Fahrbahn, auch weit außerhalb der Basis kettenbar. Fahrzeuge fahren schneller und überwinden steilere Hänge (Serpentinen)."
+  },
+  "bridge": {
+    "label": "Brücke", "role": "infrastructure",
+    "hp": 700, "cost": { "ore": 120, "materials": 25 }, "buildTime": 5,
+    "power": 0, "size": 1, "sight": 3, "bridges": true, "buildOnWater": true, "buildRadius": 3,
+    "desc": "Landeinheiten überqueren Wasser; Schiffe passieren darunter. Zerstörbar — Nachschublinien sichern!"
+  },
+  "tunnel": {
+    "label": "Tunnel", "role": "infrastructure",
+    "hp": 900, "cost": { "ore": 150, "materials": 30 }, "buildTime": 6,
+    "power": 0, "size": 1, "sight": 2, "tunnels": true, "buildOnCliff": true, "buildRadius": 3, "earthYield": 25,
+    "desc": "Gräbt einen Durchgang durch Klippen/Berge. Der Aushub liefert Erde als Baumaterial."
+  },
+  "wall": {
+    "label": "Wall", "role": "fortification",
+    "hp": 450, "cost": { "ore": 60, "materials": 12 }, "buildTime": 3,
+    "power": 0, "size": 1, "sight": 2, "cover": 0.35, "terraform": 0.09, "buildRadius": 2,
+    "blocks": true, "waterBlocks": true,
+    "desc": "Erdwall: hebt das Gelände an, blockiert Bodenbewegung UND Wasser (Deichfunktion). Leitet Flüsse um, staut auf, gibt Deckung."
+  },
+  "trench": {
+    "label": "Graben", "role": "fortification",
+    "hp": 300, "cost": { "ore": 80 }, "buildTime": 3,
+    "power": 0, "size": 1, "sight": 3, "cover": 0.5, "garrison": 4, "terraform": -0.10, "earthYield": 40, "buildRadius": 2,
+    "desc": "Senkt das Gelände aus — der Aushub liefert Erde. Deckung für Infanterie; leitet Wasser (Kanal) und kann Hochseen anstechen."
+  },
+  "dam": {
+    "label": "Staudamm", "role": "hydro",
+    "hp": 1600, "cost": { "ore": 500, "materials": 80 }, "buildTime": 12,
+    "power": 30, "size": 2, "sight": 5, "terraform": 0.16, "buildRadius": 3,
+    "blocks": true, "waterBlocks": true,
+    "desc": "Hoher Wall, der Wasser aufstaut und Energie erzeugt. Zerstörung setzt eine Flutwelle frei."
+  },
+  "earth_pile": {
+    "label": "Erdhügel", "role": "terrain",
+    "hp": 180, "cost": { "ore": 0 }, "buildTime": 0,
+    "power": 0, "size": 1, "sight": 1,
+    "desc": "Blockierender Erdhaufen aus Aushub. LKWs können die Erde ins Baumateriallager fahren."
+  },
+  "ore_pile": {
+    "label": "Erzhaufen", "role": "terrain",
+    "hp": 180, "cost": { "ore": 0 }, "buildTime": 0,
+    "power": 0, "size": 1, "sight": 1,
+    "desc": "Blockierender Erzhaufen am Abbauort. LKWs und Erz-LKWs fahren ihn ins Erzlager."
+  }
+}

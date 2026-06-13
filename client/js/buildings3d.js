@@ -1,0 +1,415 @@
+// Detaillierte prozedurale 3D-Gebäude (CC0/eigenerstellt): jedes Gebäude ein zusammengesetztes
+// Mesh statt eines anonymen Blocks. Materialien kommen vom Renderer (geteilt je Teamfarbe);
+// `win` ist das global geteilte Fenster-Material (emissiv bei Nacht — EIN Material für alle,
+// damit der Tag/Nacht-Wechsel nur eine einzige emissiveIntensity animiert).
+import * as THREE from 'three';
+
+const TILE = 2;
+
+// Hilfen: Box/Zylinder kurz, mit Schattenflags.
+function box(w, h, d, mat, x = 0, y = 0, z = 0, ry = 0) {
+  const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat);
+  m.position.set(x, y, z); m.rotation.y = ry;
+  m.castShadow = true; m.receiveShadow = true;
+  return m;
+}
+function cyl(rt, rb, h, mat, x = 0, y = 0, z = 0, seg = 12) {
+  const m = new THREE.Mesh(new THREE.CylinderGeometry(rt, rb, h, seg), mat);
+  m.position.set(x, y, z);
+  m.castShadow = true; m.receiveShadow = true;
+  return m;
+}
+// Fensterband (emissives geteiltes Material) an einer Wandfläche.
+function windows(g, mat, w, h, x, y, z, ry = 0) {
+  const m = new THREE.Mesh(new THREE.PlaneGeometry(w, h), mat);
+  m.position.set(x, y, z); m.rotation.y = ry;
+  g.add(m);
+}
+
+function addAnim(g, type, obj, opts = {}) {
+  (g.userData.anims || (g.userData.anims = [])).push({
+    type,
+    obj,
+    speed: opts.speed ?? 1,
+    amp: opts.amp ?? 1,
+    phase: opts.phase ?? 0,
+    baseX: obj.position.x,
+    baseY: obj.position.y,
+    baseZ: obj.position.z,
+    baseRX: obj.rotation.x,
+    baseRY: obj.rotation.y,
+    baseRZ: obj.rotation.z,
+    baseSX: obj.scale.x || 1,
+    baseSY: obj.scale.y || 1,
+    baseSZ: obj.scale.z || 1,
+  });
+  return obj;
+}
+
+function marker(g, list, x, y, z) {
+  const o = new THREE.Object3D();
+  o.position.set(x, y, z);
+  g.add(o);
+  (g.userData[list] || (g.userData[list] = [])).push(o);
+  return o;
+}
+
+function flameMaterial() {
+  return new THREE.MeshBasicMaterial({ color: 0xff8a24, transparent: true, opacity: 0.9, depthWrite: false });
+}
+
+// Liefert eine Group für `kind`. mats = { body, dark, metal, roof, win, glass, hazard, water, oil, ore, signal }.
+// userData.spin = optional rotierendes Teil (Radar/Sonar), userData.windows vorhanden implizit über win-Material.
+export function makeBuildingMesh(kind, size, mats) {
+  const g = new THREE.Group();
+  const s = size * TILE;            // Footprint in Weltmetern
+  const { body, dark, metal, roof, win, glass, hazard } = mats;
+  const water = mats.water || glass;
+  const oil = mats.oil || dark;
+  const ore = mats.ore || hazard;
+  const signal = mats.signal || hazard;
+
+  switch (kind) {
+    case 'hq': {
+      g.add(box(s * 0.9, 2.6, s * 0.7, body, 0, 1.3, 0));
+      g.add(box(s * 0.42, 4.6, s * 0.42, body, -s * 0.18, 2.3, -s * 0.1));   // Turm
+      g.add(box(s * 0.5, 0.5, s * 0.5, dark, -s * 0.18, 4.85, -s * 0.1));    // Turmkranz
+      const ant = cyl(0.04, 0.06, 3.2, metal, -s * 0.18, 6.6, -s * 0.1, 6); g.add(ant);
+      const radar = new THREE.Group(); radar.position.set(-s * 0.18, 7.95, -s * 0.1);
+      radar.add(box(0.9, 0.06, 0.08, signal, 0, 0, 0));
+      radar.add(cyl(0.07, 0.07, 0.12, metal, 0, 0, 0, 8));
+      g.add(radar); addAnim(g, 'spinY', radar, { speed: 1.6 });
+      g.add(box(s * 0.34, 1.2, s * 0.3, dark, s * 0.26, 0.6, s * 0.22));     // Eingang
+      windows(g, win, s * 0.7, 0.7, 0, 1.7, s * 0.7 / 2 + 0.02);
+      windows(g, win, s * 0.3, 2.6, -s * 0.18 + s * 0.215, 2.6, -s * 0.1, Math.PI / 2);
+      break;
+    }
+    case 'power_plant': {
+      g.add(box(s * 0.85, 1.6, s * 0.55, body, 0, 0.8, s * 0.16));           // Maschinenhalle
+      g.add(cyl(0.62, 0.95, 2.9, metal, -s * 0.24, 1.45, -s * 0.24, 14));    // Kühlturm 1
+      g.add(cyl(0.5, 0.78, 2.4, metal, s * 0.26, 1.2, -s * 0.26, 14));       // Kühlturm 2
+      g.add(cyl(0.12, 0.16, 3.4, dark, s * 0.05, 1.7, -s * 0.05, 8));        // Schornstein
+      marker(g, 'smokeStacks', s * 0.05, 3.55, -s * 0.05);
+      marker(g, 'smokeStacks', -s * 0.24, 2.95, -s * 0.24);
+      const fan = new THREE.Group(); fan.position.set(s * 0.28, 2.55, -s * 0.26);
+      fan.add(box(0.9, 0.06, 0.1, metal, 0, 0, 0));
+      fan.add(box(0.1, 0.06, 0.9, metal, 0, 0, 0));
+      g.add(fan); addAnim(g, 'spinY', fan, { speed: 2.4 });
+      g.add(box(0.5, 0.5, 1.6, dark, 0, 0.35, s * 0.42));                    // Rohrleitung zur Halle
+      windows(g, win, s * 0.7, 0.5, 0, 1.0, s * 0.16 + s * 0.55 / 2 + 0.02);
+      break;
+    }
+    case 'solar_plant': {
+      g.add(box(s * 0.3, 0.8, s * 0.3, body, -s * 0.32, 0.4, -s * 0.32));    // Wechselrichterhaus
+      for (let r = 0; r < 2; r++) for (let c = 0; c < 3; c++) {
+        const p = new THREE.Mesh(new THREE.BoxGeometry(1.1, 0.06, 0.9), glass);
+        p.position.set((c - 1) * 1.25, 0.55, r * 1.5 - 0.3);
+        p.rotation.x = -0.5;                                                  // zur Sonne geneigt
+        p.castShadow = true;
+        addAnim(g, 'swingX', p, { speed: 0.32, amp: 0.06, phase: c * 0.4 + r });
+        const post = cyl(0.05, 0.05, 0.5, metal, (c - 1) * 1.25, 0.25, r * 1.5 - 0.3, 6);
+        g.add(p, post);
+      }
+      break;
+    }
+    case 'water_pump': {
+      g.add(box(s * 0.5, 1.3, s * 0.5, body, -s * 0.18, 0.65, 0));           // Pumpenhaus
+      g.add(cyl(0.55, 0.55, 1.0, water, s * 0.26, 0.5, -s * 0.2, 14));       // blauer Wassertank
+      g.add(box(0.95, 0.12, 0.16, water, s * 0.26, 1.08, -s * 0.2));         // Tank-Markierung
+      const pipe1 = cyl(0.14, 0.14, 1.6, metal, s * 0.1, 0.25, s * 0.28, 8);
+      pipe1.rotation.z = Math.PI / 2; g.add(pipe1);                          // liegendes Rohr
+      g.add(cyl(0.14, 0.14, 0.9, metal, s * 0.26, 0.45, s * 0.28, 8));       // Steigrohr
+      const wheel = new THREE.Group(); wheel.position.set(s * 0.02, 0.85, s * 0.26);
+      const wh = cyl(0.34, 0.34, 0.08, metal, 0, 0, 0, 12); wh.rotation.x = Math.PI / 2; wheel.add(wh);
+      wheel.add(box(0.7, 0.05, 0.06, water, 0, 0, 0));
+      wheel.add(box(0.06, 0.05, 0.7, water, 0, 0, 0));
+      g.add(wheel); addAnim(g, 'spinZ', wheel, { speed: 3.1 });
+      windows(g, win, 0.7, 0.4, -s * 0.18, 0.8, s * 0.25 + 0.02);
+      break;
+    }
+    case 'pipe': {
+      const p = cyl(0.22, 0.22, s * 0.98, metal, 0, 0.26, 0, 10);
+      p.rotation.z = Math.PI / 2; g.add(p);                                  // Hauptrohr (liegend)
+      const j1 = cyl(0.3, 0.3, 0.2, dark, -s * 0.35, 0.26, 0, 10); j1.rotation.z = Math.PI / 2;
+      const j2 = cyl(0.3, 0.3, 0.2, dark, s * 0.35, 0.26, 0, 10); j2.rotation.z = Math.PI / 2;
+      g.add(j1, j2);                                                          // Muffen
+      g.add(box(0.5, 0.1, 0.5, dark, 0, 0.05, 0));                            // Fundament
+      break;
+    }
+    case 'road': {
+      g.add(box(s * 1.02, 0.12, s * 1.02, dark, 0, 0.06, 0));               // Fahrbahnplatte
+      g.add(box(s * 0.5, 0.13, 0.1, hazard, 0, 0.065, 0));                  // Mittelstreifen
+      break;
+    }
+    case 'bridge': {
+      g.add(box(s * 1.02, 0.25, s * 0.8, dark, 0, 0.5, 0));                  // Fahrbahn
+      g.add(box(s * 1.02, 0.18, 0.12, metal, 0, 0.75, s * 0.36));            // Geländer
+      g.add(box(s * 1.02, 0.18, 0.12, metal, 0, 0.75, -s * 0.36));
+      g.add(cyl(0.16, 0.2, 1.4, dark, -s * 0.32, -0.2, 0, 8));               // Pfeiler (reichen ins Wasser)
+      g.add(cyl(0.16, 0.2, 1.4, dark, s * 0.32, -0.2, 0, 8));
+      break;
+    }
+    case 'tunnel': {
+      g.add(box(0.5, 1.9, s * 0.95, dark, -s * 0.38, 0.95, 0));              // Portalwangen
+      g.add(box(0.5, 1.9, s * 0.95, dark, s * 0.38, 0.95, 0));
+      g.add(box(s * 0.95, 0.5, s * 0.95, dark, 0, 2.1, 0));                  // Sturz
+      const hole = new THREE.Mesh(new THREE.PlaneGeometry(s * 0.55, 1.7),
+        new THREE.MeshBasicMaterial({ color: 0x000000 }));
+      hole.position.set(0, 0.9, s * 0.49); g.add(hole);                      // dunkle Röhre
+      const hole2 = hole.clone(); hole2.rotation.y = Math.PI; hole2.position.z = -s * 0.49; g.add(hole2);
+      g.add(box(s * 1.0, 0.2, s * 1.0, roof, 0, 2.45, 0));                   // Überdeckung
+      break;
+    }
+    case 'refinery': {
+      g.add(cyl(1.05, 1.05, 1.7, oil, -s * 0.22, 0.85, -s * 0.18, 16));      // dunkler Tank 1
+      g.add(cyl(0.8, 0.8, 1.3, metal, s * 0.05, 0.65, -s * 0.3, 16));        // Tank 2
+      g.add(cyl(0.28, 0.34, 4.2, body, s * 0.3, 2.1, s * 0.05, 10));         // Destillationskolonne
+      g.add(cyl(0.16, 0.2, 3.0, dark, s * 0.38, 1.5, -s * 0.2, 8));          // Fackelturm
+      const flare = cyl(0.0, 0.16, 0.55, flameMaterial(), s * 0.38, 3.2, -s * 0.2, 8); // sichtbare Fackel
+      g.add(flare); addAnim(g, 'flame', flare, { speed: 11, amp: 0.28, phase: 0.5 });
+      marker(g, 'smokeStacks', s * 0.38, 3.35, -s * 0.2);
+      g.add(box(s * 0.6, 1.1, s * 0.4, body, -s * 0.1, 0.55, s * 0.3));      // Annahmehalle
+      const pr = cyl(0.1, 0.1, s * 0.55, dark, 0, 1.5, -s * 0.05, 6);
+      pr.rotation.z = Math.PI / 2; g.add(pr);                                // Verbindungsrohr
+      windows(g, win, s * 0.45, 0.4, -s * 0.1, 0.75, s * 0.3 + s * 0.2 + 0.02);
+      break;
+    }
+    case 'ore_depot': {
+      g.add(box(s * 0.95, 0.18, s * 0.95, dark, 0, 0.09, 0));
+      for (let i = 0; i < 5; i++) {
+        const rock = new THREE.Mesh(new THREE.DodecahedronGeometry(0.42 + i * 0.03, 0), i % 2 ? ore : roof);
+        rock.position.set((i % 3 - 1) * 0.55, 0.35 + i * 0.07, (i > 2 ? 0.38 : -0.28));
+        rock.rotation.set(i * 0.4, i * 0.8, i * 0.2);
+        rock.castShadow = true; rock.receiveShadow = true; g.add(rock);
+      }
+      const belt = box(s * 0.75, 0.12, 0.22, ore, 0.05, 1.08, -s * 0.35, -0.12); // Förderband-Akzent
+      g.add(belt); addAnim(g, 'slideX', belt, { speed: 1.8, amp: 0.10 });
+      g.add(box(s * 0.32, 1.0, s * 0.22, body, -s * 0.3, 0.62, s * 0.28));
+      windows(g, win, s * 0.22, 0.3, -s * 0.3, 0.76, s * 0.28 + s * 0.11 + 0.02);
+      break;
+    }
+    case 'material_depot': {
+      g.add(box(s * 0.95, 0.16, s * 0.95, dark, 0, 0.08, 0));
+      for (let i = 0; i < 4; i++) {
+        const pile = cyl(0.95 - i * 0.12, 1.15 - i * 0.12, 0.45, roof, (i % 2 ? 0.45 : -0.35), 0.35 + i * 0.08, (i > 1 ? 0.34 : -0.28), 5);
+        pile.rotation.y = i * 0.8; g.add(pile);
+      }
+      const loader = box(1.0, 0.9, 0.75, hazard, s * 0.28, 0.55, -s * 0.25);
+      g.add(loader); addAnim(g, 'bobY', loader, { speed: 1.2, amp: 0.06 });
+      break;
+    }
+    case 'water_tower': {
+      g.add(box(s * 0.55, 0.7, s * 0.5, body, -s * 0.2, 0.35, s * 0.18));
+      for (const [dx, dz] of [[-0.45, -0.45], [0.45, -0.45], [-0.45, 0.45], [0.45, 0.45]]) {
+        g.add(cyl(0.06, 0.08, 2.4, metal, dx, 1.2, dz, 6));
+      }
+      g.add(cyl(0.86, 0.86, 1.15, water, 0, 2.55, 0, 18));
+      const level = box(1.5, 0.16, 0.18, glass, 0, 2.68, 0.88);
+      g.add(level); addAnim(g, 'pulse', level, { speed: 1.1, amp: 0.05 });
+      g.add(cyl(0.72, 0.88, 0.35, metal, 0, 3.28, 0, 18));
+      break;
+    }
+    case 'oil_depot': {
+      g.add(box(s * 0.95, 0.14, s * 0.95, dark, 0, 0.07, 0));
+      g.add(cyl(0.85, 0.85, 1.25, oil, -s * 0.22, 0.7, -s * 0.1, 18));
+      g.add(cyl(0.72, 0.72, 1.05, oil, s * 0.28, 0.6, s * 0.18, 18));
+      const h1 = box(1.25, 0.13, 0.16, hazard, -s * 0.22, 1.26, -s * 0.1);
+      const h2 = box(1.05, 0.13, 0.16, hazard, s * 0.28, 1.08, s * 0.18);
+      g.add(h1, h2); addAnim(g, 'pulse', h1, { speed: 1.8, amp: 0.08 }); addAnim(g, 'pulse', h2, { speed: 1.6, amp: 0.08, phase: 1.1 });
+      const pr = cyl(0.1, 0.1, s * 0.62, metal, 0, 0.34, s * 0.02, 8);
+      pr.rotation.z = Math.PI / 2; g.add(pr);
+      g.add(box(s * 0.24, 0.9, s * 0.22, body, -s * 0.36, 0.52, s * 0.32));
+      break;
+    }
+    case 'oil_derrick': {
+      // Bohrturm: vier zusammenlaufende Streben + Querriegel + Pumpenkopf.
+      const hgt = 4.2;
+      g.add(cyl(1.08, 1.16, 0.06, oil, 0, 0.03, 0, 18));                    // schwarzer Ölfleck unter dem Turm
+      for (const [dx, dz] of [[-1, -1], [1, -1], [-1, 1], [1, 1]]) {
+        const leg = box(0.14, hgt, 0.14, metal, dx * 0.8, hgt / 2, dz * 0.8);
+        leg.rotation.z = -dx * 0.18; leg.rotation.x = dz * 0.18;
+        g.add(leg);
+      }
+      g.add(box(0.9, 0.18, 0.9, metal, 0, hgt * 0.55, 0));
+      const beam = box(1.75, 0.14, 0.22, signal, -0.1, hgt * 0.7, 0.42, -0.35); // Pumpjack-Balken als Silhouette
+      g.add(beam); addAnim(g, 'swingZ', beam, { speed: 2.0, amp: 0.22 });
+      g.add(box(0.5, 0.4, 0.5, dark, 0, hgt + 0.1, 0));                       // Kopf
+      const flame = cyl(0.0, 0.2, 0.75, flameMaterial(), 0, hgt + 0.72, 0, 8);
+      g.add(flame); addAnim(g, 'flame', flame, { speed: 12, amp: 0.35 });
+      marker(g, 'smokeStacks', 0, hgt + 1.12, 0);
+      g.add(box(1.2, 0.7, 0.9, body, s * 0.3, 0.35, s * 0.3));               // Pumpenhaus
+      g.add(cyl(0.5, 0.5, 0.8, dark, -s * 0.3, 0.4, s * 0.3, 12));           // Öltank
+      break;
+    }
+    case 'barracks': {
+      g.add(box(s * 0.9, 1.3, s * 0.6, body, 0, 0.65, 0));                   // Baracke
+      const r = cyl(s * 0.46, s * 0.46, s * 0.9, roof, 0, 1.3, 0, 3);
+      r.rotation.z = Math.PI / 2; r.rotation.x = Math.PI;                     // Satteldach (3-seitiger Zylinder)
+      r.scale.set(1, 0.55, 0.72); g.add(r);
+      g.add(box(0.6, 1.0, 0.08, dark, 0, 0.5, s * 0.3 + 0.04));              // Tür
+      g.add(cyl(0.05, 0.05, 2.2, metal, s * 0.4, 1.1, -s * 0.24, 6));        // Fahnenmast
+      const flag = box(0.5, 0.3, 0.04, hazard, s * 0.4 + 0.26, 1.95, -s * 0.24); // Fahne
+      g.add(flag); addAnim(g, 'swingZ', flag, { speed: 3.0, amp: 0.16 });
+      windows(g, win, s * 0.7, 0.4, 0, 0.85, s * 0.3 + 0.03);
+      break;
+    }
+    case 'factory': {
+      g.add(box(s * 0.95, 1.9, s * 0.7, body, 0, 0.95, 0));                  // Halle
+      for (let i = 0; i < 3; i++) {                                          // Sheddach
+        const w = cyl(s * 0.16, s * 0.16, s * 0.66, roof, -s * 0.3 + i * s * 0.3, 2.05, 0, 3);
+        w.rotation.z = Math.PI / 2; w.rotation.x = Math.PI; w.scale.set(1, 0.8, 1);
+        g.add(w);
+      }
+      g.add(cyl(0.18, 0.24, 3.4, dark, -s * 0.36, 1.9, -s * 0.26, 8));       // Kamin
+      marker(g, 'smokeStacks', -s * 0.36, 3.72, -s * 0.26);
+      const vent = new THREE.Group(); vent.position.set(s * 0.3, 2.42, -s * 0.1);
+      vent.add(box(0.75, 0.05, 0.1, metal, 0, 0, 0));
+      vent.add(box(0.1, 0.05, 0.75, metal, 0, 0, 0));
+      g.add(vent); addAnim(g, 'spinY', vent, { speed: 2.8 });
+      g.add(box(s * 0.5, 1.5, 0.1, dark, 0, 0.75, s * 0.35 + 0.03));         // Tor
+      g.add(box(s * 0.56, 0.16, 0.12, hazard, 0, 1.55, s * 0.37 + 0.04));    // gelbe Hallenmarkierung
+      windows(g, win, s * 0.8, 0.5, 0, 1.5, s * 0.35 + 0.04);
+      break;
+    }
+    case 'airbase': {
+      g.add(box(s * 0.95, 0.08, s * 0.22, dark, s * 0.1, 0.04, s * 0.25));   // kurze Startbahn
+      g.add(box(s * 0.08, 0.1, s * 0.18, signal, s * 0.1, 0.1, s * 0.25));
+      const pad = cyl(s * 0.34, s * 0.34, 0.12, dark, s * 0.14, 0.06, s * 0.12, 20);
+      g.add(pad);                                                             // Landeplattform
+      g.add(cyl(s * 0.1, s * 0.1, 0.05, hazard, s * 0.14, 0.14, s * 0.12, 20)); // Markierung
+      g.add(box(s * 0.26, 3.4, s * 0.26, body, -s * 0.3, 1.7, -s * 0.28));   // Tower
+      g.add(box(s * 0.34, 0.7, s * 0.34, glass, -s * 0.3, 3.7, -s * 0.28));  // Kanzel
+      const radar = new THREE.Group(); radar.position.set(-s * 0.3, 4.2, -s * 0.28);
+      radar.add(box(1.1, 0.05, 0.08, signal, 0, 0, 0));
+      radar.add(cyl(0.05, 0.05, 0.25, metal, 0, -0.12, 0, 8));
+      g.add(radar); g.userData.spin = radar; g.userData.spinSpeed = 2.5;
+      const hangar = cyl(s * 0.22, s * 0.22, s * 0.5, roof, s * 0.18, 0, -s * 0.3, 12, true);
+      hangar.rotation.z = Math.PI / 2;                                        // Hangar (Halbtonne)
+      g.add(hangar);
+      g.add(box(1.55, 0.12, 0.55, metal, s * 0.2, 0.72, -s * 0.3));          // sichtbares Flugzeugprofil im Hangar
+      const windsock = box(0.34, 0.28, 0.18, signal, -s * 0.45, 1.7, s * 0.38); // Windsack
+      g.add(windsock); addAnim(g, 'swingZ', windsock, { speed: 2.6, amp: 0.18 });
+      windows(g, win, s * 0.2, 1.6, -s * 0.3 + s * 0.135, 1.9, -s * 0.28, Math.PI / 2);
+      break;
+    }
+    case 'shipyard': {
+      g.add(box(s * 0.95, 0.5, s * 0.6, dark, 0, 0.25, s * 0.16));           // Kai
+      g.add(box(s * 0.74, 0.08, s * 0.42, water, s * 0.05, 0.55, -s * 0.08)); // blaues Dockbecken
+      g.add(box(s * 0.42, 0.16, s * 0.12, metal, s * 0.05, 0.68, -s * 0.08)); // Schiffskiel auf Slip
+      g.add(box(s * 0.4, 1.2, s * 0.34, body, -s * 0.26, 1.1, s * 0.26));    // Werfthalle
+      // Portalkran
+      g.add(box(0.18, 3.2, 0.18, metal, -s * 0.3, 1.6, -s * 0.2));
+      g.add(box(0.18, 3.2, 0.18, metal, s * 0.3, 1.6, -s * 0.2));
+      g.add(box(s * 0.78, 0.22, 0.3, metal, 0, 3.2, -s * 0.2));
+      g.add(cyl(0.03, 0.03, 1.6, dark, s * 0.1, 2.4, -s * 0.2, 4));          // Kranseil
+      const load = box(0.4, 0.3, 0.4, hazard, s * 0.1, 1.5, -s * 0.2);       // Last
+      g.add(load); addAnim(g, 'bobY', load, { speed: 1.4, amp: 0.28 });
+      windows(g, win, s * 0.3, 0.4, -s * 0.26, 1.3, s * 0.26 + s * 0.17 + 0.02);
+      break;
+    }
+    case 'depot': {
+      g.add(box(s * 0.9, 0.18, s * 0.9, dark, 0, 0.09, 0));                  // Platte
+      g.add(box(0.9, 0.9, 0.9, body, -s * 0.2, 0.6, -s * 0.2));              // Kisten
+      g.add(box(0.7, 0.7, 0.7, metal, s * 0.22, 0.5, -s * 0.14));
+      const crate = box(0.8, 0.5, 0.6, hazard, -s * 0.05, 0.4, s * 0.22, 0.4);
+      g.add(crate); addAnim(g, 'pulse', crate, { speed: 1.35, amp: 0.04 });
+      g.add(box(0.6, 0.6, 0.6, body, s * 0.26, 0.45, s * 0.22, 0.2));
+      g.add(box(s * 0.34, 1.0, s * 0.28, body, -s * 0.28, 0.68, s * 0.28));  // Bürocontainer
+      windows(g, win, s * 0.26, 0.3, -s * 0.28, 0.8, s * 0.28 + s * 0.14 + 0.02);
+      break;
+    }
+    case 'mg_turret': {
+      g.add(cyl(0.72, 0.92, 0.56, dark, 0, 0.28, 0, 12));
+      g.add(cyl(0.72, 0.72, 0.08, signal, 0, 0.61, 0, 18));
+      const head = new THREE.Group(); head.position.y = 0.92;
+      head.add(box(0.78, 0.34, 0.62, body, 0, 0, 0));
+      for (const sx of [-0.13, 0.13]) {
+        const gun = cyl(0.035, 0.045, 1.05, metal, sx, 0.08, 0.56, 7);
+        gun.rotation.x = Math.PI / 2; head.add(gun);
+      }
+      g.add(head); addAnim(g, 'swingY', head, { speed: 0.9, amp: 0.45 });
+      break;
+    }
+    case 'turret': {
+      g.add(cyl(0.85, 1.0, 0.7, dark, 0, 0.35, 0, 12));                      // Sockel
+      g.add(cyl(0.98, 0.98, 0.08, signal, 0, 0.74, 0, 18));                  // rote Verteidigungsmarkierung
+      g.add(cyl(0.6, 0.7, 0.5, body, 0, 0.95, 0, 12));                       // Drehkranz
+      const head = new THREE.Group();
+      const dome = new THREE.Mesh(new THREE.SphereGeometry(0.55, 12, 8, 0, Math.PI * 2, 0, Math.PI / 2), body);
+      dome.position.y = 1.2; dome.castShadow = true; head.add(dome);
+      const barrel = cyl(0.08, 0.1, 1.6, metal, 0, 1.35, 0.8, 8);
+      barrel.rotation.x = Math.PI / 2 - 0.12; head.add(barrel);               // Rohr
+      g.add(head); addAnim(g, 'swingY', head, { speed: 0.7, amp: 0.55 });
+      break;
+    }
+    case 'flak_turret': {
+      g.add(cyl(0.82, 0.98, 0.62, dark, 0, 0.31, 0, 12));
+      g.add(cyl(0.88, 0.88, 0.08, signal, 0, 0.68, 0, 18));
+      const head = new THREE.Group(); head.position.y = 1.0;
+      head.add(cyl(0.34, 0.42, 0.28, body, 0, 0, 0, 10));
+      for (const sx of [-0.22, 0.22]) for (const sy of [-0.08, 0.12]) {
+        const gun = cyl(0.045, 0.06, 1.25, metal, sx, sy, 0.55, 7);
+        gun.rotation.x = Math.PI / 2 - 0.42; head.add(gun);
+      }
+      g.add(head); addAnim(g, 'swingY', head, { speed: 1.0, amp: 0.5 });
+      break;
+    }
+    case 'sam_site': {
+      g.add(cyl(0.9, 1.0, 0.5, dark, 0, 0.25, 0, 12));
+      const rack = new THREE.Group(); rack.position.y = 0.8; rack.rotation.x = -0.7;
+      for (const [dx, dy] of [[-0.22, 0.12], [0.22, 0.12], [-0.22, -0.14], [0.22, -0.14]]) {
+        const tube = cyl(0.11, 0.11, 1.4, metal, dx, 0, dy, 8);
+        tube.rotation.x = Math.PI / 2; rack.add(tube);
+        const tip = cyl(0.0, 0.1, 0.25, hazard, dx, 0.8, dy, 8);
+        tip.rotation.x = Math.PI / 2; rack.add(tip);
+      }
+      g.add(rack); addAnim(g, 'swingX', rack, { speed: 0.75, amp: 0.18 });
+      g.add(box(0.5, 0.5, 0.5, body, 0.7, 0.45, -0.5));                      // Leitkabine
+      break;
+    }
+    case 'sonar': {
+      g.add(box(1.1, 0.7, 1.1, body, 0, 0.35, 0));
+      const mast = cyl(0.07, 0.09, 1.8, metal, 0, 1.5, 0, 8); g.add(mast);
+      const dish = new THREE.Group(); dish.position.y = 2.5;
+      const d = new THREE.Mesh(new THREE.SphereGeometry(0.6, 12, 8, 0, Math.PI * 2, 0, Math.PI / 3), metal);
+      d.rotation.x = Math.PI / 2.6; d.castShadow = true;
+      dish.add(d);
+      g.add(dish);
+      g.userData.spin = dish; g.userData.spinSpeed = 1.2;                     // rotiert im render()
+      break;
+    }
+    case 'dam': {
+      g.add(box(s * 0.98, 2.8, s * 0.55, dark, 0, 1.4, 0));                  // Mauer
+      g.add(box(s * 0.98, 0.3, s * 0.7, metal, 0, 2.85, 0));                 // Krone
+      g.add(box(s * 0.3, 1.0, s * 0.3, body, s * 0.28, 3.4, 0));             // Schalthaus
+      for (let i = 0; i < 3; i++) {
+        const outlet = cyl(0.14, 0.14, 0.5, metal, -s * 0.3 + i * s * 0.3, 0.5, s * 0.3, 8);
+        g.add(outlet); addAnim(g, 'spinZ', outlet, { speed: 1.7 + i * 0.25 });
+      } // Ausläufe
+      windows(g, win, s * 0.22, 0.4, s * 0.28, 3.5, s * 0.15 + 0.02);
+      break;
+    }
+    case 'levee': {
+      const wedge = cyl(s * 0.5, s * 0.5, s * 0.96, roof, 0, 0, 0, 3);
+      wedge.rotation.z = Math.PI / 2; wedge.rotation.x = Math.PI;
+      wedge.scale.set(1, 0.62, 0.85); wedge.position.y = 0.62;
+      wedge.castShadow = true; wedge.receiveShadow = true;
+      g.add(wedge);                                                           // Erdwall-Keil
+      break;
+    }
+    case 'wall': {
+      g.add(box(s * 0.96, 1.25, s * 0.5, dark, 0, 0.62, 0));
+      for (let i = 0; i < 3; i++) g.add(box(s * 0.2, 0.3, s * 0.52, dark, -s * 0.33 + i * s * 0.33, 1.4, 0)); // Zinnen
+      break;
+    }
+    case 'trench': {
+      g.add(box(s * 0.96, 0.25, s * 0.96, dark, 0, -0.05, 0));               // Grabenrand
+      g.add(box(s * 0.96, 0.35, 0.18, roof, 0, 0.15, s * 0.4));              // Sandsäcke
+      g.add(box(s * 0.96, 0.35, 0.18, roof, 0, 0.15, -s * 0.4));
+      break;
+    }
+    default:
+      return null; // unbekannt → generischer Kasten im Renderer
+  }
+  return g;
+}
