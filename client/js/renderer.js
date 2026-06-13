@@ -18,15 +18,23 @@ const PARTICLE_ZOOM_HIDE_DIST = 260;
 const PRECIP_MAX_DIST = 520;
 const WEATHER_SNOW_LINE = 0.82;
 const SUB_DETECT_RANGE = 5;
-const TERRA_PREVIEW_DELTA = 0.08;
+const TERRA_PREVIEW_DELTA = 0.12;
 const TERRA_PREVIEW_MIN_HEIGHT = 0.02;
 const TERRA_PREVIEW_MAX_HEIGHT = 1.68;
+const CLIENT_NAVIGABLE_DEPTH = 0.12;
+const WATER_SHOW_DEPTH = 0.05;
+const WATER_HIDE_DEPTH = 0.032;
+const FLOOD_RUNOFF_DEPTH = 0.028;
+const FLOOD_SURFACE_DEPTH = CLIENT_NAVIGABLE_DEPTH;
+const WET_GROUND_MIN_DEPTH = 0.018;
 
 // Tag/Nacht-Farbpaletten für Himmel & Nebel (werden nach Tageslicht überblendet).
 const SKY_DAY = new THREE.Color(0x9ec8e8), SKY_NIGHT = new THREE.Color(0x070b14);
 const SKY_RAIN = new THREE.Color(0x5d6b78);
 const SKY_DROUGHT = new THREE.Color(0xd2b77a);
 const WATER_KINDS = new Set(['patrol_boat', 'destroyer', 'amphib_transport', 'sea_builder', 'submarine', 'underwater_drone']);
+// Bauten, die ans Pipeline-Netz andocken (für die optische Rohrverbindung).
+const PIPE_CONNECT = new Set(['pipe', 'water_pump', 'water_tower', 'oil_derrick', 'oil_depot']);
 const INFANTRY_KINDS = new Set(['engineer', 'rifleman', 'at_soldier', 'aa_soldier']);
 const AIR_UNIT_KINDS = new Set(['recon_drone', 'gunship', 'bomber', 'transport_air']);
 const LAND_VEHICLE_KINDS = new Set(['scout', 'tank', 'artillery', 'flak_track', 'harvester', 'builder', 'truck', 'tractor']);
@@ -340,7 +348,7 @@ export class Renderer {
     this._fowEnemyMist.clear();
     for (const obj of [
       this.terrainMesh, this.fowMesh, this.waterMesh, this.skirtMesh, this.floodMesh,
-      this.trackMesh, this.mudMesh, this.roadMesh, this.bridgeInst, this.oilMesh, this.rockInst, this.grassInst,
+      this.wetGroundMesh, this.trackMesh, this.mudMesh, this.roadMesh, this.bridgeInst, this.oilMesh, this.rockInst, this.grassInst,
       ...(this.oreMeshes || []),
       ...Object.values(this.treeInst || {}),
       ...(this.wildlife || []).map(a => a.group),
@@ -348,6 +356,7 @@ export class Renderer {
       ...(this.birds || []).map(b => b.group),
     ]) remove(obj);
     this.terrainMesh = this.fowMesh = this.waterMesh = this.skirtMesh = this.floodMesh = null;
+    this.wetGroundMesh = null;
     this.trackMesh = this.mudMesh = this.roadMesh = this.bridgeInst = this.oilMesh = null;
     this.rockInst = this.grassInst = null;
     this.treeInst = null;
@@ -367,6 +376,7 @@ export class Renderer {
     this._lastEntities = [];
     this.height = null;
     this.terrainType = null;
+    this._permanentWater = null;
     this.mapW = 0;
     this.mapH = 0;
   }
@@ -439,6 +449,7 @@ export class Renderer {
     mesh.receiveShadow = true;
     this.scene.add(mesh);
     this.terrainMesh = mesh;
+    this.updateSnow(init.terrain.snow || []);
 
     const fowGeo = geo.clone();
     const fowPos = fowGeo.attributes.position;
@@ -449,35 +460,35 @@ export class Renderer {
     this.fowMesh.visible = this.fowEnabled;
     this.scene.add(this.fowMesh);
 
-    // Wasserfläche (Phase 18): TIEFEN-getriebenes Oberflächenmesh statt flacher Ebene.
-    // Jeder Vertex = eine Zelle: Y = Boden + Wassertiefe (Meer, Flüsse, HOCHSEEN, Fluten —
-    // alle Gewässer sind sichtbar, auch über dem Meeresspiegel). Trockene Zellen tauchen
-    // unter das Gelände (Tiefentest blendet sie aus). Wellengang im Vertex-Shader (aAmp je
-    // Vertex, skaliert mit Tiefe; Sturm verstärkt). depthWrite aus + renderOrder → kein Clipping.
+    // TIEFEN-getriebenes Oberflächenmesh: sichtbare Wasserzellen werden zu einer echten
+    // zusammenhängenden Quad-Fläche mit gemeinsamen Eckpunkten zusammengebaut.
     const waterY = waterLevel * HEIGHT_SCALE;
-    const wgeo = new THREE.PlaneGeometry(w * TILE, h * TILE, w - 1, h - 1);
-    wgeo.rotateX(-Math.PI / 2);
-    const wpos = wgeo.attributes.position;
-    wgeo.setAttribute('aAmp', new THREE.BufferAttribute(new Float32Array(wpos.count), 1));
-    wgeo.setAttribute('aWet', new THREE.BufferAttribute(new Float32Array(wpos.count), 1));
-    wgeo.setAttribute('aDepth', new THREE.BufferAttribute(new Float32Array(wpos.count), 1));
-    wgeo.setAttribute('aFlow', new THREE.BufferAttribute(new Float32Array(wpos.count * 2), 2));
+    const wgeo = this._makeEmptyWaterGeometry();
+    const cellCount = w * h;
     // Basistiefen vom Server (init.terrain.baseWater); Fallback: aus Seehöhe ableiten.
     this.waterBase = init.terrain.baseWater
       ? Float64Array.from(init.terrain.baseWater)
       : Float64Array.from(height, (hv) => Math.max(0, waterLevel - hv));
     this.waterDepth = Float64Array.from(this.waterBase);
-    this._waterOverrides = new Set();
-    this._waterPosAttr = wpos;
-    this._waterAmpAttr = wgeo.attributes.aAmp;
-    this._waterWetAttr = wgeo.attributes.aWet;
-    this._waterDepthAttr = wgeo.attributes.aDepth;
-    this._waterFlowAttr = wgeo.attributes.aFlow;
-    for (let i = 0; i < wpos.count; i++) {
-      wpos.setX(i, (i % w) * TILE);
-      wpos.setZ(i, ((i / w) | 0) * TILE);
-      this._refreshWaterVertex(i);
+    this._waterShown = new Uint8Array(cellCount); // Hysterese-Flag gegen Ufer-Flackern
+    this._floodShown = new Uint8Array(cellCount);
+    this._floodVisual = new Float32Array(cellCount);
+    this._floodGoal = new Float32Array(cellCount);
+    this._floodScratch = new Float32Array(cellCount);
+    this._permanentWater = new Uint8Array(cellCount);
+    for (let i = 0; i < cellCount; i++) if (type[i] === 3) this._permanentWater[i] = 1;
+    if (init.terrain.waterDepth) {
+      for (let n = 0; n < init.terrain.waterDepth.length; n += 2) {
+        const idx = init.terrain.waterDepth[n];
+        const depth = (init.terrain.waterDepth[n + 1] / 255) * 0.7;
+        if (idx < 0 || idx >= cellCount || depth <= 0.012) continue;
+        this._permanentWater[idx] = 1;
+        this.waterBase[idx] = Math.max(this.waterBase[idx] || 0, depth);
+        this.waterDepth[idx] = Math.max(this.waterDepth[idx] || 0, depth);
+      }
     }
+    this._waterOverrides = new Set();
+    this._setWaterGeometryRefs(wgeo);
     const wmat = makeWaterMaterial(this.tex.clouds);
     this.waterMat = wmat;
     const water = new THREE.Mesh(wgeo, wmat);
@@ -487,6 +498,7 @@ export class Renderer {
     this.waterMesh = water;
     this.seaLevel = waterLevel;
     this.seaY = waterY;
+    this._rebuildWaterMesh(true);
 
     // Umgebungs-„Skirt": riesige Ozeanfläche rund um die Karte, damit am Kartenrand kein
     // schwarzes Loch klafft. Deutlich unter der Seefläche — kein Z-Fighting in der Distanz.
@@ -499,16 +511,20 @@ export class Renderer {
     this.scene.add(skirt);
     this.skirtMesh = skirt;
 
-    // Altes Flachwasser-Overlay bleibt leer; Fluss/Flut rendert jetzt im großen Wasser-Mesh.
-    const floodGeo = new THREE.CircleGeometry(TILE * 0.46, 28); floodGeo.rotateX(-Math.PI / 2);
+    // Legacy-Overlay bleibt als leeres InstancedMesh erhalten; dynamische Fluten laufen über das
+    // kontinuierliche Wassermesh, damit sie aus der Distanz nicht als Blockraster erscheinen.
+    const floodGeo = new THREE.PlaneGeometry(TILE, TILE); floodGeo.rotateX(-Math.PI / 2);
     const floodMat = makeFloodWaterMaterial();
     this.floodWaterMat = floodMat;
-    this.floodMesh = new THREE.InstancedMesh(floodGeo, floodMat, 9000);
+    this._floodOverlayCap = Math.min(w * h, 12000);
+    this.floodMesh = new THREE.InstancedMesh(floodGeo, floodMat, this._floodOverlayCap);
     this.floodMesh.renderOrder = 5;
+    this.floodMesh.frustumCulled = false;
     this.floodMesh.count = 0;
     this.floodMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
     this.scene.add(this.floodMesh);
     this._floodDummy = new THREE.Object3D();
+    this._refreshFloodOverlay();
     this._up = new THREE.Vector3(0, 1, 0);
     this._normal = new THREE.Vector3();
     this._oilDummy = new THREE.Object3D();
@@ -523,6 +539,14 @@ export class Renderer {
     this.mudMesh = new THREE.InstancedMesh(mudGeo, new THREE.MeshLambertMaterial({ color: 0x3a2d20, transparent: true, opacity: 0.68, depthWrite: false }), 3000);
     this.mudMesh.renderOrder = 2; this.mudMesh.count = 0; this.mudMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
     this.scene.add(this.mudMesh);
+    const wetGeo = new THREE.CircleGeometry(TILE * 0.50, 14); wetGeo.rotateX(-Math.PI / 2);
+    this.wetGroundMesh = new THREE.InstancedMesh(wetGeo,
+      new THREE.MeshLambertMaterial({ color: 0x263326, transparent: true, opacity: 0.50, depthWrite: false }), 9000);
+    this.wetGroundMesh.renderOrder = 1;
+    this.wetGroundMesh.count = 0;
+    this.wetGroundMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    this.scene.add(this.wetGroundMesh);
+    this._refreshWetGroundOverlay();
 
     // Straßen-Overlay (automatisches Netz zwischen Gebäuden) — instanziert, dynamisch.
     const roadGeo = new THREE.PlaneGeometry(TILE * 1.04, TILE * 1.04); roadGeo.rotateX(-Math.PI / 2);
@@ -1015,50 +1039,362 @@ export class Renderer {
     return false;
   }
 
-  // Einen Wasser-Vertex aktualisieren: nur echte Wasserzellen liegen sichtbar über dem Terrain.
-  // Trockene Nachbarzellen bleiben darunter; das verhindert Kachel-Clipping beim Herauszoomen.
-  _refreshWaterVertex(i) {
-    const depth = this.waterDepth[i];
-    const renderDepth = this._renderWaterDepth(i, depth);
-    if (renderDepth > 0.012) {
-      this._waterPosAttr.setY(i, this._smoothedWaterSurface(i) * HEIGHT_SCALE - 0.045);
-      // Wellengang erst ab echter Tiefe; flache Ufer-/Flussbereiche bleiben geometrisch ruhig.
-      const inland = this.height[i] + renderDepth > (this.seaLevel ?? 0.28) + 0.02;
-      const waveDepth = Math.max(0, renderDepth - 0.09);
-      this._waterAmpAttr.array[i] = Math.min(0.34, waveDepth * HEIGHT_SCALE * 0.34) * (inland ? 0.16 : 1);
-      if (this._waterWetAttr) this._waterWetAttr.array[i] = Math.min(1, Math.max(0, (renderDepth - 0.008) / 0.07));
-      if (this._waterDepthAttr) this._waterDepthAttr.array[i] = Math.min(1, Math.max(0, (renderDepth - 0.012) / 0.22));
-      if (this._waterFlowAttr) {
-        const flow = this._waterFlowAt(i);
-        this._waterFlowAttr.array[i * 2] = flow.x;
-        this._waterFlowAttr.array[i * 2 + 1] = flow.z;
-      }
-    } else {
-      this._waterPosAttr.setY(i, this.height[i] * HEIGHT_SCALE - 0.45);
-      this._waterAmpAttr.array[i] = 0;
-      if (this._waterWetAttr) this._waterWetAttr.array[i] = 0;
-      if (this._waterDepthAttr) this._waterDepthAttr.array[i] = 0;
-      if (this._waterFlowAttr) {
-        this._waterFlowAttr.array[i * 2] = 0;
-        this._waterFlowAttr.array[i * 2 + 1] = 0;
+  _makeEmptyWaterGeometry() {
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.Float32BufferAttribute([], 3));
+    geo.setAttribute('aAmp', new THREE.Float32BufferAttribute([], 1));
+    geo.setAttribute('aWet', new THREE.Float32BufferAttribute([], 1));
+    geo.setAttribute('aDepth', new THREE.Float32BufferAttribute([], 1));
+    geo.setAttribute('aFlow', new THREE.Float32BufferAttribute([], 2));
+    geo.setAttribute('aSea', new THREE.Float32BufferAttribute([], 1));
+    geo.setIndex([]);
+    return geo;
+  }
+
+  _setWaterGeometryRefs(geo) {
+    this._waterPosAttr = geo.attributes.position || null;
+    this._waterAmpAttr = geo.attributes.aAmp || null;
+    this._waterWetAttr = geo.attributes.aWet || null;
+    this._waterDepthAttr = geo.attributes.aDepth || null;
+    this._waterFlowAttr = geo.attributes.aFlow || null;
+    this._waterSeaAttr = geo.attributes.aSea || null;
+  }
+
+  _writeWaterCellData(idx, renderDepth, surface, amp, wet, depthAttr, flowX, flowZ, sea) {
+    const terrainY = this.height[idx] * HEIGHT_SCALE;
+    const clear = 0.14;
+    const surf = Math.max(this._smoothedWaterSurface(idx) * HEIGHT_SCALE - 0.045, terrainY + clear);
+    const inland = this.height[idx] + renderDepth > (this.seaLevel ?? 0.28) + 0.02;
+    const waveDepth = Math.max(0, renderDepth - 0.09);
+    const headroom = Math.max(0, (surf - terrainY - 0.04) / 1.8);
+    const flow = this._waterFlowAt(idx);
+    const openSea = this.terrainType?.[idx] === 3 && this.height[idx] + renderDepth <= (this.seaLevel ?? 0.28) + 0.04;
+    surface[idx] = surf;
+    amp[idx] = Math.min(headroom, inland
+      ? Math.min(0.10, Math.max(0, renderDepth - 0.14) * HEIGHT_SCALE * 0.16)
+      : Math.min(0.28, waveDepth * HEIGHT_SCALE * 0.30));
+    wet[idx] = this._isPermanentWaterCell(idx) ? 1 : Math.max(0.36, Math.min(1, this._floodVisual?.[idx] || 0));
+    depthAttr[idx] = Math.min(1, Math.max(0, (renderDepth - 0.012) / 0.22));
+    flowX[idx] = flow.x;
+    flowZ[idx] = flow.z;
+    sea[idx] = openSea ? 1 : 0;
+  }
+
+  _rebuildWaterMesh() {
+    if (!this.waterMesh || !this.waterDepth || !this.height) return;
+    const w = this.mapW, h = this.mapH, n = w * h;
+    if (!w || !h) return;
+
+    const visible = new Uint8Array(n);
+    const surface = new Float32Array(n);
+    const amp = new Float32Array(n);
+    const wet = new Float32Array(n);
+    const depthAttr = new Float32Array(n);
+    const flowX = new Float32Array(n);
+    const flowZ = new Float32Array(n);
+    const sea = new Float32Array(n);
+
+    let visibleCount = 0;
+    for (let i = 0; i < n; i++) {
+      const renderDepth = this._renderWaterDepth(i, this.waterDepth[i] || 0);
+      if (renderDepth <= 0.012) continue;
+      visible[i] = 1;
+      visibleCount++;
+      this._writeWaterCellData(i, renderDepth, surface, amp, wet, depthAttr, flowX, flowZ, sea);
+    }
+
+    // Optische Schließung: schmale, einzelne Trockenlücken zwischen nassen Zellen werden als
+    // Wasserhaut überbrückt. Das ändert nicht die Simulation, verhindert aber das blau-schwarze
+    // Zellmuster an Flut- und Schneeschmelzfronten.
+    for (let pass = 0; pass < 2; pass++) {
+      const source = visible.slice();
+      const sourceAt = (x, y) => x >= 0 && y >= 0 && x < w && y < h && source[y * w + x];
+      for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+        const i = y * w + x;
+        if (visible[i]) continue;
+        const l = sourceAt(x - 1, y), r = sourceAt(x + 1, y);
+        const u = sourceAt(x, y - 1), d = sourceAt(x, y + 1);
+        const ul = sourceAt(x - 1, y - 1), ur = sourceAt(x + 1, y - 1);
+        const dl = sourceAt(x - 1, y + 1), dr = sourceAt(x + 1, y + 1);
+        const n4 = (l ? 1 : 0) + (r ? 1 : 0) + (u ? 1 : 0) + (d ? 1 : 0);
+        const n8 = n4 + (ul ? 1 : 0) + (ur ? 1 : 0) + (dl ? 1 : 0) + (dr ? 1 : 0);
+        const bridged = (l && r) || (u && d) || (ul && dr) || (ur && dl);
+        if (!(bridged || n4 >= 3 || n8 >= (pass === 0 ? 5 : 6))) continue;
+
+        let count = 0, surfSum = 0, ampSum = 0, flowSumX = 0, flowSumZ = 0, maxWet = 0, maxDepth = 0, maxSea = 0;
+        for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+          if (!dx && !dy) continue;
+          const nx = x + dx, ny = y + dy;
+          if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
+          const j = ny * w + nx;
+          if (!source[j]) continue;
+          count++;
+          surfSum += surface[j];
+          ampSum += amp[j];
+          flowSumX += flowX[j];
+          flowSumZ += flowZ[j];
+          maxWet = Math.max(maxWet, wet[j]);
+          maxDepth = Math.max(maxDepth, depthAttr[j]);
+          maxSea = Math.max(maxSea, sea[j]);
+        }
+        if (!count) continue;
+        const avgSurf = surfSum / count;
+        if (this.height[i] * HEIGHT_SCALE > avgSurf + 0.35) continue;
+        visible[i] = 1;
+        visibleCount++;
+        surface[i] = Math.max(avgSurf, this.height[i] * HEIGHT_SCALE + 0.08);
+        amp[i] = (ampSum / count) * 0.65;
+        wet[i] = Math.max(0.36, maxWet);
+        depthAttr[i] = Math.max(0.18, maxDepth * 0.82);
+        flowX[i] = flowSumX / count;
+        flowZ[i] = flowSumZ / count;
+        sea[i] = maxSea;
       }
     }
+
+    if (!visibleCount) {
+      const old = this.waterMesh.geometry;
+      const geo = this._makeEmptyWaterGeometry();
+      this.waterMesh.geometry = geo;
+      if (old && old !== geo) old.dispose();
+      this._setWaterGeometryRefs(geo);
+      return;
+    }
+
+    const positions = [], amps = [], wets = [], depths = [], flows = [], seas = [], indices = [];
+    const corners = new Int32Array((w + 1) * (h + 1));
+    corners.fill(-1);
+    const ensureCorner = (cx, cy) => {
+      const key = cy * (w + 1) + cx;
+      const cached = corners[key];
+      if (cached >= 0) return cached;
+
+      let count = 0, surfSum = 0, ampSum = 0, flowSumX = 0, flowSumZ = 0, maxWet = 0, maxDepth = 0, maxSea = 0;
+      let waterTerrainMax = -Infinity;
+      for (let oy = -1; oy <= 0; oy++) for (let ox = -1; ox <= 0; ox++) {
+        const x = cx + ox, y = cy + oy;
+        if (x < 0 || y < 0 || x >= w || y >= h) continue;
+        const i = y * w + x;
+        if (!visible[i]) continue;
+        waterTerrainMax = Math.max(waterTerrainMax, this.height[i] * HEIGHT_SCALE + 0.08);
+        count++;
+        surfSum += surface[i];
+        ampSum += amp[i];
+        flowSumX += flowX[i];
+        flowSumZ += flowZ[i];
+        maxWet = Math.max(maxWet, wet[i]);
+        maxDepth = Math.max(maxDepth, depthAttr[i]);
+        maxSea = Math.max(maxSea, sea[i]);
+      }
+      const vx = positions.length / 3;
+      const wx = Math.max(0, Math.min((w - 1) * TILE, (cx - 0.5) * TILE));
+      const wz = Math.max(0, Math.min((h - 1) * TILE, (cy - 0.5) * TILE));
+      const y = Math.max(count ? surfSum / count : 0, Number.isFinite(waterTerrainMax) ? waterTerrainMax : 0);
+      positions.push(wx, y, wz);
+      amps.push(count ? ampSum / count : 0);
+      wets.push(count ? maxWet : 0);
+      depths.push(count ? maxDepth : 0);
+      flows.push(count ? flowSumX / count : 0, count ? flowSumZ / count : 0);
+      seas.push(count ? maxSea : 0);
+      corners[key] = vx;
+      return vx;
+    };
+
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+      const i = y * w + x;
+      if (!visible[i]) continue;
+      const a = ensureCorner(x, y);
+      const b = ensureCorner(x + 1, y);
+      const c = ensureCorner(x, y + 1);
+      const d = ensureCorner(x + 1, y + 1);
+      indices.push(a, c, b, b, c, d);
+    }
+
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+    geo.setAttribute('aAmp', new THREE.Float32BufferAttribute(amps, 1));
+    geo.setAttribute('aWet', new THREE.Float32BufferAttribute(wets, 1));
+    geo.setAttribute('aDepth', new THREE.Float32BufferAttribute(depths, 1));
+    geo.setAttribute('aFlow', new THREE.Float32BufferAttribute(flows, 2));
+    geo.setAttribute('aSea', new THREE.Float32BufferAttribute(seas, 1));
+    geo.setIndex(indices);
+    geo.computeBoundingSphere();
+    const old = this.waterMesh.geometry;
+    this.waterMesh.geometry = geo;
+    if (old && old !== geo) old.dispose();
+    this._setWaterGeometryRefs(geo);
   }
 
   _renderWaterDepth(idx, depth) {
-    if (depth <= 0.012) return 0;
+    if (depth <= 0.012) {
+      if (!this._isPermanentWaterCell(idx) && this._floodShown) this._floodShown[idx] = 0;
+      return 0;
+    }
+    if (!this._isPermanentWaterCell(idx)) {
+      if (this._waterShown) this._waterShown[idx] = 0;
+      return this._floodOverlayDepth(idx, depth);
+    }
+    // Hysterese gegen Ufer-Flackern: eine Zelle wird erst ab klarer Tiefe als Wasser gezeigt
+    // und erst weit darunter wieder versteckt. So toggelt eine Uferzelle, deren Sim-Tiefe um
+    // die Nässe-Schwelle pendelt, nicht jeden Snapshot zwischen Gras und Wasser.
+    const shown = this._waterShown;
+    // Binnenwasser erst ab echter Nässe zeigen (deutlich über WET_DEPTH≈0.035). Dünne
+    // Feuchtefilme/abklingende Rinnsale werden NICHT als Wasser gezeichnet — sonst entsteht
+    // das fleckige „Labyrinth" aus halbnassen Zellen über das ganze Gelände. Hysterese gegen Flackern.
     const sea = this.seaLevel ?? 0.28;
     const open = this.terrainType?.[idx] === 3 || this.height[idx] + depth <= sea + 0.03;
-    if (open || depth >= 0.055) return depth;
+    const stableInland = this._isPermanentWaterCell(idx) && this.terrainType?.[idx] !== 3;
+    const showDepth = stableInland ? 0.030 : WATER_SHOW_DEPTH;
+    const hideDepth = stableInland ? 0.020 : WATER_HIDE_DEPTH;
+    let vis;
+    if (open) vis = depth > 0.006;
+    else if (depth >= showDepth) vis = true;
+    else if (depth <= hideDepth) vis = false;
+    else vis = shown ? !!shown[idx] : depth > (stableInland ? 0.026 : 0.04); // im Hysterese-Band: Zustand halten
+    if (vis && !open && depth < showDepth) {
+      // im Übergang nur halten, wenn genug klar nasse Nachbarn da sind (zusammenhängendes
+      // Gewässer statt verstreuter Einzel-Pixel)
+      const w = this.mapW, h = this.mapH, x = idx % w, y = (idx / w) | 0;
+      let wetN = 0;
+      for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+        if (dx === 0 && dy === 0) continue;
+        const nx = x + dx, ny = y + dy;
+        if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
+        if ((this.waterDepth[ny * w + nx] || 0) > hideDepth) wetN++;
+      }
+      if (wetN < (stableInland ? 1 : 3)) vis = false;
+    }
+    if (shown) shown[idx] = vis ? 1 : 0;
+    return vis ? depth : 0;
+  }
+
+  _isPermanentWaterCell(idx) {
+    return !!(this._permanentWater?.[idx] || this.terrainType?.[idx] === 3);
+  }
+
+  _visibleWaterDepth(idx) {
+    const depth = this.waterDepth?.[idx] || 0;
+    if (depth <= 0.012) return 0;
+    if (this._isPermanentWaterCell(idx)) return depth;
+    return this._floodOverlayDepth(idx, depth);
+  }
+
+  _floodOverlayDepth(idx, depth) {
+    if (!this._floodVisual || this._isPermanentWaterCell(idx)) return 0;
+    const wet = this._floodVisual[idx] || 0;
+    return wet > 0.42 && depth >= FLOOD_SURFACE_DEPTH ? Math.max(depth, FLOOD_SURFACE_DEPTH) : 0;
+  }
+
+  _floodSourceStrength(idx, depth) {
+    if (!this.height || this._isPermanentWaterCell(idx) || depth <= FLOOD_RUNOFF_DEPTH) return 0;
     const w = this.mapW, h = this.mapH, x = idx % w, y = (idx / w) | 0;
-    let wetNeighbors = 0;
-    for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
-      if (dx === 0 && dy === 0) continue;
+    let wetNear = 0, wetWide = 0, nearPermanent = false;
+    let maxDownhill = 0, maxUphill = 0;
+    const s0 = this.height[idx] + depth;
+    for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) {
+      if (!dx && !dy) continue;
       const nx = x + dx, ny = y + dy;
       if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
-      if ((this.waterDepth[ny * w + nx] || 0) > 0.012) wetNeighbors++;
+      const j = ny * w + nx;
+      const d = this.waterDepth[j] || 0;
+      if (d > WATER_HIDE_DEPTH) {
+        wetWide++;
+        if (Math.abs(dx) <= 1 && Math.abs(dy) <= 1) wetNear++;
+      }
+      if (this._isPermanentWaterCell(j) && d > 0.012) nearPermanent = true;
+      if (Math.abs(dx) <= 1 && Math.abs(dy) <= 1) {
+        const dist = dx && dy ? Math.SQRT2 : 1;
+        const grad = (s0 - (this.height[j] + d)) / dist;
+        maxDownhill = Math.max(maxDownhill, grad);
+        maxUphill = Math.max(maxUphill, -grad);
+      }
     }
-    return wetNeighbors >= 2 ? depth : 0;
+    const slope = this._slopeAt(idx);
+    const basin = slope <= 0.035 && wetWide >= 13 && wetNear >= 4;
+    const overflow = nearPermanent && slope <= 0.065 && wetWide >= 9 && wetNear >= 3;
+    const deepPool = slope <= 0.05 && depth >= 0.22 && wetWide >= 7;
+    const runoff = depth >= FLOOD_RUNOFF_DEPTH
+      && wetNear >= 1
+      && (nearPermanent || maxDownhill > 0.008 || maxUphill > 0.014)
+      && (slope > 0.018 || maxDownhill > 0.012);
+    if (!basin && !overflow && !deepPool && !runoff) return 0;
+    const strength = basin || overflow || deepPool
+      ? (depth - 0.055) / 0.18
+      : (depth - FLOOD_RUNOFF_DEPTH) / 0.12 + Math.min(0.35, maxDownhill * 14);
+    return Math.max(0, Math.min(1, strength));
+  }
+
+  _refreshFloodVisualMask(force = false) {
+    if (!this.waterDepth || !this._floodVisual || !this._floodGoal || !this._floodScratch) return false;
+    const n = this.waterDepth.length, w = this.mapW, h = this.mapH;
+    const goal = this._floodGoal, scratch = this._floodScratch, visual = this._floodVisual;
+    for (let i = 0; i < n; i++) goal[i] = this._floodSourceStrength(i, this.waterDepth[i] || 0);
+
+    // Spatial closing: fills narrow gaps and turns isolated sim cells into coherent flood fronts.
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+      const i = y * w + x;
+      if (this._isPermanentWaterCell(i)) { scratch[i] = 0; continue; }
+      let sum = goal[i] * 2.0, count = 2.0, maxN = goal[i];
+      for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+        if (!dx && !dy) continue;
+        const nx = x + dx, ny = y + dy;
+        if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
+        const g = goal[ny * w + nx] || 0;
+        sum += g; count++;
+        if (g > maxN) maxN = g;
+      }
+      const avg = sum / count;
+      scratch[i] = maxN > 0.35 && avg > 0.14 ? Math.max(goal[i], avg * 0.92) : goal[i] * 0.72;
+    }
+
+    let changed = false;
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+      const i = y * w + x;
+      let target = scratch[i] || 0;
+      let maxFront = 0, nearPermanent = false;
+      for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+        if (!dx && !dy) continue;
+        const nx = x + dx, ny = y + dy;
+        if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
+        const j = ny * w + nx;
+        maxFront = Math.max(maxFront, visual[j] || 0);
+        if (this._isPermanentWaterCell(j)) nearPermanent = true;
+      }
+      // New water advances from existing water/fronts; strong pooled basins may seed themselves.
+      if (target > visual[i] && !nearPermanent && maxFront < 0.08 && target < 0.82) target = Math.min(target, visual[i] + 0.08);
+      const rate = target > visual[i] ? (nearPermanent || maxFront > 0.18 ? 0.34 : 0.18) : 0.22;
+      const next = force ? target : visual[i] + (target - visual[i]) * rate;
+      if (Math.abs(next - visual[i]) > 0.01) changed = true;
+      visual[i] = next < 0.018 ? 0 : next;
+      if (this._floodShown) this._floodShown[i] = visual[i] > 0.08 ? 1 : 0;
+    }
+    return changed || force;
+  }
+
+  _refreshWetGroundOverlay() {
+    if (!this.wetGroundMesh || !this.waterDepth || !this.height || !this._floodDummy) return;
+    const d = this._floodDummy, w = this.mapW;
+    const cap = this.wetGroundMesh.instanceMatrix.count || 9000;
+    let k = 0;
+    for (let i = 0; i < this.waterDepth.length && k < cap; i++) {
+      if (this._isPermanentWaterCell(i)) continue;
+      const depth = this.waterDepth[i] || 0;
+      if (depth <= WET_GROUND_MIN_DEPTH || this._floodOverlayDepth(i, depth) > 0) continue;
+      const visual = Math.max(this._floodVisual?.[i] || 0, Math.min(1, (depth - WET_GROUND_MIN_DEPTH) / (CLIENT_NAVIGABLE_DEPTH - WET_GROUND_MIN_DEPTH)));
+      if (visual <= 0.08) continue;
+      const gx = i % w, gy = (i / w) | 0;
+      d.position.set(gx * TILE, this.height[i] * HEIGHT_SCALE + 0.065, gy * TILE);
+      this._alignToTerrain(d, i);
+      d.rotation.y += hash01(gx, gy, 913) * Math.PI * 2;
+      const sx = 0.65 + visual * 0.55 + hash01(gx, gy, 917) * 0.18;
+      const sz = 0.60 + visual * 0.50 + hash01(gx, gy, 919) * 0.16;
+      d.scale.set(sx, 1, sz);
+      d.updateMatrix();
+      this.wetGroundMesh.setMatrixAt(k++, d.matrix);
+    }
+    d.scale.set(1, 1, 1);
+    this.wetGroundMesh.count = k;
+    this.wetGroundMesh.instanceMatrix.needsUpdate = true;
   }
 
   _waterFlowAt(idx) {
@@ -1090,33 +1426,35 @@ export class Renderer {
     return { x: (vx / mag) * strength, z: (vz / mag) * strength };
   }
 
+  // Wasseroberfläche über einen 5×5-Bereich glätten → ein Fluss/See wird zu einer durchgehenden,
+  // schräg verlaufenden Fläche statt einer Treppe aus Einzelzellen.
   _smoothedWaterSurface(idx) {
     const w = this.mapW, h = this.mapH, x = idx % w, y = (idx / w) | 0;
     let sum = 0, weight = 0;
-    for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+    for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) {
       const nx = x + dx, ny = y + dy;
       if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
       const j = ny * w + nx;
-      const d = this.waterDepth[j] || 0;
+      const d = this._visibleWaterDepth(j);
       if (d <= 0.012) continue;
-      const ww = dx === 0 && dy === 0 ? 1 : (dx !== 0 && dy !== 0 ? 0.28 : 0.48);
+      const ww = 1 / (1 + dx * dx + dy * dy);   // Gauß-artig: Zentrum stark, Rand schwach
       sum += (this.height[j] + d) * ww;
       weight += ww;
     }
     return weight > 0 ? sum / weight : this.height[idx] + (this.waterDepth[idx] || 0);
   }
 
-  _refreshWaterArea(idx) {
-    const w = this.mapW, h = this.mapH, x = idx % w, y = (idx / w) | 0;
-    for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
-      const nx = x + dx, ny = y + dy;
-      if (nx >= 0 && ny >= 0 && nx < w && ny < h) this._refreshWaterVertex(ny * w + nx);
+  _refreshFloodOverlay() {
+    if (!this.floodMesh || !this.waterDepth || !this.height || !this._floodDummy) return;
+    if (this.floodMesh.count !== 0) {
+      this.floodMesh.count = 0;
+      this.floodMesh.instanceMatrix.needsUpdate = true;
     }
+    this.floodMesh.visible = false;
   }
 
-  // Dynamisches Wasser aus dem Snapshot: Tiefen-Overrides ins Oberflächenmesh übernehmen
-  // (verschwundene Abweichungen fallen auf die Basistiefe zurück) + dünne Pfützen/Rinnsale
-  // weiterhin als hangschmiegende Flecken.
+  // Dynamisches Wasser aus dem Snapshot: dauerhafte Gewässer aktualisieren ihr Oberflächenmesh;
+  // temporäre Fluten werden nur als größere, flache Staubereiche ins Mesh übernommen.
   updateWater(delta) {
     if (!this.floodMesh || !this.height) return;
     // 1) Oberflächenmesh: aktuelle Tiefen = Basis + Snapshot-Abweichungen.
@@ -1127,26 +1465,20 @@ export class Renderer {
         const idx = delta[n], depth = (delta[n + 1] / 255) * 0.7;
         cur.add(idx);
         if (Math.abs(this.waterDepth[idx] - depth) > 1e-4) {
-          this.waterDepth[idx] = depth; this._refreshWaterArea(idx); changed = true;
+          this.waterDepth[idx] = depth; changed = true;
         }
       }
       for (const idx of this._waterOverrides) {
         if (cur.has(idx)) continue;
-        this.waterDepth[idx] = this.waterBase[idx]; this._refreshWaterArea(idx); changed = true;
+        this.waterDepth[idx] = this.waterBase[idx]; changed = true;
       }
       this._waterOverrides = cur;
-      if (changed) {
-        this._waterPosAttr.needsUpdate = true;
-        this._waterAmpAttr.needsUpdate = true;
-        if (this._waterWetAttr) this._waterWetAttr.needsUpdate = true;
-        if (this._waterDepthAttr) this._waterDepthAttr.needsUpdate = true;
-        if (this._waterFlowAttr) this._waterFlowAttr.needsUpdate = true;
+      const maskChanged = this._refreshFloodVisualMask(false);
+      if (changed || maskChanged) {
+        this._rebuildWaterMesh();
+        this._refreshWetGroundOverlay();
+        this._refreshFloodOverlay();
       }
-    }
-    // Flachwasser rendert im großen Wasser-Mesh; keine blauen Kreis-/Punkt-Overlays mehr.
-    if (this.floodMesh.count !== 0) {
-      this.floodMesh.count = 0;
-      this.floodMesh.instanceMatrix.needsUpdate = true;
     }
   }
 
@@ -1383,22 +1715,19 @@ export class Renderer {
       this.height[idx] = hh;                  // lokale Höhenkarte mitführen (Picking/heightAt/Wasser)
       pos.setY(idx, hh * HEIGHT_SCALE);
       if (fowPos) fowPos.setY(idx, hh * HEIGHT_SCALE + 0.32);
-      if (this.waterDepth) this._refreshWaterArea(idx);   // Wasseroberfläche folgt dem Boden
     }
     for (const idx of this._terraIdx) {
       if (cur.has(idx)) continue;
       this.height[idx] = this.height0[idx];
       pos.setY(idx, this.height0[idx] * HEIGHT_SCALE);
       if (fowPos) fowPos.setY(idx, this.height0[idx] * HEIGHT_SCALE + 0.32);
-      if (this.waterDepth) this._refreshWaterArea(idx);
     }
     this._terraIdx = cur;
     if (this.waterDepth) {
-      this._waterPosAttr.needsUpdate = true;
-      this._waterAmpAttr.needsUpdate = true;
-      if (this._waterWetAttr) this._waterWetAttr.needsUpdate = true;
-      if (this._waterDepthAttr) this._waterDepthAttr.needsUpdate = true;
-      if (this._waterFlowAttr) this._waterFlowAttr.needsUpdate = true;
+      this._refreshFloodVisualMask(true);
+      this._rebuildWaterMesh();
+      this._refreshWetGroundOverlay();
+      this._refreshFloodOverlay();
     }
     if (this.oilMesh) this._refreshOilOverlay();
     pos.needsUpdate = true;
@@ -1427,7 +1756,7 @@ export class Renderer {
     const tx = fx - x0, tz = fz - z0;
     const sample = (x, z) => {
       const idx = z * this.mapW + x;
-      return ((this.waterDepth[idx] || 0) > 0.012
+      return (this._visibleWaterDepth(idx) > 0.012
         ? this._smoothedWaterSurface(idx)
         : this.height[idx]) * HEIGHT_SCALE;
     };
@@ -1458,6 +1787,7 @@ export class Renderer {
     }
     const night = (env?.d ?? 1) < 0.25;
     this._fowNight = night;
+    this._fowWeatherFog = env?.w === 'fog' ? 1 : 0;
     const circles = [];
     for (const e of entities) {
       if (e.owner !== seat) continue;
@@ -1511,6 +1841,7 @@ export class Renderer {
     const u = this.fowMesh.material.uniforms;
     u.uCount.value = this._fowCircles.length;
     u.uNight.value = night ? 1 : 0;
+    if (u.uWeatherFog) u.uWeatherFog.value = this._fowWeatherFog || 0;
     for (let i = 0; i < u.uCircles.value.length; i++) {
       const c = this._fowCircles[i];
       u.uCircles.value[i].set(c?.x || 0, c?.y || 0, c?.r || 0);
@@ -1520,6 +1851,16 @@ export class Renderer {
   // --- Entities synchronisieren ---
   sync(entities, players, selected, seat = null, events = null) {
     this._lastEntities = entities;
+    // Pipeline-Netz: alle verbindbaren Bauten (Leitung + Endpunkte), damit Rohre als
+    // durchgehende Leitung mit Kurven/T-Stücken/Kreuzungen aufgebaut werden.
+    this._pipeAnchors = [];
+    for (const e of entities) {
+      if (e.etype !== 'building') continue;
+      if (PIPE_CONNECT.has(e.kind)) {
+        const tx = e.x / TILE - 0.5, ty = e.y / TILE - 0.5;
+        this._pipeAnchors.push({ id: e.id, owner: e.owner, kind: e.kind, x: e.x, z: e.y, tx, ty, size: e.size || 1 });
+      }
+    }
     const seen = new Set();
     const mistBuckets = new Map();
     const washouts = new Map();
@@ -1610,6 +1951,7 @@ export class Renderer {
       }
       const renderY = g.position.y - lift;
       if (e.etype === 'building') this._updateBuildingAmbientFx(g, e);
+      if (e.kind === 'pipe') this._orientPipe(g, e);
       if (e.etype === 'unit' && !e.abandoned && g.userData.vehicleLight) {
         const front = 1.15, side = 0.36;
         const fx = Math.cos(e.facing), fz = Math.sin(e.facing);
@@ -1960,6 +2302,93 @@ export class Renderer {
     this.spawnConstructionDust(x + Math.cos(a) * 0.8, z + Math.sin(a) * 0.8, false);
   }
 
+  // Rohr zur Leitungs-Nachbarschaft formen: statt ein einzelnes Modell zu drehen, entstehen
+  // Rohrarme in alle verbundenen Richtungen. So sind Kurven, T-Stücke, Kreuzungen und Anschlüsse
+  // an Pumpwerk/Wasserturm/Bohrturm/Depot als durchgehende Pipeline sichtbar.
+  _orientPipe(g, e) {
+    const body = g.userData.body;
+    if (!body || !this._pipeAnchors) return;
+    g.rotation.y = 0;
+    const links = this._pipeLinksFor(e);
+    const sig = links.length
+      ? links.map(l => `${l.dirX},${l.dirZ},${l.length.toFixed(2)},${l.targetKind}`).join('|')
+      : 'stub';
+    if (body.userData._pipeSig === sig) return;
+    this._rebuildPipeBody(body, links);
+    body.userData._pipeSig = sig;
+  }
+
+  _pipeLinksFor(e) {
+    const tx = e.x / TILE - 0.5, ty = e.y / TILE - 0.5;
+    const byDir = new Map();
+    for (const a of this._pipeAnchors || []) {
+      if (a.id === e.id || a.owner !== e.owner) continue;
+      const dx = a.x - e.x, dz = a.z - e.y;
+      const dist = Math.hypot(dx, dz);
+      if (dist < 0.05) continue;
+      const tileDist = Math.max(Math.abs(a.tx - tx), Math.abs(a.ty - ty));
+      const isPipe = a.kind === 'pipe';
+      const maxDist = isPipe ? 2.05 : 3.15;
+      if (tileDist > maxDist) continue;
+      const dir = this._pipeDirection(dx, dz);
+      if (!dir) continue;
+      const key = dir.x + ',' + dir.z;
+      const prev = byDir.get(key);
+      if (prev && prev.dist <= dist) continue;
+      byDir.set(key, { ...dir, dist, targetKind: a.kind, targetSize: a.size || 1 });
+    }
+    return [...byDir.values()].sort((a, b) => Math.atan2(a.z, a.x) - Math.atan2(b.z, b.x)).map(l => {
+      const toPipe = l.targetKind === 'pipe';
+      const edgeInset = toPipe ? 0 : Math.max(0.45, l.targetSize * TILE * 0.34);
+      return {
+        dirX: l.x,
+        dirZ: l.z,
+        targetKind: l.targetKind,
+        length: toPipe ? l.dist * 0.56 : Math.max(TILE * 0.58, l.dist - edgeInset),
+      };
+    });
+  }
+
+  _pipeDirection(dx, dz) {
+    const ax = Math.abs(dx), az = Math.abs(dz);
+    if (ax < 0.05 && az < 0.05) return null;
+    let x = Math.sign(dx), z = Math.sign(dz);
+    if (ax < az * 0.45) x = 0;
+    if (az < ax * 0.45) z = 0;
+    const len = Math.hypot(x, z);
+    return len ? { x: x / len, z: z / len } : null;
+  }
+
+  _rebuildPipeBody(body, links) {
+    for (const child of [...body.children]) {
+      child.traverse?.((o) => { if (o.isMesh) o.geometry?.dispose?.(); });
+      body.remove(child);
+    }
+    const metal = this.envMats.metal, dark = this.envMats.dark, signal = this.envMats.signal || this.envMats.hazard;
+    const y = 0.28;
+    const dirs = links.length ? links : [{ dirX: 1, dirZ: 0, length: TILE * 0.58, targetKind: 'stub' }];
+    for (const l of dirs) {
+      const len = Math.max(0.42, l.length);
+      const cx = l.dirX * len * 0.5, cz = l.dirZ * len * 0.5;
+      const pipe = cylMesh(0.18, 0.18, len, metal, cx, y, cz, 12);
+      pipe.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), new THREE.Vector3(l.dirX, 0, l.dirZ).normalize());
+      body.add(pipe);
+      const band = cylMesh(0.22, 0.22, 0.13, dark, l.dirX * Math.min(len, TILE * 0.72), y, l.dirZ * Math.min(len, TILE * 0.72), 12);
+      band.quaternion.copy(pipe.quaternion);
+      body.add(band);
+    }
+    const hub = cylMesh(0.28, 0.28, 0.24, dark, 0, y, 0, 14);
+    hub.rotation.x = Math.PI / 2;
+    body.add(hub);
+    body.add(boxMesh(0.42, 0.10, 0.42, dark, 0, 0.05, 0));
+    if (links.length <= 1) {
+      const capDir = links[0] || { dirX: 1, dirZ: 0, length: TILE * 0.58 };
+      const cap = cylMesh(0.21, 0.21, 0.10, signal, -capDir.dirX * 0.28, y, -capDir.dirZ * 0.28, 12);
+      cap.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), new THREE.Vector3(capDir.dirX ?? 1, 0, capDir.dirZ ?? 0).normalize());
+      body.add(cap);
+    }
+  }
+
   makeMesh(e, colorHex) {
     const g = new THREE.Group();
     g.userData.kind = e.kind;
@@ -2016,20 +2445,40 @@ export class Renderer {
         body = modelBody; g.userData.lift = this.models.liftFor(e.kind);
         if (e.kind === 'gunship') this._addHeliRotors(g, body);
       } else if (e.kind === 'rifleman' || e.kind === 'at_soldier' || e.kind === 'aa_soldier' || e.kind === 'engineer') {
-        // Low-Poly-Soldat (bewusst kantig, passend zum Spiel-Look): Torso, Kopf, Beine, Waffe.
+        // Low-Poly-Infanterie: gemeinsame Grundgröße, aber klare Silhouette je Rolle.
         body = new THREE.Group();
-        body.add(boxMesh(0.55, 0.7, 0.34, m, 0, 1.0, 0));                  // Torso
-        body.add(boxMesh(0.3, 0.28, 0.3, dark, 0, 1.52, 0));               // Kopf/Helm
-        body.add(boxMesh(0.16, 0.62, 0.2, dark, -0.14, 0.34, 0));          // Beine
-        body.add(boxMesh(0.16, 0.62, 0.2, dark, 0.14, 0.34, 0));
-        if (e.kind === 'at_soldier' || e.kind === 'aa_soldier') {
-          const tube = cylMesh(0.09, 0.09, 0.9, metal, 0.32, 1.45, -0.1, 6);
-          tube.rotation.x = Math.PI / 2; body.add(tube);                   // Raketenrohr auf der Schulter
-          if (e.kind === 'aa_soldier') body.add(boxMesh(0.18, 0.18, 0.26, this.envMats.signal, 0.32, 1.45, 0.38));
+        const heavyInf = e.kind === 'at_soldier' || e.kind === 'aa_soldier';
+        const torsoW = e.kind === 'engineer' ? 0.62 : heavyInf ? 0.60 : 0.50;
+        body.add(boxMesh(torsoW, 0.72, 0.36, m, 0, 1.0, 0));               // Torso
+        body.add(boxMesh(0.30, 0.28, 0.30, dark, 0, 1.52, 0));             // Kopf/Helm
+        body.add(boxMesh(0.15, 0.62, 0.20, dark, -0.14, 0.34, 0));         // Beine
+        body.add(boxMesh(0.15, 0.62, 0.20, dark, 0.14, 0.34, 0));
+        body.add(boxMesh(0.12, 0.52, 0.14, dark, -torsoW * 0.56, 0.98, 0));
+        body.add(boxMesh(0.12, 0.52, 0.14, dark, torsoW * 0.56, 0.98, 0));
+        if (e.kind === 'rifleman') {
+          body.add(boxMesh(0.08, 0.08, 1.05, metal, 0.31, 1.08, 0.34));     // langes Gewehr vorn
+          body.add(boxMesh(0.28, 0.08, 0.16, dark, 0.18, 1.13, -0.12));     // Schulterstütze
+          body.add(boxMesh(0.38, 0.08, 0.08, dark, 0, 1.70, -0.05));        // flacher Helmrand
+        } else if (e.kind === 'at_soldier') {
+          const tube = cylMesh(0.11, 0.11, 1.15, metal, 0.36, 1.48, 0.05, 8);
+          tube.rotation.x = Math.PI / 2; body.add(tube);                   // dickes Panzerabwehrrohr
+          body.add(boxMesh(0.30, 0.46, 0.18, dark, -0.34, 1.04, -0.18));    // Munitionsrucksack
+          body.add(boxMesh(0.18, 0.16, 0.20, this.envMats.hazard, 0.36, 1.48, 0.68));
+        } else if (e.kind === 'aa_soldier') {
+          const tubeA = cylMesh(0.075, 0.075, 1.0, metal, 0.30, 1.46, 0.02, 8);
+          const tubeB = cylMesh(0.075, 0.075, 1.0, metal, 0.48, 1.46, 0.02, 8);
+          tubeA.rotation.x = Math.PI / 2; tubeB.rotation.x = Math.PI / 2;
+          tubeA.rotation.z = -0.22; tubeB.rotation.z = -0.22;
+          body.add(tubeA); body.add(tubeB);                                 // Zwillings-Flugabwehrstarter
+          body.add(boxMesh(0.22, 0.22, 0.30, this.envMats.signal, 0.42, 1.50, 0.58));
+          const sensor = cylMesh(0.13, 0.13, 0.035, this.envMats.glass, -0.36, 1.62, 0.22, 14);
+          sensor.rotation.x = Math.PI / 2; body.add(sensor);                // kleiner Suchkopf/Sensor
         } else if (e.kind === 'engineer') {
           body.add(boxMesh(0.34, 0.12, 0.26, this.envMats.hazard, 0, 1.72, 0)); // Bauhelm
-        } else {
-          body.add(boxMesh(0.07, 0.07, 0.8, metal, 0.3, 1.05, 0.25));      // Gewehr
+          body.add(boxMesh(0.46, 0.54, 0.12, this.envMats.hazard, 0, 1.02, 0.20)); // Warnweste
+          body.add(boxMesh(0.24, 0.36, 0.16, dark, -0.38, 1.02, -0.12));    // Werkzeugtasche
+          const tool = cylMesh(0.035, 0.035, 0.82, metal, 0.38, 1.04, 0.12, 6);
+          tool.rotation.z = 0.72; body.add(tool);                           // Schaufel/Tool am Arm
         }
         g.userData.lift = 0;
         g.userData.walks = true;   // Geh-Animation (Bob + Lean) im sync()
@@ -3295,11 +3744,16 @@ export class Renderer {
       this.waterMat.uniforms.uDay.value = d;
       this.waterMat.uniforms.uStorm.value += (((env.w === 'storm' ? 1 : env.w === 'rain' ? 0.45 : 0) - this.waterMat.uniforms.uStorm.value) * Math.min(1, dt * 1.6));
       this.waterMat.uniforms.uFog.value += (((env.w === 'fog' ? 1 : 0) - this.waterMat.uniforms.uFog.value) * Math.min(1, dt * 1.4));
+      // Sonnenrichtung fürs Glitzern auf den Wellenkämmen (folgt der Tageslicht-Sonne).
+      if (this.sun) this.waterMat.uniforms.uSunDir.value.copy(this.sun.position).normalize();
     }
     if (this.floodWaterMat) {
       this.floodWaterMat.uniforms.uTime.value = this.time;
       this.floodWaterMat.uniforms.uDay.value = d;
       this.floodWaterMat.uniforms.uStorm.value += (((env.w === 'storm' ? 1 : env.w === 'rain' ? 0.45 : 0) - this.floodWaterMat.uniforms.uStorm.value) * Math.min(1, dt * 1.8));
+      const farFloodFade = this.camDist <= 150 ? 1 : Math.max(0, 1 - (this.camDist - 150) / 95);
+      if (this.floodMesh) this.floodMesh.visible = farFloodFade > 0.03;
+      this.floodWaterMat.uniforms.uZoomFade.value += (farFloodFade - this.floodWaterMat.uniforms.uZoomFade.value) * Math.min(1, dt * 4);
     }
     if (this.oreMats) {
       const oreVis = Math.max(0, Math.min(1, (d - 0.18) / 0.42));
@@ -3590,6 +4044,12 @@ function makeOrePileMesh(mat) {
 }
 
 function makeWaterMaterial(cloudTexture) {
+  // Stilisiertes, animiertes Wasser für Meer & Seen: zwei gekreuzte Wellenzüge heben die
+  // Oberfläche und liefern eine analytische Normale für Fresnel (Himmel am streifenden Blick),
+  // Sonnen-Glitzern auf den Wellenkämmen und sanfte Schaumkronen. Tiefenabhängige Farbe
+  // (flach türkis → tief marineblau). Amplitude kommt je Vertex aus aAmp (Meer voll, Seen sanft,
+  // flache Flüsse/Filme = 0 → ruhig). Der Look nimmt die Idee geschichteter, choppy Wellen auf,
+  // bleibt aber meshbasiert und nutzt die echten Flussvektoren statt Vollbild-Raymarching.
   return new THREE.ShaderMaterial({
     transparent: true,
     depthWrite: false,
@@ -3600,7 +4060,9 @@ function makeWaterMaterial(cloudTexture) {
       uTime: { value: 0 },
       uDay: { value: 1 },
       uStorm: { value: 0 },
+      uZoomFade: { value: 1 },
       uFog: { value: 0 },
+      uSunDir: { value: new THREE.Vector3(0.4, 0.8, 0.45).normalize() },
       uClouds: { value: cloudTexture },
     },
     vertexShader: `
@@ -3610,24 +4072,33 @@ function makeWaterMaterial(cloudTexture) {
       attribute float aWet;
       attribute float aDepth;
       attribute vec2 aFlow;
-      varying float vWave;
-      varying vec3 vWorld;
-      varying float vAmp;
+      attribute float aSea;
       varying float vWet;
       varying float vDepth;
       varying vec2 vFlow;
+      varying float vSea;
+      varying vec3 vWorld;
+      varying vec3 vWNormal;
+      varying float vCrest;
       void main() {
         vec3 p = position;
-        float w1 = sin(p.x * 0.055 + uTime * (0.42 + uStorm * 0.45));
-        float w2 = sin((p.x + p.z) * 0.040 - uTime * (0.55 + uStorm * 0.65));
-        vWave = (w1 + w2 * 0.72) / 1.72;
-        vAmp = aAmp;
+        float amp = aAmp * (1.0 + uStorm * 1.1);
+        float k1 = 0.115, k2 = 0.082;
+        float s1 = uTime * (0.85 + uStorm * 0.5);
+        float s2 = uTime * (1.25 + uStorm * 0.6);
+        float ph1 = p.x * k1 + p.z * 0.028 + s1;
+        float ph2 = p.z * k2 - p.x * 0.046 + s2;
+        float wave = sin(ph1) + 0.7 * sin(ph2);
+        p.y += amp * wave;
+        // analytische Normale aus den Wellen-Ableitungen
+        float dX = amp * (k1 * cos(ph1) - 0.046 * 0.7 * cos(ph2));
+        float dZ = amp * (0.028 * cos(ph1) + k2 * 0.7 * cos(ph2));
+        vWNormal = normalize(vec3(-dX, 1.0, -dZ));
+        vCrest = clamp(amp * wave * 1.4, 0.0, 1.0);
         vWet = aWet;
         vDepth = aDepth;
         vFlow = aFlow;
-        // Wellengang skaliert mit echter Tiefe; flaches Wasser bleibt ruhig.
-        float waveDepth = smoothstep(0.28, 0.72, aDepth);
-        p.y += vWave * aAmp * waveDepth * (1.0 + uStorm * 1.8);
+        vSea = aSea;
         vec4 wp = modelMatrix * vec4(p, 1.0);
         vWorld = wp.xyz;
         gl_Position = projectionMatrix * viewMatrix * wp;
@@ -3638,59 +4109,122 @@ function makeWaterMaterial(cloudTexture) {
       uniform float uDay;
       uniform float uStorm;
       uniform float uFog;
+      uniform vec3 uSunDir;
       uniform sampler2D uClouds;
-      varying float vWave;
-      varying vec3 vWorld;
-      varying float vAmp;
       varying float vWet;
       varying float vDepth;
       varying vec2 vFlow;
+      varying float vSea;
+      varying vec3 vWorld;
+      varying vec3 vWNormal;
+      varying float vCrest;
+
+      // Himmelsfarbverlauf entlang der reflektierten Blickrichtung (hell am Horizont, sattes
+      // Blau nach oben) — die Farbe, die das Wasser per Fresnel spiegelt.
+      vec3 skyColor(vec3 dir, float day) {
+        float up = clamp(dir.y, 0.0, 1.0);
+        vec3 horizon = mix(vec3(0.30, 0.40, 0.52), vec3(0.74, 0.86, 0.98), day);
+        vec3 zenith  = mix(vec3(0.10, 0.18, 0.34), vec3(0.30, 0.55, 0.86), day);
+        return mix(horizon, zenith, pow(up, 0.55));
+      }
+
+      // Feines, bewegtes Wellenrelief: Summe gescrollter Sinus-Oktaven (eigene Koeffizienten).
+      // Gibt den GRADIENTEN der Wellenhöhe zurück → daraus entsteht die Pixel-Normale.
+      vec2 rippleGrad(vec2 p, float t, float chop) {
+        vec2 g = vec2(0.0);
+        float amp = 1.0, freq = 0.35;
+        vec2 dir = normalize(vec2(0.8, 0.35));
+        for (int i = 0; i < 4; i++) {
+          float ph = dot(p, dir) * freq + t * (0.9 + freq);
+          float s = sin(ph) * 0.5 + 0.5;
+          // d/dp von pow(s,1+chop): betont „spitze" Wellenkämme statt reiner Sinuskurve
+          float dw = (1.0 + chop) * pow(s, chop) * 0.5 * cos(ph) * freq;
+          g += dir * dw * amp;
+          amp *= 0.45; freq *= 1.9;
+          dir = vec2(dir.x * 0.36 - dir.y * 0.93, dir.x * 0.93 + dir.y * 0.36); // Richtung rotieren
+        }
+        return g;
+      }
+
       void main() {
-        if (vWet <= 0.015) discard;
-        vec3 shallow = vec3(0.170, 0.610, 0.850);
-        vec3 mid = vec3(0.055, 0.345, 0.610);
-        vec3 deep = vec3(0.012, 0.090, 0.240);
-        vec3 storm = vec3(0.032, 0.120, 0.220);
-        float depthF = clamp(vDepth, 0.0, 1.0);   // flach = heller/klarer, tief = dunkler
+        if (vWet <= 0.02) discard;
+        float depthF = clamp(vDepth, 0.0, 1.0);
+
+        // Pixel-Normale: geometrische Welle + IMMER präsentes, zweistufiges Ripple-Relief.
+        // Auch bei ruhigem/flachem Wasser bricht das die Low-Poly-Facetten des Meshs auf, statt
+        // platte Dreiecke zu zeigen — der Hauptgrund, warum es vorher „flach/blöd" aussah.
+        vec2 g1 = rippleGrad(vWorld.xz, uTime * 0.55, 0.85 + uStorm * 0.35);
+        vec2 g2 = rippleGrad(vWorld.xz * 1.15 + 17.0, uTime * 0.70, 0.45);
+        float relief = mix(0.16, 0.36, vSea)
+          + smoothstep(0.16, 0.52, length(vFlow)) * (1.0 - vSea) * 0.10
+          + uStorm * 0.22;
+        vec2 gg = g1 * 0.30 + g2 * 0.08;
+        vec3 N = normalize(vWNormal + vec3(-gg.x, 0.0, -gg.y) * relief);
+        vec3 V = normalize(cameraPosition - vWorld);
+
+        // Tiefenfarbe: flach klar-türkis → tief sattes Meerblau (nicht schwarz, sonst „murky")
+        vec3 shallow = vec3(0.19, 0.67, 0.71);
+        vec3 deep    = vec3(0.03, 0.27, 0.46);
+        vec3 col = mix(shallow, deep, depthF);
+        col = mix(col, vec3(0.025, 0.20, 0.36), vSea * smoothstep(0.25, 1.0, depthF) * 0.45);
+
+        // Echte Strömungsrichtung aus der Simulation: keine Punktdecke, sondern langgezogene
+        // Schlieren und Stromschnellen entlang des Gefälles.
         float flowLen = length(vFlow);
-        vec2 dir = flowLen > 0.001 ? vFlow / flowLen : normalize(vec2(0.62, 0.34));
-        vec2 side = vec2(-dir.y, dir.x);
-        float along = dot(vWorld.xz, dir);
-        float cross = dot(vWorld.xz, side);
-        float river = smoothstep(0.075, 0.32, flowLen) * smoothstep(0.045, 0.20, vWet);
-        float lane = smoothstep(0.28, 0.82, 0.5 + 0.5 * sin(cross * 0.15 + along * 0.018));
-        float drift = 0.5 + 0.5 * sin(along * 0.075 - uTime * (0.36 + flowLen * 0.55 + uStorm * 0.25));
-        float flow = lane * drift * river;
-        float calmWave = smoothstep(0.28, 0.72, depthF);
-        float rapidMask = smoothstep(0.42, 0.88, flowLen) * smoothstep(0.04, 0.18, vWet);
-        float rapidLine = smoothstep(0.60, 0.96,
-          0.5 + 0.5 * sin(along * 0.32 - uTime * (1.7 + flowLen * 2.2) + sin(cross * 0.62) * 0.70));
-        float rapidBreak = smoothstep(0.58, 0.92,
-          0.5 + 0.5 * sin(cross * 0.95 + along * 0.08 - uTime * (0.9 + flowLen)));
-        float rapids = rapidMask * (rapidLine * 0.62 + rapidBreak * 0.26) * (1.0 - smoothstep(0.72, 1.0, depthF) * 0.35);
-        float rapidFoam = rapids * 0.62;
-        float flowMark = flow * 0.18 * (1.0 - smoothstep(0.62, 1.0, depthF));
-        float foam = smoothstep(0.86 - uStorm * 0.14, 0.99, vWave * calmWave + flow * 0.03)
-          * (0.05 + uStorm * 0.18) * calmWave * (1.0 - depthF * 0.35);
-        vec3 col = mix(shallow, mid, smoothstep(0.0, 0.52, depthF));
-        col = mix(col, deep, smoothstep(0.42, 1.0, depthF));
-        col = mix(col, storm, uStorm * 0.48);
-        col = mix(col, vec3(0.24, 0.66, 0.92), flowMark * (0.65 + uDay * 0.25));
-        col = mix(col, vec3(0.70, 0.90, 0.96), rapidFoam * (0.40 + uDay * 0.24));
-        col += foam * vec3(0.38, 0.50, 0.56);
-        vec2 cloudUvA = vWorld.xz * 0.0048 + vec2(uTime * 0.006, -uTime * 0.002);
-        vec2 cloudUvB = vWorld.xz * 0.0085 + vec2(-uTime * 0.003, uTime * 0.004);
-        float clouds = texture2D(uClouds, cloudUvA).r * 0.72 + texture2D(uClouds, cloudUvB).g * 0.28;
-        float reflection = smoothstep(0.40, 0.88, clouds) * (0.18 + uDay * 0.11) * (0.65 + depthF * 0.35);
-        reflection *= 1.0 - uStorm * 0.35;
-        col = mix(col, vec3(0.62, 0.82, 0.96), reflection);
-        // Ufersaum: ganz dezent aufhellen; dünnes Wasser wird transparent statt grell
-        col = mix(col, vec3(0.40, 0.72, 0.94), (1.0 - smoothstep(0.0, 0.05, vAmp)) * 0.12);
-        col *= mix(0.44, 1.0, uDay);
-        col = mix(col, vec3(0.18, 0.23, 0.25), uFog * 0.18);
-        float wetEdge = smoothstep(0.005, 0.08, vWet);
-        float surface = 0.83 + smoothstep(0.02, 0.16, vWet) * 0.06 + depthF * 0.06 + rapidFoam * 0.04 + uStorm * 0.03;
-        float alpha = clamp(surface * wetEdge, 0.0, 0.96);
+        vec2 flowDir = flowLen > 0.01 ? normalize(vFlow) : normalize(vec2(0.64, 0.31));
+        vec2 sideDir = vec2(-flowDir.y, flowDir.x);
+        float along = dot(vWorld.xz, flowDir);
+        float cross = dot(vWorld.xz, sideDir);
+        float riverMask = smoothstep(0.16, 0.50, flowLen) * (1.0 - vSea);
+        float sheet = smoothstep(0.32, 0.78,
+          0.5 + 0.5 * sin(along * 0.22 - uTime * (1.25 + flowLen * 2.1) + sin(cross * 0.45) * 0.35));
+        float streamLine = smoothstep(0.74, 0.98,
+          0.5 + 0.5 * sin(along * 0.58 - uTime * (2.8 + flowLen * 3.4) + sin(cross * 1.15) * 0.55));
+        float rapids = riverMask * smoothstep(0.78, 1.0, flowLen) * streamLine
+          * (1.0 - smoothstep(0.78, 1.0, depthF));
+        col = mix(col, vec3(0.25, 0.69, 0.88), riverMask * sheet * 0.08);
+        col = mix(col, vec3(0.82, 0.94, 0.98), rapids * 0.14);
+
+        // Sehr breite Meeresbänder: Bewegung der Oberfläche bleibt lesbar, ohne feines Rauschen.
+        float seaBand = smoothstep(0.40, 0.90,
+          0.5 + 0.5 * sin(vWorld.x * 0.055 + vWorld.z * 0.018 + uTime * (0.55 + uStorm * 0.35)));
+        col += vec3(0.035, 0.070, 0.085) * seaBand * vSea * (0.45 + uDay * 0.55);
+
+        // Fresnel-Himmelspiegelung (am streifenden Blick spiegelt das Wasser den Himmel)
+        vec3 R = reflect(-V, N);
+        float fres = 0.03 + 0.97 * pow(1.0 - max(dot(N, V), 0.0), 5.0);
+        vec3 sky = skyColor(R, uDay);
+        col = mix(col, sky, clamp(fres, 0.0, 0.85) * (0.40 + uDay * 0.6));
+        float clouds = texture2D(uClouds, vWorld.xz * 0.0045 + vec2(uTime * 0.004, -uTime * 0.002)).r;
+        float cloudRefl = smoothstep(0.52, 0.90, clouds) * (0.08 + uDay * 0.16) * (0.55 + vSea * 0.45);
+        cloudRefl *= 1.0 - uStorm * 0.45;
+        col = mix(col, vec3(0.62, 0.80, 0.94), cloudRefl);
+        // Konstanter Himmel-Ambient: hebt auch das senkrecht von oben betrachtete Wasser an,
+        // damit tiefes Wasser nicht flach-dunkel wirkt.
+        col += sky * (0.14 + 0.10 * (1.0 - depthF)) * uDay;
+
+        // Diffuse Aufhellung + scharfes Sonnen-Glitzern
+        float diff = max(dot(N, uSunDir), 0.0);
+        col += vec3(0.10, 0.15, 0.14) * diff * uDay;
+        vec3 H = normalize(uSunDir + V);
+        float spec = pow(max(dot(N, H), 0.0), 180.0) * uDay * (1.0 - uStorm * 0.55);
+        col += spec * vec3(1.0, 0.96, 0.85) * 0.55;
+
+        // Schaumkronen auf hohen Wellenspitzen (mehr bei Sturm)
+        float foam = smoothstep(0.70, 0.99, vCrest) * (0.04 + uStorm * 0.24);
+        foam = max(foam, rapids * 0.08);
+        col = mix(col, vec3(0.90, 0.95, 1.0), foam);
+
+        col = mix(col, vec3(0.05, 0.11, 0.19), uStorm * 0.30);
+        col *= mix(0.5, 1.0, uDay);
+        col = mix(col, vec3(0.2, 0.24, 0.26), uFog * 0.22);
+
+        // Fast geschlossene Oberfläche: flach nur leicht transparent, Meer/tiefes Wasser dicht.
+        float alpha = mix(0.78, 0.96, depthF);
+        alpha = mix(alpha, 0.94, vSea * 0.75);
+        alpha = max(alpha, fres * 0.48 + 0.50);
+        alpha += foam * 0.12 + rapids * 0.03;
+        alpha = clamp(alpha, 0.0, 0.98) * smoothstep(0.02, 0.14, vWet);
         gl_FragColor = vec4(col, alpha);
       }
     `,
@@ -3705,6 +4239,7 @@ function makeFloodWaterMaterial() {
       uTime: { value: 0 },
       uDay: { value: 1 },
       uStorm: { value: 0 },
+      uZoomFade: { value: 1 },
     },
     vertexShader: `
       uniform float uTime;
@@ -3715,12 +4250,10 @@ function makeFloodWaterMaterial() {
       void main() {
         vUv = uv;
         vec3 p = position;
-        float r = length(uv - vec2(0.5)) * 2.0;
-        float edge = 1.0 - smoothstep(0.72, 1.0, r);
         float w1 = sin(p.x * 4.8 + uTime * (3.2 + uStorm * 1.7));
         float w2 = sin((p.x + p.z) * 3.1 - uTime * (4.6 + uStorm * 2.0));
         vWave = (w1 + w2 * 0.65) / 1.65;
-        p.y += vWave * edge * (0.035 + uStorm * 0.045);
+        p.y += vWave * (0.018 + uStorm * 0.026);
         vec4 local = vec4(p, 1.0);
         #ifdef USE_INSTANCING
           local = instanceMatrix * local;
@@ -3734,13 +4267,11 @@ function makeFloodWaterMaterial() {
       uniform float uTime;
       uniform float uDay;
       uniform float uStorm;
+      uniform float uZoomFade;
       varying vec2 vUv;
       varying vec3 vWorld;
       varying float vWave;
       void main() {
-        float r = length(vUv - vec2(0.5)) * 2.0;
-        float edge = 1.0 - smoothstep(0.72, 1.0, r);
-        if (edge <= 0.01) discard;
         float streakA = sin(vWorld.x * 1.45 + vWorld.z * 0.35 - uTime * (4.2 + uStorm * 1.2));
         float streakB = sin(vWorld.x * 0.35 - vWorld.z * 1.25 + uTime * 2.6);
         float streak = 0.5 + 0.5 * (streakA * 0.7 + streakB * 0.3);
@@ -3748,9 +4279,8 @@ function makeFloodWaterMaterial() {
         vec3 col = vec3(0.11, 0.50, 0.78);
         col = mix(col, vec3(0.17, 0.58, 0.84), streak * 0.16);
         col += foam * vec3(0.34, 0.44, 0.50);
-        col += (1.0 - r) * vec3(0.00, 0.05, 0.09);
         col *= mix(0.48, 1.0, uDay);
-        float alpha = edge * (0.54 + streak * 0.10 + foam * 0.10 + uStorm * 0.08);
+        float alpha = (0.72 + streak * 0.05 + foam * 0.07 + uStorm * 0.05) * uZoomFade;
         gl_FragColor = vec4(col, alpha);
       }
     `,
@@ -3766,6 +4296,7 @@ function makeFogOfWarMaterial() {
       uCount: { value: 0 },
       uCircles: { value: circles },
       uNight: { value: 0 },
+      uWeatherFog: { value: 0 },
     },
     vertexShader: `
       varying vec3 vWorld;
@@ -3779,6 +4310,7 @@ function makeFogOfWarMaterial() {
       uniform int uCount;
       uniform vec3 uCircles[48];
       uniform float uNight;
+      uniform float uWeatherFog;
       varying vec3 vWorld;
       void main() {
         float seen = 0.0;
@@ -3788,8 +4320,11 @@ function makeFogOfWarMaterial() {
           float d = distance(vWorld.xz, c.xy);
           seen = max(seen, 1.0 - smoothstep(c.z * 0.78, c.z, d));
         }
-        float alpha = mix(0.58, 0.88, uNight) * (1.0 - seen);
+        float baseAlpha = mix(0.58, 0.88, uNight);
+        baseAlpha = mix(baseAlpha, max(baseAlpha, 0.90), uWeatherFog);
+        float alpha = baseAlpha * (1.0 - seen);
         vec3 col = mix(vec3(0.19, 0.21, 0.22), vec3(0.03, 0.04, 0.05), uNight);
+        col = mix(col, vec3(0.025, 0.030, 0.035), uWeatherFog * 0.72);
         gl_FragColor = vec4(col, alpha);
       }
     `,

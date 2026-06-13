@@ -1,5 +1,5 @@
 // Weltzustand + gemeinsame Hilfsfunktionen (Spawning, Abfragen, Spatial-Hash, Schaden).
-import { generateTerrain, worldToTile, tileToWorld, TT, tIdx, inBounds, stampOre, coverAt, stampFortification, unstampFortification, hasWaterNear, isPassable, softenRiverBanks } from './terrain.js';
+import { generateTerrain, worldToTile, tileToWorld, TT, tIdx, inBounds, stampOre, coverAt, stampFortification, unstampFortification, hasWaterNear, isNavigableWater, isPassable, softenRiverBanks } from './terrain.js';
 import { makeRng } from './rng.js';
 import {
   TILE, DEFAULT_MAP, SUB_DETECT_RANGE, GARRISON_DAMAGE_MULT,
@@ -414,11 +414,12 @@ export function canPlaceBuilding(world, tx, ty, size, def) {
     if (!inBounds(terrain, nx, ny)) return false;
     const i = tIdx(terrain, nx, ny);
     const tt = terrain.type[i];
-    const wet = tt === TT.WATER || terrain.water[i] > WET_DEPTH;
+    const realWater = isNavigableWater(terrain, nx, ny);
     if (tt === TT.CLIFF && !(def && def.buildOnCliff)) return false; // Tunnel dürfen in den Berg
     if (tt === TT.WATER && !onWater) return false;
     if (!onWater && terrain.water[i] > WET_DEPTH) return false;
-    if (def && def.mustStandInWater && !wet) return false;
+    if (onWater && !realWater) return false;
+    if (def && def.mustStandInWater && !realWater) return false;
     if (terrain.ore[i] > 0) return false;
     if (terrain.oil && terrain.oil[i] > 0 && !(def && def.requiresOil)) return false;
   }

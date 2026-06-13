@@ -9,7 +9,7 @@ import {
   DT, WATER_STEP_TICKS, WATER_FLOW, WATER_SEEP, WATER_SOURCE_RATE,
   WET_DEPTH, FLOOD_DEPTH, WATER_MAX_DEPTH, FLOOD_DPS, SEA_LEVEL,
   RAIN_FRAC, RAIN_DEPTH, STORM_RAIN_MULT,
-  DROUGHT_RIVER_DRAIN,
+  DROUGHT_RIVER_DRAIN, FLOOD_CAP_FRAC, FLOOD_CAP_DRAIN,
   SNOW_MELT, SNOW_FALL, MELT_WATER, SNOW_LINE,
   BUILDING_FLOOD_GRACE, BUILDING_FLOOD_DPS, HEAVY_WATER_DPS,
   CURRENT_MIN_DEPTH, CURRENT_DRAG, CURRENT_MAX,
@@ -110,18 +110,23 @@ function simulateCA(t, dtW, world) {
   const precip = weather === 'rain' || weather === 'storm' || weather === 'fog';
   const solar = world && world.env ? (world.env.solar || 0) : 0;
 
-  // GLOBALER FLUT-DECKEL: Maximal 25 % der Karte dürfen unter Wasser stehen. Darüber stoppt
-  // jeder weitere Zufluss (Regen, Schmelze, Quellen, Seen-/Talgewinne) — der Pegel steigt nicht
-  // weiter, bis die Versickerung das Wasser wieder unter die Schwelle gebracht hat.
+  // GLOBALER FLUT-DECKEL: höchstens FLOOD_CAP_FRAC (12 %) der Karte dürfen ÜBER Normalpegel
+  // geflutet sein. Darüber stoppt der Zufluss (Regen/Schmelze/Quellen/Seen) und überflutetes
+  // Land mit Abfluss versickert beschleunigt. Zählt nur überflutetes LAND (nass, obwohl der
+  // Normalpegel trocken ist) — Meer/Flüsse/Seen im Normalzustand zählen nicht.
+  // Der volle Scan ist teuer → nur jeder 3. Wasser-Schritt; der Schwellenwert hat genug Puffer.
   if (t._wetCheck == null) t._wetCheck = 0;
-  if ((t._wetCheck++ % 5) === 0) {
-    // Zählt nur ÜBERFLUTETES Land (nass, obwohl der Normalpegel dort trocken ist) —
-    // Meer/Flüsse/Seen im Normalzustand zählen nicht gegen den Deckel.
+  if ((t._wetCheck++ % 3) === 0) {
     let flooded = 0;
     for (let i = 0; i < water.length; i++) if (water[i] > WET_DEPTH && baseWater[i] <= WET_DEPTH) flooded++;
     t._wetFrac = flooded / (w * h);
   }
-  const floodCap = (t._wetFrac || 0) > 0.25;
+  const floodCap = (t._wetFrac || 0) > FLOOD_CAP_FRAC;
+  // Über dem Deckel zusätzlich aktiver Notabfluss für FLACH überflutetes Land (Wetterfluten).
+  // Impoundiertes Wasser hinter einem Damm (waterBlock) bleibt unangetastet — Aufstauen ist
+  // gewolltes Spielelement.
+  const overCap = Math.max(0, (t._wetFrac || 0) - FLOOD_CAP_FRAC);
+  const capDrain = floodCap ? Math.min(0.18, FLOOD_CAP_DRAIN * (1 + overCap * 12)) : 0;
 
   if (precip && !floodCap) {
     const mult = weather === 'storm' ? STORM_RAIN_MULT : 1;
@@ -136,7 +141,7 @@ function simulateCA(t, dtW, world) {
     // Echte Hochseen sammeln Regen über ihre Einzugsfläche: Pegel steigen sichtbar und laufen
     // erst ab, wenn ein natürlicher/gebauter Abfluss tief genug ist.
     if (t.lakeMask) {
-      const lakeGain = RAIN_DEPTH * mult * 3.6;
+      const lakeGain = RAIN_DEPTH * mult * 2.2;
       for (let i = 0; i < t.lakeMask.length; i++) {
         if (!t.lakeMask[i]) continue;
         water[i] = Math.min(WATER_MAX_DEPTH, water[i] + lakeGain);
@@ -202,7 +207,7 @@ function simulateCA(t, dtW, world) {
       // Lange, direkte Sonne räumt auch große Schneefelder ab; das Basisbudget bleibt
       // gedeckelt, wird aber auf niedrige/exponierte Randzellen konzentriert. Dadurch
       // zieht sich die Schneekappe vom Rand nach innen zurück, statt in der Mitte aufzureißen.
-      const melt = SNOW_MELT * solar * Math.min(1, 1200 / t.snowIdx.length);
+      const melt = SNOW_MELT * solar * Math.min(1, 2400 / t.snowIdx.length);
       let factorSum = 0, activeSnow = 0;
       const factors = [];
       for (const i of t.snowIdx) {
@@ -214,11 +219,16 @@ function simulateCA(t, dtW, world) {
       }
       const scale = factorSum > 0 ? (activeSnow / factorSum) * 1.3 : 1;
       for (const [i, f] of factors) {
-        const m = Math.min(t.snow[i], melt * f * scale);
+        // Rand schmilzt am schnellsten (hoher f), das Gipfelzentrum am langsamsten — aber mit
+        // garantiertem Mindestanteil, damit anhaltende Sonne die Kappe vollständig abräumt.
+        const m = Math.min(t.snow[i], Math.max(melt * 0.4, melt * f * scale));
         t.snow[i] = t.snow[i] - m < SNOW_PATCH_EPS ? 0 : t.snow[i] - m;
         const waterGain = m * MELT_WATER * (drought ? 0.12 : 1);
+        if (waterGain <= 0.00001) continue;
+        // Schmelzwasser sammelt sich kurz auf der Zelle; die Schnee-Entwässerung am Ende des
+        // Schritts kaskadiert es zum Schneerand hinab (Schnee bleibt nie unter Wasser).
         water[i] = Math.min(WATER_MAX_DEPTH, water[i] + waterGain);
-        if (waterGain > 0.00001) waterActive.add(i);
+        waterActive.add(i);
       }
     } else if (precip) {
       const snowGain = SNOW_FALL * (weather === 'storm' ? 3.0 : 1.8);
@@ -246,10 +256,11 @@ function simulateCA(t, dtW, world) {
     t.startMeltLeft--;
   }
 
-  // Quellen speisen ihre Zelle und bleiben aktiv (bei Regen kräftiger — Flüsse schwellen an).
-  // Beim Flut-Deckel pausieren auch die Quellen (Flüsse bleiben über baseWater dauerhaft nass).
-  if (!floodCap && !drought) {
-    const srcRate = WATER_SOURCE_RATE * (weather === 'storm' ? 2.2 : weather === 'rain' ? 1.6 : 1);
+  // PERMANENTE FLÜSSE: Die Quellen speisen IMMER — auch bei Flut-Deckel und Trockenheit. Die
+  // beiden Hauptflüsse versiegen also nie und entwässern dauerhaft zum Meer. Bei Regen kräftiger
+  // (Flüsse schwellen), bei Trockenheit gedrosselt, aber nie null.
+  {
+    const srcRate = WATER_SOURCE_RATE * (weather === 'storm' ? 2.2 : weather === 'rain' ? 1.6 : drought ? 0.75 : 1);
     for (const si of sources) {
       water[si] = Math.min(WATER_MAX_DEPTH, water[si] + srcRate);
       waterActive.add(si);
@@ -325,7 +336,16 @@ function simulateCA(t, dtW, world) {
     } else if (excess > SETTLE_EPS) {
       const lake = t.lakeMask && t.lakeMask[i];
       const weatherHold = precip ? 0.22 : weather === 'clear' ? 0.75 + solar * 0.45 : 0.45;
-      const seep = lake ? WATER_SEEP * weatherHold * 0.28 : WATER_SEEP * (drought ? 3.2 : weatherHold);
+      let seep = lake ? WATER_SEEP * weatherHold * 0.5 : WATER_SEEP * (drought ? 3.2 : weatherHold);
+      // Überflutetes Land (kein See/Fluss, keine Startterrasse) versickert generell zügig, damit
+      // keine stehenden „Sheet-Fluten" über das ganze bucklige Gelände stehen bleiben. Während
+      // Regen langsamer (Pegel steigt sichtbar), danach schnell ablaufend.
+      const floodLand = !lake && baseWater[i] <= WET_DEPTH && !(t.startSafe && t.startSafe[i]);
+      // Über dem Flutdeckel: beschleunigter Notabfluss für überflutetes Land mit Abflussmöglichkeit
+      // (impoundiertes Damm-Wasser ohne Gefälle bleibt erhalten — Aufstauen ist gewollt).
+      if (capDrain > 0 && floodLand && hasSurfaceGradient(t, i, FLOW_EPS)) {
+        seep = Math.max(seep, capDrain);
+      }
       const drain = excess * seep;
       water[i] = Math.max(baseWater[i], water[i] - drain);
       const thinMoisture = !lake && baseWater[i] <= FLOW_DEPTH_EPS && water[i] <= FLOW_DEPTH_EPS;
@@ -348,6 +368,7 @@ function simulateCA(t, dtW, world) {
     }
   }
   erodePooledWater(t, active, dtW, next);
+  drainSnowCaps(t, next);
   // Quellen bleiben wach; Meer- und Randabfluss passieren oben beim Wasserbilanz-Schritt.
   for (const si of sources) markActive(t, next, si);
 
@@ -368,7 +389,9 @@ function dryRiverBeds(t, amount, waterActive) {
       if (t.height[i] <= SEA_LEVEL + 0.015 || (t.lakeMask && t.lakeMask[i])) continue;
       const before = t.water[i] || 0;
       if (before <= 0) continue;
-      t.water[i] = Math.max(0, before - amount);
+      // Nur ÜBERSCHUSS über dem Grundpegel abtragen: die beiden Hauptflüsse (baseWater>0 entlang
+      // der Rinne) schrumpfen in der Trockenphase, versiegen aber nie — sie führen dauerhaft Wasser.
+      t.water[i] = Math.max(t.baseWater[i] || 0, before - amount);
       if (Math.abs(t.water[i] - before) > SETTLE_EPS) markActive(t, waterActive, i);
     }
   }
@@ -410,6 +433,37 @@ function erodePooledWater(t, active, dtW, next) {
     changed++;
   }
   t._erosionCursor = (start + Math.max(1, Math.floor(active.length / 5))) % active.length;
+}
+
+// Schnee bleibt trocken: am Ende jedes Wasser-Schritts kaskadiert sämtliches Wasser, das auf
+// verschneiten Gipfelzellen liegt, zum tiefsten Nachbarn hinab. Die Schneezellen werden dabei
+// von hoch nach tief abgearbeitet, sodass Schmelzwasser in EINEM Schritt bis an den Schneerand
+// (und von dort als normaler Fluss weiter ins Tal) läuft. So liegt nie Wasser auf dem Schnee.
+function drainSnowCaps(t, next) {
+  if (!t.snow || !t.snowIdx || !t.snowIdx.length) return;
+  if (!t._snowDrainOrder) {
+    t._snowDrainOrder = Array.from(t.snowIdx).sort((a, b) => t.height[b] - t.height[a]);
+  }
+  const { w, h, water, height } = t;
+  for (const i of t._snowDrainOrder) {
+    if (height[i] <= SNOW_LINE || t.snow[i] <= 0.02 || water[i] <= 0) continue;
+    // Tiefster Nachbar nach GELÄNDEHÖHE (nicht Oberfläche). Da die Schneezellen von hoch nach
+    // tief abgearbeitet werden und Wasser immer in eine niedrigere Höhe wandert, kaskadiert das
+    // Schmelzwasser in EINEM Durchlauf bis zum Schneerand und von dort als normaler Fluss weiter.
+    const x = i % w, y = (i / w) | 0;
+    let low = -1, lowH = height[i];
+    for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+      if (!dx && !dy) continue;
+      const nx = x + dx, ny = y + dy;
+      if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
+      const j = ny * w + nx;
+      if (height[j] < lowH) { lowH = height[j]; low = j; }
+    }
+    if (low < 0) { water[i] = 0; continue; } // echte Gipfelsenke: Schmelzwasser verdunstet, Schnee bleibt trocken
+    water[low] = Math.min(WATER_MAX_DEPTH, water[low] + water[i]);
+    water[i] = 0;
+    markActive(t, next, low);
+  }
 }
 
 function snowMeltFactor(t, i) {

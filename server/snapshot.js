@@ -1,6 +1,6 @@
 // Serialisierung des Weltzustands für das Netzwerk.
 // Init-Paket (einmalig beim Beitritt) enthält das Gelände, Snapshots nur das Dynamische.
-import { SEA_LEVEL, WET_DEPTH, WATER_MAX_DEPTH } from '../shared/constants.js';
+import { SEA_LEVEL, WET_DEPTH, WATER_MAX_DEPTH, NAVIGABLE_DEPTH } from '../shared/constants.js';
 import { resourceCapacity } from '../shared/world.js';
 const OIL_VIS_MAX = 900;
 
@@ -22,7 +22,8 @@ export function serializeInitialWater(world) {
   const t = world.terrain;
   const out = [];
   for (let i = 0; i < t.water.length; i++) {
-    if (t.type[i] === 3 || t.water[i] <= WET_DEPTH) continue; // Meer rendert die große Wasserfläche
+    const openSea = t.type[i] === 3 && t.height[i] + t.water[i] <= SEA_LEVEL + 0.04;
+    if (openSea || t.water[i] < NAVIGABLE_DEPTH) continue; // Meer rendert die große Wasserfläche
     out.push(i, Math.min(255, Math.round((t.water[i] / WATER_MAX_DEPTH) * 255)));
   }
   return out;

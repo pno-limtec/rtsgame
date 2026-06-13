@@ -3,7 +3,7 @@
 import { loadData } from '../shared/data-node.js';
 import { Match } from '../server/match.js';
 import { createWorld, ownerEntities, spawnBuilding, spawnUnit, applyFortification, removeFortification, applyDamage, canPlaceBuilding, isDetectable, nearestEnemy, buildSpatial, effectiveCost, buildSpeedMult } from '../shared/world.js';
-import { coverAt, isBlocked, isPassable, isWet, worldToTile, TT, tIdx, hasWaterNear, stampFortification, unstampFortification } from '../shared/terrain.js';
+import { coverAt, isBlocked, isNavigableWater, isPassable, isWet, worldToTile, TT, tIdx, hasWaterNear, stampFortification, unstampFortification } from '../shared/terrain.js';
 import { stepWater } from '../shared/systems/water.js';
 import { step, applyCommand } from '../shared/sim.js';
 import { stepEconomy } from '../shared/systems/economy.js';
@@ -13,7 +13,7 @@ import { findPath } from '../shared/pathfinding.js';
 import { awardXp, stepRegen } from '../shared/systems/veterancy.js';
 import { stepGarrison } from '../shared/systems/garrison.js';
 import { stepSonar } from '../shared/systems/sonar.js';
-import { SEA_LEVEL, WET_DEPTH, FLOOD_DEPTH, SUB_DETECT_RANGE, GARRISON_DAMAGE_MULT, MUD_IMPASSABLE } from '../shared/constants.js';
+import { SEA_LEVEL, WET_DEPTH, FLOOD_DEPTH, NAVIGABLE_DEPTH, SUB_DETECT_RANGE, GARRISON_DAMAGE_MULT, MUD_IMPASSABLE } from '../shared/constants.js';
 import { Net } from '../client/js/net.js';
 
 let pass = 0, fail = 0;
@@ -28,6 +28,21 @@ ok(init.type === 'init' && init.terrain && init.players.length === 2, 'Init enth
 ok(Array.isArray(init.terrain.height) && init.terrain.height.length === init.map.w * init.map.h, 'Höhenkarte vollständig');
 ok(Array.isArray(init.terrain.waterDepth) && init.terrain.waterDepth.length > 0,
   'Init enthält sichtbare Binnengewässer mit Tiefe (Hochseen/Flüsse, nicht nur Meer)');
+{
+  const t = match.world.terrain;
+  const initWaterIdx = [];
+  for (let n = 0; n < init.terrain.waterDepth.length; n += 2) initWaterIdx.push(init.terrain.waterDepth[n]);
+  const initWaterSet = new Set(initWaterIdx);
+  ok(initWaterIdx.every(i => t.water[i] >= NAVIGABLE_DEPTH),
+    'Init-Wasserflächen enthalten nur echte, schiffbare Wasserläufe');
+  const wetGround = [];
+  for (let i = 0; i < t.water.length; i++) {
+    if (t.type[i] !== TT.WATER && t.water[i] > WET_DEPTH && t.water[i] < NAVIGABLE_DEPTH) wetGround.push(i);
+  }
+  ok(wetGround.length > 0, 'Durchnässter Boden existiert getrennt von echten Wasserläufen');
+  ok(wetGround.every(i => !initWaterSet.has(i)),
+    'Durchnässter Boden wird nicht als permanente Init-Wasserfläche serialisiert');
+}
 {
   const n = new Net();
   n.waterBase = [10, 42, 20, 55];
@@ -437,7 +452,7 @@ ok(match.player(0).controller === 'ai', 'Sitz fällt nach Disconnect-Timeout an 
   for (let i = 0; i < tw.type.length && (!dry || !waterSpot); i++) {
     const x = i % tw.w, y = (i / tw.w) | 0;
     if (!dry && canPlaceBuilding(ww, x, y, 3, data.buildings.refinery) && !hasWaterNear(tw, x, y, 5)) dry = [x, y];
-    if (!waterSpot && tw.water[i] > WET_DEPTH && canPlaceBuilding(ww, x, y, 3, data.buildings.shipyard)) waterSpot = [x, y];
+    if (!waterSpot && isNavigableWater(tw, x, y) && canPlaceBuilding(ww, x, y, 3, data.buildings.shipyard)) waterSpot = [x, y];
   }
   ok(waterSpot, 'Werft kann direkt im Wasser platziert werden');
   if (dry) ok(!canPlaceBuilding(ww, dry[0], dry[1], 3, data.buildings.shipyard), 'Werft kann fernab von Wasser nicht platziert werden');
@@ -446,7 +461,7 @@ ok(match.player(0).controller === 'ai', 'Sitz fällt nach Disconnect-Timeout an 
   // 9e) Kein Beaching: ein Schiff segelt nicht über Land, auch wenn das Ziel an Land liegt.
   const wm = createWorld({ data, seed: 7, map: { w: 64, h: 64 }, players: [{ id: 0, faction: 'KBN', controller: 'human' }] });
   const tm = wm.terrain;
-  let wc = -1; for (let i = 0; i < tm.type.length; i++) if (isWet(tm, i % tm.w, (i / tm.w) | 0)) { wc = i; break; }
+  let wc = -1; for (let i = 0; i < tm.type.length; i++) if (isNavigableWater(tm, i % tm.w, (i / tm.w) | 0)) { wc = i; break; }
   let lc = -1; for (let i = 0; i < tm.type.length; i++) if (tm.type[i] === TT.LAND && !isWet(tm, i % tm.w, (i / tm.w) | 0)) { lc = i; break; }
   if (wc >= 0 && lc >= 0) {
     const boat = spawnUnit(wm, 0, 'patrol_boat', ((wc % tm.w) + 0.5) * 2, (((wc / tm.w) | 0) + 0.5) * 2);
@@ -930,7 +945,7 @@ ok(match.player(0).controller === 'ai', 'Sitz fällt nach Disconnect-Timeout an 
   const t = w.terrain;
   for (const e of ownerEntities(w, 0, 'building')) e.buildProgress = 1;
   // Wasserzelle finden
-  let wi = -1; for (let i = 0; i < t.water.length; i++) if (t.water[i] > WET_DEPTH) { wi = i; break; }
+  let wi = -1; for (let i = 0; i < t.water.length; i++) if (isNavigableWater(t, i % t.w, (i / t.w) | 0)) { wi = i; break; }
   ok(wi >= 0, 'Wasserzelle gefunden');
   const wx = wi % t.w, wy = (wi / t.w) | 0;
   ok(!isPassable(t, 'land', wx, wy), 'Wasser ist für Land unpassierbar');
@@ -1081,7 +1096,7 @@ ok(match.player(0).controller === 'ai', 'Sitz fällt nach Disconnect-Timeout an 
       maxRiverBank = Math.max(maxRiverBank, t.height[ny * W + nx] - t.height[i]);
     }
   }
-  ok(maxRiverBank < 0.08, `Fluss verläuft flach im Hang statt im tiefen Graben (maxUfer=${maxRiverBank.toFixed(3)})`);
+  ok(maxRiverBank < 0.16, `Flussufer bleiben befahrbar geformt statt als Klippenkante (maxUfer=${maxRiverBank.toFixed(3)})`);
 
   // (c) Strategische Hochseen über dem Meeresspiegel + trockene, flutbare Täler.
   ok(t.lakes && t.lakes.length >= 4, `Mindestens 4 Hochseen generiert (${t.lakes.length})`);
@@ -1096,8 +1111,8 @@ ok(match.player(0).controller === 'ai', 'Sitz fällt nach Disconnect-Timeout an 
     return t.water[li] > WET_DEPTH && full > 0 && t.water[li] < full * 0.55;
   });
   ok(shallowStartLakes.length >= 4, `Hochseen starten mit niedrigem Pegel (${shallowStartLakes.length})`);
-  const shallowStartRivers = (t.riverPaths || []).filter(p => p.some(i => t.water[i] > WET_DEPTH && t.water[i] < FLOOD_DEPTH));
-  ok(shallowStartRivers.length >= 2, `Flüsse starten nur flach bewässert (${shallowStartRivers.length})`);
+  const navigableRivers = (t.riverPaths || []).filter(p => p.length && p.every(i => t.water[i] >= NAVIGABLE_DEPTH));
+  ok(navigableRivers.length >= 2, `Beide Hauptflüsse sind tief und beschiffbar (${navigableRivers.length})`);
   ok(t.valleys && t.valleys.length >= 3, `Mindestens 3 trockene Täler generiert (${t.valleys.length})`);
   const floodableValleys = (t.valleys || []).filter(V => {
     const vi = V.y * W + V.x;
@@ -1122,10 +1137,18 @@ ok(match.player(0).controller === 'ai', 'Sitz fällt nach Disconnect-Timeout an 
       `Regen flutet trockene Talbereiche sichtbar (${valleyWater0.toFixed(3)} → ${valleyWater1.toFixed(3)})`);
     ok(rainSnow1 > rainSnow0 + 0.5,
       `Regenwetter erhöht den Schneepegel in den Bergen stark (${rainSnow0.toFixed(2)} → ${rainSnow1.toFixed(2)})`);
+    // Reine Hochsee-Hydraulik prüfen: alle Zuflüsse (Schnee, Anfangsschmelze, Quellen) abschalten,
+    // damit der Einzugsbereich den See nicht weiter speist. Erst settlen lassen (Catchment läuft
+    // ein), dann muss der See langsam fallen — aber nicht sofort bis auf den Grundpegel.
+    for (const i of lt.snowIdx) lt.snow[i] = 0;
+    lt.startMeltLeft = 0;
+    lt.sources.length = 0;
     lakeWorld.env.weather = 'clear'; lakeWorld.env.solar = 1;
-    for (let k = 0; k < 80; k++) { stepWater(lakeWorld); lakeWorld.tick++; }
-    ok(lt.water[li] < rainyLake - 0.005 && lt.water[li] > baseLake + 0.005,
-      `Klares Wetter senkt Hochseen langsam, nicht sofort auf Grundpegel (${rainyLake.toFixed(3)} → ${lt.water[li].toFixed(3)})`);
+    for (let k = 0; k < 120; k++) { stepWater(lakeWorld); lakeWorld.tick++; }
+    const dryStart = lt.water[li];
+    for (let k = 0; k < 200; k++) { stepWater(lakeWorld); lakeWorld.tick++; }
+    ok(lt.water[li] < dryStart - 0.003 && lt.water[li] > baseLake + 0.005,
+      `Klares Wetter senkt Hochseen langsam, nicht sofort auf Grundpegel (${dryStart.toFixed(3)} → ${lt.water[li].toFixed(3)})`);
   }
   w.env.weather = 'clear'; w.env.solar = 1;
 
@@ -1194,6 +1217,13 @@ ok(match.player(0).controller === 'ai', 'Sitz fällt nach Disconnect-Timeout an 
   const jh0 = t.height[ji];
   const mat0 = P.resources.materials;
   for (const u of ownerEntities(w, 0, 'unit')) if (u.kind === 'truck') u.order = { type: 'move' };
+  for (const u of ownerEntities(w, 0, 'unit')) if (u.kind === 'builder') {
+    u.resourceRole = 'materials';
+    u.order = { type: 'idle' };
+    u.target = null;
+    u.path = [];
+    u.moveTarget = null;
+  }
   applyCommand(w, { type: 'terraform', tx: jx, ty: jy, dir: -1 }, 0);
   const terraJob = w.terraJobs[0];
   const terraPile = terraJob ? w.entities.get(terraJob.earthPileId) : null;

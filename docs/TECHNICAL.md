@@ -116,11 +116,80 @@ Technische Eckpunkte:
 - Starkes Wasser erzeugt Strömungsvektoren, zieht Einheiten mit und verursacht Washout-Events.
 - Bei angestautem Wasser kann Land langsam erodieren; Höhenänderungen wecken benachbarte
   Wasserzellen erneut.
+- **Flutdeckel:** Höchstens ~`FLOOD_CAP_FRAC` (12 %) der Karte dürfen über dem Normalpegel
+  geflutet sein (Messung alle 3 Wasser-Schritte). Wird der Wert überschritten, stoppt jeder
+  weitere Zufluss (Regen, Schmelze, Quellen, See-/Tal-Zugewinn) und flach überflutetes Land mit
+  Abflussmöglichkeit versickert beschleunigt (`FLOOD_CAP_DRAIN`). Hinter Dämmen impoundiertes
+  Wasser ohne Gefälle bleibt davon unberührt — Aufstauen ist gewolltes Spielelement.
+- **Schnee bleibt trocken:** Schmelzwasser sammelt sich nie auf der Schneedecke. Eine
+  Kaskaden-Drainage am Ende jedes Wasser-Schritts leitet jegliches Wasser von Schneezellen (von
+  hoch nach tief) zum Schneerand hinab und von dort als normaler Fluss ins Tal. Die Kappe zieht
+  sich bei Sonne vom Rand nach innen zurück (Zentrum schmilzt zuletzt); Regen lässt sie wachsen.
+  Die Schneegrenze (`SNOW_LINE`) liegt knapp unter dem Gipfel (MAX_HEIGHT≈1.68), sodass nur die
+  echte Gipfelkappe (~5 % der Karte) verschneit ist — kein flächiger Schnee über das halbe Land.
+- **Entwässerungsfurchen:** `terrain.js` kerbt neben den Hauptflüssen viele radiale Trockenrinnen
+  (Canyons/Furchen) von der Bergschulter bis ins Meer. Sie führen normalerweise kein Wasser,
+  geben Regen-/Schmelz-/Flutwasser aber einen klaren Weg zum Meer.
+- **Küstenglättung:** Nach der Generierung wird das Gelände unterhalb der Wasserlinie mehrfach
+  geglättet (`smoothBelow`), damit keine zerklüfteten Unterwasser-Rippen durch die flache
+  Wasserfläche stoßen (sonst entsteht ein „Labyrinth"-Look statt einer homogenen Fläche).
+
+**Permanente Flüsse:** Jede Karte hat genau zwei Flüsse (`WATER_SOURCES`). Ihre Quellen speisen
+in jedem Wasser-Schritt — auch bei Flut-Deckel und Trockenheit (gedrosselt, aber nie null) —,
+sodass die Flüsse nie versiegen und dauerhaft zum Meer entwässern. In der Trockenphase trägt
+`dryRiverBeds` nur den Überschuss über dem Grundpegel (`baseWater` entlang der Rinne) ab; die
+Flussbetten bleiben also wasserführend, werden nur schmaler.
 
 Der Client rendert das Wasser nicht als einzelne Kacheln. Stattdessen baut `client/js/renderer.js`
 ein zusammenhängendes Wasser-Oberflächenmesh. Vertex-Attribute beschreiben Tiefe, Nässe,
-Wellengang und Flussrichtung. Der Shader ist fast opak, färbt tiefes Wasser dunkler, zeigt
-Stromschnellen bei starkem Fluss und mischt eine kleine prozedurale Wolkenspiegelung ein.
+Meer/Binnenwasser (`aSea`), Flussrichtung (`aFlow`) und Wellenamplitude (`aAmp`). Der Shader
+(`makeWaterMaterial`, eigenständige Umsetzung im Stil
+stilisierter Wasser-Shader) gibt **Meer und Seen** Leben: der Vertex-Shader hebt die Fläche mit
+zwei gekreuzten Wellenzügen (geometrische Dünung) an, der Fragment-Shader legt pro Pixel ein
+feines, bewegtes Wellenrelief aus mehreren gescrollten Sinus-Oktaven darüber (eigene
+`rippleGrad`-Funktion → analytische Normale). Daraus entstehen **Fresnel-Himmelspiegelung** entlang
+der reflektierten Blickrichtung (`skyColor`-Verlauf), **Sonnen-Glitzern** (Blinn-Phong, `uSunDir`)
+und **Schaumkronen** auf den Wellenspitzen. Flüsse nutzen die echten Strömungsvektoren aus der
+Simulation für langgezogene Schlieren und Stromschnellen statt punktigem Rauschen; das Meer
+bekommt breite wandernde Bänder und eine dezente Wolkenspiegelung. Dazu kommen tiefenabhängige
+Farbe (flach türkis → tief marineblau) sowie Tag/Nacht-, Sturm- und Nebel-Tönung. `aAmp` steuert
+die Stärke: Meer voll, Seen sanft, flache Flüsse/Flutfilme = 0. Shadertoy-artiges Vollbild-
+Raymarching wird bewusst vermieden, weil es die Terrain-/Flussdaten nicht kennt und pro Pixel
+deutlich teurer wäre.
+
+Das Ripple-Relief ist ZWEISTUFIG (`g1` grob + `g2` feiner, doppelte Frequenz) und IMMER aktiv
+(nicht an `vCrest`/Wellenhöhe gekoppelt) — so verschwinden auch bei ruhigem, flachem Wasser die
+Low-Poly-Facetten des Meshs, die das Wasser sonst „flach/plattig" wirken lassen. Das Wasser ist
+**leicht transparent**: die Deckkraft steigt mit der Tiefe (`alpha = mix(0.58, 0.90, depthF)`,
+Fresnel + Schaum erhöhen sie zusätzlich) → flaches Wasser lässt den Grund durchscheinen, tiefes
+Wasser ist dichter; „leicht" heißt Mindestdeckkraft ~0.58, nicht durchsichtig-trüb. Ein konstanter
+Himmel-Ambient-Term (`col += sky * …`) hebt auch senkrecht von oben betrachtetes Wasser an, damit
+tiefes Wasser nicht flach-dunkel/„murky" wirkt.
+
+Gegen das „Labyrinth"/Ausfransen aus halbnassen Zellen kombiniert der Renderer drei Maßnahmen:
+(1) Binnenwasser wird erst ab echter Tiefe gezeigt (über `WET_DEPTH`, Hysterese SHOW/HIDE +
+Mindestzahl nasser Nachbarn) — dünne Feuchtefilme werden gar nicht gezeichnet; (2) die
+Wasseroberfläche wird über einen 5×5-Bereich gaußartig geglättet (`_smoothedWaterSurface`) → ein
+Fluss/See wird zu einer durchgehenden, schräg verlaufenden Fläche statt einer Zell-Treppe;
+(3) isolierte nasse Einzelzellen werden über `_neighborWetFactor` ausgeblendet, zusammenhängendes
+Wasser (auch ein 1 Zelle breiter Fluss) bleibt voll. Das offene Meer ist von (1)/(3) ausgenommen.
+
+**Kein Gras↔Wasser-Flimmern:** Wasser- und Geländemesh teilen dasselbe xz-Gitter UND dieselbe
+Triangulierung. Damit gilt: liegt jeder Wasservertex über seiner Geländespalte um mindestens
+`CLEAR` (= 0.14 Welt-Einheiten), dann liegt — wegen linearer Interpolation über jedes gemeinsame
+Dreieck — die gesamte gezeichnete Wasserfläche überall ≥ `CLEAR` über dem Boden, inklusive der
+Übergangsdreiecke an der Uferlinie. Deshalb nutzen NASSE *und* TROCKENE Vertices denselben
+Mindestabstand: nasse auf `max(geglättete_Oberfläche − 0.045, terrainY + CLEAR)`, trockene exakt
+auf `terrainY + CLEAR` (nur unsichtbar via `vWet=0`/Shader-discard). Der Wellenhub wird zusätzlich
+durch den Spitzenwert ~1.8 geteilt (`headroom = (surf − terrainY − 0.04) / 1.8`), damit auch ein
+Wellental in flachem Wasser nicht unter das Terrain taucht. Verifiziert: über alle gezeichneten
+Vertices bleibt der Abstand zum Boden selbst im tiefsten Wellental ≥ 0.14, 0 Vertices darunter →
+keine koinzidenten Tiefen → kein Z-Fighting/Flimmern.
+
+WICHTIG (frühere Fehlannahme): ein bloßes „kein Vertex unter dem Terrain" reicht NICHT. Trockene
+Randvertices knapp über dem Boden (z. B. `+0.02`) erzeugen ein schmales Übergangsband, dessen
+Wasseroberfläche fast deckungsgleich mit dem Gelände ist → genau dort flimmert es. Der Mindest-
+abstand muss für ALLE gezeichneten Dreiecke gelten, nicht nur „nicht negativ" sein.
 
 ## Ressourcen und Industrie
 
@@ -151,6 +220,11 @@ Pipe-Kette -> Depot.
   Pathfinding, Wasserfluss oder Ressourcenketten.
 - Straßen können manuell gebaut werden; zusätzlich erzeugt `shared/systems/roads.js` ein
   automatisches Netz zwischen nahen Gebäuden.
+- Wälle/Gräben/Straßen/Leitungen/Dämme werden per Linie (Start→Endpunkt) gezogen und dürfen
+  beliebig schräg verlaufen. Pipes richten sich im Renderer (`_orientPipe`) an ihren Nachbarn
+  aus und wirken so als durchgehende — auch diagonale — Leitung statt als lose Einzelstücke.
+- Erdaushub aus Gräben/Abgrabungen sammelt sich an EINEM Erdhaufen je Arbeitsbereich; LKW
+  fahren ihn zum Materiallager. Erdhaufen haben kein Licht/Fundament.
 
 ## Bewegung und Pfadfindung
 

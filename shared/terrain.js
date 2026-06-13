@@ -1,5 +1,5 @@
 // Geländegenerierung & Abfragen: Höhenkarte, Tile-Typen, dynamisches Wasser.
-import { TILE, SEA_LEVEL, WET_DEPTH, SNOW_LINE, SNOW_INIT, EDGE_SEA } from './constants.js';
+import { TILE, SEA_LEVEL, WET_DEPTH, NAVIGABLE_DEPTH, SNOW_LINE, SNOW_INIT, EDGE_SEA } from './constants.js';
 import { makeRng } from './rng.js';
 
 export const TT = { LAND: 0, HILL: 1, CLIFF: 2, WATER: 3, BRIDGE: 4 };
@@ -153,6 +153,27 @@ function carveRiver(t, start, rng, angle = null) {
   return fallback;
 }
 
+// Box-Glättung aller Zellen unterhalb einer Höhenschwelle (Seebett + flache Uferzone). Mehrere
+// Durchgänge mitteln die Höhe mit den 8 Nachbarn; so verschwinden zerklüftete Unterwasser-Rippen,
+// und die Wasserfläche darüber wirkt homogen. Verändert nur die Höhe, nutzt KEIN RNG.
+function smoothBelow(height, w, h, threshold, passes) {
+  const tmp = new Float32Array(w * h);
+  for (let p = 0; p < passes; p++) {
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+      const i = y * w + x;
+      if (height[i] >= threshold) { tmp[i] = height[i]; continue; }
+      let sum = 0, n = 0;
+      for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+        const nx = x + dx, ny = y + dy;
+        if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
+        sum += height[ny * w + nx]; n++;
+      }
+      tmp[i] = sum / n;
+    }
+    for (let i = 0; i < w * h; i++) height[i] = tmp[i];
+  }
+}
+
 function carveHighLake(height, w, h, x, y, r, level) {
   for (let yy = -r - 2; yy <= r + 2; yy++) for (let xx = -r - 2; xx <= r + 2; xx++) {
     const nx = x + xx, ny = y + yy;
@@ -200,6 +221,22 @@ function smoothRiverCorridors(height, w, h, paths) {
       if (d > 2.25) continue;
       const j = ny * w + nx;
       height[j] = Math.min(height[j], base + 0.018 + d * 0.026);
+    }
+  }
+}
+
+function deepenRiverChannels(height, w, h, paths) {
+  for (const path of paths || []) for (const i of path) {
+    const x = i % w, y = (i / w) | 0;
+    const bed = height[i];
+    for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+      const nx = x + dx, ny = y + dy;
+      if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
+      const d = Math.hypot(dx, dy);
+      if (d > 1.45) continue;
+      const j = ny * w + nx;
+      const cut = d <= 0.1 ? 0.115 : d <= 1.05 ? 0.090 : 0.045;
+      height[j] = Math.min(height[j], Math.max(SEA_LEVEL - 0.085, bed - cut));
     }
   }
 }
@@ -415,6 +452,26 @@ export function generateTerrain({ w, h, seed = 1 }) {
   const riverPaths = [];
   for (let n = 0; n < sources.length; n++) riverPaths.push(carveRiver({ w, h, height }, sources[n], rng, sourceAngles[n]));
 
+  // ZUSÄTZLICHE ENTWÄSSERUNGS-FURCHEN/CANYONS: viele radiale Trockenrinnen von der Bergschulter
+  // bis ins Meer. Sie führen normalerweise kein Wasser, geben Regen-/Schmelz-/Flutwasser aber
+  // einen klaren Weg zum Meer (verhindert großflächige stehende Fluten). Keine Quellen → trocken.
+  const furrowPaths = [];
+  const furrowCount = Math.max(10, Math.round(Math.min(w, h) / 12));
+  const fBase = rng() * Math.PI * 2;
+  for (let f = 0; f < furrowCount; f++) {
+    const a = fBase + (f / furrowCount) * Math.PI * 2 + (rng() - 0.5) * 0.18;
+    // Startpunkt auf einem Ring um den Berg (hoch genug für Gefälle, unterhalb des Gipfelgrats).
+    let sx = cx0, sy = cy0;
+    for (let r = 4; r < Math.min(w, h) / 2; r++) {
+      sx = Math.round(cx0 + Math.cos(a) * r);
+      sy = Math.round(cy0 + Math.sin(a) * r);
+      if (sx < 1 || sy < 1 || sx >= w - 1 || sy >= h - 1) break;
+      if (height[sy * w + sx] < SEA_LEVEL + 0.42) break;   // ab mittlerer Höhe starten
+    }
+    if (sx < 1 || sy < 1 || sx >= w - 1 || sy >= h - 1) continue;
+    furrowPaths.push(carveRiver({ w, h, height }, sy * w + sx, rng, a));
+  }
+
   // Strategische Hochseen: mindestens 3 höher gelegene, vom Geländerand eingefasste Becken
   // um den Zentralberg. Wer den Rand anbohrt, lässt Wasser in die tieferen Täler ablaufen.
   const lakes = [];
@@ -439,6 +496,13 @@ export function generateTerrain({ w, h, seed = 1 }) {
     }
   }
   smoothRiverCorridors(height, w, h, riverPaths);
+
+  // Küstenglättung: Seebett und flache Uferzone mehrfach mitteln, damit unter der Wasserfläche
+  // keine zerklüfteten Rippen durch das (flache) Wasser stoßen. Das ergibt eine homogene
+  // Wasserfläche statt eines „Labyrinths" aus halb herausragenden Geländekanten. Kein RNG.
+  smoothBelow(height, w, h, SEA_LEVEL + 0.06, 3);
+  smoothRiverCorridors(height, w, h, riverPaths);
+  deepenRiverChannels(height, w, h, riverPaths);
 
   for (let i = 0; i < w * h; i++) {
     const e = height[i];
@@ -474,21 +538,23 @@ export function generateTerrain({ w, h, seed = 1 }) {
     }
   }
 
-  // Bergflüsse initialisieren: nur wenig Wasser in der Rinne. Die Start-Schneeschmelze
-  // bewässert sie danach sichtbar vom Berg Richtung Meer.
+  // Bergflüsse initialisieren: der Kern ist echtes, beschiffbares Fahrwasser; die Randzellen
+  // bleiben nur feucht/matschig und zählen nicht als Wasserstraße.
   for (const path of riverPaths) for (const i of path) {
     const x = i % w, y = (i / w) | 0;
-    const depth = Math.max(WET_DEPTH * 1.2, Math.min(WET_DEPTH * 1.8, SEA_LEVEL + 0.05 - height[i]));
     for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
       const nx = x + dx, ny = y + dy;
       if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
       const d = Math.hypot(dx, dy);
       if (d > 1.45) continue;
       const j = ny * w + nx;
-      const bank = d <= 1.05 ? WET_DEPTH * 1.02 : WET_DEPTH * 0.72;
-      const localDepth = Math.max(bank, depth * (1 - d * 0.24));
+      const core = d <= 1.05;
+      const localDepth = core
+        ? Math.max(NAVIGABLE_DEPTH * 1.18, SEA_LEVEL + 0.12 - height[j])
+        : Math.max(WET_DEPTH * 0.72, NAVIGABLE_DEPTH * 0.45);
       water[j] = Math.max(water[j], localDepth);
-      baseWater[j] = Math.max(baseWater[j], Math.min(localDepth, d <= 0.1 ? WET_DEPTH * 1.08 : WET_DEPTH * 0.82));
+      baseWater[j] = Math.max(baseWater[j], core ? localDepth * 0.96 : Math.min(localDepth, WET_DEPTH * 0.82));
+      if (core) type[j] = TT.WATER;
     }
   }
 
@@ -645,6 +711,15 @@ export function waterBlocksLand(t, i) {
   return (t.water?.[i] || 0) > WET_DEPTH;
 }
 
+export function isNavigableWater(t, tx, ty) {
+  if (!inBounds(t, tx, ty)) return false;
+  return (t.water?.[tIdx(t, tx, ty)] || 0) >= NAVIGABLE_DEPTH;
+}
+
+function isNavigableWaterIdx(t, i) {
+  return (t.water?.[i] || 0) >= NAVIGABLE_DEPTH;
+}
+
 function isDryOreCell(t, i) {
   return (t.type[i] === TT.LAND || t.type[i] === TT.HILL)
     && !waterBlocksLand(t, i)
@@ -656,7 +731,7 @@ function isDryOreCell(t, i) {
 export function hasWaterNear(t, tx, ty, radius = 4) {
   for (let y = -radius; y <= radius; y++) for (let x = -radius; x <= radius; x++) {
     const nx = tx + x, ny = ty + y;
-    if (inBounds(t, nx, ny) && t.water[tIdx(t, nx, ny)] > WET_DEPTH) return true;
+    if (inBounds(t, nx, ny) && isNavigableWaterIdx(t, tIdx(t, nx, ny))) return true;
   }
   return false;
 }
@@ -667,7 +742,7 @@ export function nearestWaterTile(t, tx, ty, radius = 8) {
   for (let y = -radius; y <= radius; y++) for (let x = -radius; x <= radius; x++) {
     const nx = tx + x, ny = ty + y;
     if (!inBounds(t, nx, ny)) continue;
-    if (t.water[tIdx(t, nx, ny)] <= WET_DEPTH) continue;
+    if (!isNavigableWaterIdx(t, tIdx(t, nx, ny))) continue;
     const d = x * x + y * y;
     if (d < bestD) { bestD = d; best = [nx, ny]; }
   }
@@ -822,7 +897,7 @@ export function isPassable(t, domain, tx, ty) {
   const inTunnel = t.tunnel && t.tunnel[i] > 0;   // Tunnel: Land quert Klippen
   switch (domain) {
     case 'air': return true;
-    case 'water': return wet || ty_ === TT.BRIDGE;
+    case 'water': return isNavigableWaterIdx(t, i) || ty_ === TT.BRIDGE;
     case 'amphibious': return (ty_ !== TT.CLIFF || inTunnel) && !blocked;
     case 'land':
     default: return (ty_ !== TT.CLIFF || inTunnel) && (!wet || onBridge) && !blocked;

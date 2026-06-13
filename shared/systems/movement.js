@@ -284,12 +284,23 @@ function hashAngle(id, tick) {
 function stampVehicleTrack(world, e, ox, oy) {
   if (e.domain !== 'land' || e.category !== 'vehicle') return;
   const moved = Math.hypot(e.x - ox, e.y - oy);
-  if (moved < 0.04) return;
+  if (moved < 0.04) { stampVehicleMudPressure(world, e); return; }
   const t = world.terrain;
   const [tx, ty] = worldToTile(e.x, e.y);
+  const [otx, oty] = worldToTile(ox, oy);
+  if (otx !== tx || oty !== ty) {
+    stampVehicleTrackCell(world, e, otx, oty, moved * 0.45);
+    stampVehicleTrackCell(world, e, tx, ty, moved * 0.55);
+  } else {
+    stampVehicleTrackCell(world, e, tx, ty, moved);
+  }
+}
+
+function stampVehicleTrackCell(world, e, tx, ty, moved) {
+  const t = world.terrain;
   if (!inBounds(t, tx, ty)) return;
   const i = tIdx(t, tx, ty);
-  if (roadAtIdx(t, i) || waterBlocksLand(t, i)) return;
+  if (roadAtIdx(t, i) || (t.water[i] || 0) > FLOOD_DEPTH) return;
   if (t.tracks) {
     const gain = moved * (e.heavy ? TRACK_GAIN_HEAVY : TRACK_GAIN_LIGHT);
     t.tracks[i] = Math.min(1, t.tracks[i] + gain);
@@ -299,6 +310,19 @@ function stampVehicleTrack(world, e, ox, oy) {
     t.mud[i] = Math.min(1, t.mud[i] + moved * MUD_GAIN_HEAVY * (1 + t.tracks[i]));
   }
   if (t.waterActive && (t.tracks?.[i] > 0.15 || t.mud?.[i] > 0.05)) t.waterActive.add(i);
+}
+
+function stampVehicleMudPressure(world, e) {
+  if (!e.heavy || e.domain !== 'land' || e.category !== 'vehicle') return;
+  const t = world.terrain;
+  const [tx, ty] = worldToTile(e.x, e.y);
+  if (!inBounds(t, tx, ty)) return;
+  const i = tIdx(t, tx, ty);
+  if (roadAtIdx(t, i) || (t.water[i] || 0) > FLOOD_DEPTH) return;
+  if (t.mud && t.tracks && t.tracks[i] > 0.2 && t.water[i] > WET_DEPTH) {
+    t.mud[i] = Math.min(1, t.mud[i] + DT * MUD_GAIN_HEAVY * 0.7 * (1 + t.tracks[i]));
+    if (t.waterActive) t.waterActive.add(i);
+  }
 }
 
 // Leichte Separation, damit Einheiten sich nicht stapeln (über Spatial-Hash).

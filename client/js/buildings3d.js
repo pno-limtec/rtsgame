@@ -128,11 +128,12 @@ export function makeBuildingMesh(kind, size, mats) {
       break;
     }
     case 'pipe': {
-      const p = cyl(0.22, 0.22, s * 0.98, metal, 0, 0.26, 0, 10);
+      // Etwas überlanges Rohr (reicht bis in die Nachbarzelle) + zentrale Kupplung, damit
+      // aufeinanderfolgende Segmente sichtbar ineinandergreifen (auch diagonal, siehe _orientPipe).
+      const p = cyl(0.2, 0.2, s * 1.45, metal, 0, 0.26, 0, 10);
       p.rotation.z = Math.PI / 2; g.add(p);                                  // Hauptrohr (liegend)
-      const j1 = cyl(0.3, 0.3, 0.2, dark, -s * 0.35, 0.26, 0, 10); j1.rotation.z = Math.PI / 2;
-      const j2 = cyl(0.3, 0.3, 0.2, dark, s * 0.35, 0.26, 0, 10); j2.rotation.z = Math.PI / 2;
-      g.add(j1, j2);                                                          // Muffen
+      const hub = cyl(0.3, 0.3, 0.34, dark, 0, 0.26, 0, 12);
+      hub.rotation.z = Math.PI / 2; g.add(hub);                              // Kupplung in der Mitte
       g.add(box(0.5, 0.1, 0.5, dark, 0, 0.05, 0));                            // Fundament
       break;
     }

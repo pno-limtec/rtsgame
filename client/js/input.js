@@ -2,9 +2,12 @@
 import { CAMERA_TILT_MAX, CAMERA_TILT_MIN } from './renderer.js';
 
 const TILE = 2;
+const CLIENT_WET_DEPTH = 0.035;
+const CLIENT_NAVIGABLE_DEPTH = 0.12;
 const TRANSPORT_KINDS = new Set(['transport_air', 'amphib_transport']);
 const TRANSPORT_CAP = 6;
 const PILE_KINDS = new Set(['earth_pile', 'ore_pile']);
+const TERRA_STROKE_RADIUS = 1.12;
 // Linien-Bau: diese Gebäude (und Terraform-Aufträge) zieht man per Start→Endpunkt auf.
 const LINE_KINDS = new Set(['wall', 'trench', 'road', 'pipe', 'dam', 'tunnel']);
 
@@ -281,8 +284,11 @@ export class Input {
       const nx = tx + x, ny = ty + y;
       if (nx < 0 || ny < 0 || nx >= r.mapW || ny >= r.mapH) return true;
       const i = ny * r.mapW + nx;
-      const wet = r.terrainType?.[i] === 3 || (r.waterDepth?.[i] || 0) > 0.012;
-      if (def?.mustStandInWater && !wet) return true;
+      const depth = r.waterDepth?.[i] || 0;
+      const wet = r.terrainType?.[i] === 3 || depth > CLIENT_WET_DEPTH;
+      const realWater = depth >= CLIENT_NAVIGABLE_DEPTH;
+      if (def?.buildOnWater && !realWater) return true;
+      if (def?.mustStandInWater && !realWater) return true;
       if (!def?.buildOnWater && wet) return true;
     }
     return false;
@@ -296,6 +302,7 @@ export class Input {
 
   // Tile-Zellen der gezogenen Linie (Schrittweite = Gebäudegröße, Damm = 2).
   lineCells() {
+    if (this.isTerraformMode()) return this.terraformCells();
     const d = this.lineDrag;
     if (!d) return [];
     const ex = d.ex ?? d.sx, ey = d.ey ?? d.sy;
@@ -310,6 +317,32 @@ export class Input {
       cells.push([tx, ty]); last = [tx, ty];
     }
     return cells;
+  }
+
+  terraformCells() {
+    const d = this.lineDrag;
+    if (!d) return [];
+    return this.terraformStrokeCells(d.sx, d.sy, d.ex ?? d.sx, d.ey ?? d.sy);
+  }
+
+  terraformStrokeCells(sx, sy, ex, ey) {
+    const vx = ex - sx, vy = ey - sy;
+    const len2 = vx * vx + vy * vy;
+    const minX = Math.floor(Math.min(sx, ex) - TERRA_STROKE_RADIUS - 1);
+    const maxX = Math.ceil(Math.max(sx, ex) + TERRA_STROKE_RADIUS + 1);
+    const minY = Math.floor(Math.min(sy, ey) - TERRA_STROKE_RADIUS - 1);
+    const maxY = Math.ceil(Math.max(sy, ey) + TERRA_STROKE_RADIUS + 1);
+    const out = [];
+    const mapW = this.renderer.mapW || Infinity, mapH = this.renderer.mapH || Infinity;
+    for (let ty = minY; ty <= maxY; ty++) for (let tx = minX; tx <= maxX; tx++) {
+      if (tx < 0 || ty < 0 || tx >= mapW || ty >= mapH) continue;
+      const t = len2 > 0 ? Math.max(0, Math.min(1, ((tx - sx) * vx + (ty - sy) * vy) / len2)) : 0;
+      const px = sx + vx * t, py = sy + vy * t;
+      const dist = Math.hypot(tx - px, ty - py);
+      if (dist <= TERRA_STROKE_RADIUS) out.push({ tx, ty, t, dist });
+    }
+    out.sort((a, b) => a.t - b.t || a.dist - b.dist || a.ty - b.ty || a.tx - b.tx);
+    return out.map(c => [c.tx, c.ty]);
   }
 
   // Linie abschließen: für jede Zelle einen Bau-/Terraform-Befehl senden.
@@ -339,7 +372,8 @@ export class Input {
     const tx = Math.floor(g.x / TILE), ty = Math.floor(g.z / TILE);
     // Terraforming-Modus: Aufschütt-/Abgrab-Auftrag — ein freier Bagger übernimmt.
     if (this.buildMode && this.buildMode.startsWith('_terra_')) {
-      this.net.cmd({ type: 'terraform', tx, ty, dir: this.buildMode.endsWith('up') ? 1 : -1 });
+      const dir = this.buildMode.endsWith('up') ? 1 : -1;
+      for (const [cx, cy] of this.terraformStrokeCells(tx, ty, tx, ty)) this.net.cmd({ type: 'terraform', tx: cx, ty: cy, dir });
       if (!this.keys.has('shift')) this.cancelBuild();
       return;
     }

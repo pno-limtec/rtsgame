@@ -11,11 +11,14 @@ export const POWER_LOW_PENALTY = 0.5;          // Produktionsfaktor bei Energied
 
 // --- Dynamisches Wasser (Phase 8, Zellularautomat) ---
 export const SEA_LEVEL = 0.28;                 // Höhe, bis zu der Becken mit Wasser gefüllt sind (= TT.WATER-Schwelle)
-export const WET_DEPTH = 0.035;                // Wassertiefe ab der eine Zelle als „nass" gilt (Boden gesperrt, See passierbar)
+export const WET_DEPTH = 0.035;                // Wassertiefe ab der eine Zelle als „nass" gilt (Boden gesperrt)
 export const FLOOD_DEPTH = 0.09;               // Tiefe ab der Landeinheiten ertrinken (Schaden + Verlangsamung)
+export const NAVIGABLE_DEPTH = 0.12;           // Tiefe ab der Wasser als echtes Fahrwasser für Schiffe zählt
 export const WATER_STEP_TICKS = 2;             // Wasser-CA läuft alle N Ticks (5 Hz) — günstig & stabil
 export const WATER_FLOW = 0.62;                // hydraulischer Ausgleich je Wasser-Schritt (8-Nachbarn, masseerhaltend)
 export const WATER_SEEP = 0.0035;              // sehr langsame Versickerung/Verdunstung; Wasser soll primär zum Meer abfließen
+export const FLOOD_CAP_FRAC = 0.12;            // Zufluss-Stopp bei 12 % überflutetem Land (sichtbar deutlich weniger Fläche nass)
+export const FLOOD_CAP_DRAIN = 0.05;           // Notabfluss/Schritt für überflutetes Land oberhalb des Deckels
 export const WATER_SOURCE_RATE = 0.06;         // Zufluss (Tiefe/Schritt) je Quelle
 export const WATER_SOURCES = 2;                // Anzahl Flussquellen je Karte
 export const WATER_MAX_DEPTH = 0.7;            // harte Obergrenze je Zelle (Stabilitäts-Backstop)
@@ -61,14 +64,14 @@ export const QUAKE_RADIUS = 14;                // Tiles um das Epizentrum
 export const QUAKE_SLOPE = 0.055;              // Hangneigung (Höhendiff. je Nachbarzelle), ab der Material abrutscht
 export const QUAKE_SLIDE = 0.5;                // Anteil der Überneigung, der je Rutsch-Durchgang abrutscht
 export const QUAKE_BUILDING_DMG = 60;          // Gebäudeschaden je Sekunde im Bebenradius auf Hangzellen
-export const RAIN_SLIDE_SLOPE = 0.075;         // nasse Hänge werden ab dieser Neigung instabil
-export const RAIN_SLIDE_CHANCE = 0.08;         // Stichprobenchance je Regenprüfung und Kandidat
-export const RAIN_SLIDE_AMT = 0.34;            // Anteil der Überneigung, der bei Regen abrutscht
+export const RAIN_SLIDE_SLOPE = 0.060;         // nasse Hänge werden ab dieser Neigung instabil (häufiger als zuvor)
+export const RAIN_SLIDE_CHANCE = 0.22;         // Stichprobenchance je Regenprüfung und Kandidat
+export const RAIN_SLIDE_AMT = 0.55;            // Anteil der Überneigung, der bei Regen abrutscht (sichtbarer)
 
 // --- Karte: Zentralberg, Schnee, Randmeer (Phase 15) ---
-export const SNOW_LINE = 0.82;                 // Höhe, ab der Schnee liegt (nur echte Gipfel/Grate)
+export const SNOW_LINE = 1.34;                 // Höhe, ab der Schnee liegt — nur die echte Gipfelkappe (~4 % der Karte; MAX_HEIGHT≈1.68)
 export const SNOW_INIT = 4.0;                  // Anfangsschnee = (h − SNOW_LINE) · SNOW_INIT
-export const SNOW_MELT = 0.0010;               // Schmelze je Wasser-Schritt × Sonnenstärke (lange Sonne räumt die Gipfel frei)
+export const SNOW_MELT = 0.0019;               // Schmelze je Wasser-Schritt × Sonnenstärke (Sonne lässt die Schneekappe sichtbar schrumpfen)
 export const SNOW_FALL = 0.026;                // Schneefall je Wasser-Schritt bei Regen/Gewitter — sichtbares Anwachsen
 export const MELT_WATER = 0.9;                 // Anteil der Schmelze, der als Wasser in die Zelle geht
 export const EDGE_SEA = 0.085;                 // Anteil der Kartenbreite, der zum Randmeer abfällt
@@ -88,7 +91,7 @@ export const TRACK_GAIN_HEAVY = 0.032;         // schwere Fahrzeuge schneiden de
 export const TRACK_DECAY_CLEAR = 0.00035;      // trockene Spuren glätten sich langsam; Sonne beschleunigt
 export const TRACK_DEPRESSION = 0.055;         // effektive Rinnen-Tiefe für Wasserfluss/Pfützen
 export const TRACK_PUDDLE_MIN = 0.18;          // ab dieser Spurtiefe sammelt Regen sichtbar Wasser
-export const TRACK_RAIN_MULT = 1.8;            // Regen sammelt sich in Rillen stärker als auf offenem Boden
+export const TRACK_RAIN_MULT = 3.0;            // Regen sammelt sich in Rillen deutlich stärker als auf offenem Boden (sichtbare Pfützen)
 export const MUD_GAIN_HEAVY = 0.16;            // Matschzuwachs je Meter schweres Fahrzeug in nasser Rille
 export const MUD_DRY_CLEAR = 0.0020;           // Matsch trocknet bei klarem Wetter ab; Sonne beschleunigt
 export const MUD_IMPASSABLE = 0.82;            // ab hier bleiben schwere Fahrzeuge stecken/planen drumherum
@@ -119,13 +122,13 @@ export const FOG_NAVAL_DRIFT = 0.95;           // m/s Kursdrift für Schiffe im 
 export const FOG_NAVAL_CRASH_DMG = 900;        // Küstenkontakt im Nebel: Schiffe zerschellen
 
 // --- Schneelawinen (Phase 16) ---
-export const AVAL_SNOW = 0.34;                 // Schneetiefe, ab der ein Hang lawinengefährdet ist
-export const AVAL_SLOPE = 0.043;               // Mindesthangneigung für Lawinenabgang
-export const AVAL_CHANCE = 0.012;              // Auslösewahrscheinlichkeit je Prüfung und Kandidat (bei Schneefall höher)
-export const AVAL_DMG = 130;                   // Schaden an Einheiten/Gebäuden im Lawinenpfad
-export const AVAL_LEN = 18;                    // maximale Lauflänge (Tiles)
-export const AVAL_ERODE = 0.024;               // Lawinen schürfen oben Material ab
-export const AVAL_DEPOSIT = 0.018;             // und lagern es in der Auslaufzone an
+export const AVAL_SNOW = 0.22;                 // Schneetiefe, ab der ein Hang lawinengefährdet ist (leichter auslösbar)
+export const AVAL_SLOPE = 0.034;               // Mindesthangneigung für Lawinenabgang
+export const AVAL_CHANCE = 0.028;              // Auslösewahrscheinlichkeit je Prüfung und Kandidat (bei Schneefall höher)
+export const AVAL_DMG = 180;                   // Schaden an Einheiten/Gebäuden im Lawinenpfad
+export const AVAL_LEN = 22;                    // maximale Lauflänge (Tiles)
+export const AVAL_ERODE = 0.05;               // Lawinen schürfen oben Material ab (deutlich sichtbar)
+export const AVAL_DEPOSIT = 0.038;             // und lagern es in der Auslaufzone an
 
 // --- Gebäude im Wasser & Strom-Lastabwurf (Phase 15) ---
 export const BUILDING_FLOOD_GRACE = 12;        // Sekunden im Wasser, bevor ein Gebäude Schaden nimmt
@@ -133,8 +136,8 @@ export const BUILDING_FLOOD_DPS = 8;           // Gebäudeschaden/s bei dauerhaf
 
 // --- Bagger & Terraforming-Aufträge (Phase 15) ---
 export const CONSTRUCT_RANGE = 3.0;            // Weltmeter (+Gebäudegröße), ab der ein Bagger baut
-export const TERRA_JOB_DELTA = 0.08;           // Höhenänderung eines Aufschütt-/Abgrab-Auftrags (gesamt)
-export const TERRA_JOB_RATE = 0.03;            // Höhenänderung pro Sekunde Arbeit
+export const TERRA_JOB_DELTA = 0.12;           // Höhenänderung eines Aufschütt-/Abgrab-Auftrags (gesamt)
+export const TERRA_JOB_RATE = 0.045;           // Höhenänderung pro Sekunde Arbeit
 export const TERRA_RAISE_COST = 8;             // Erde (materials) je Aufschütt-Auftrag
 export const TERRA_LOWER_YIELD = 6;            // Erde aus einem Abgrab-Auftrag
 
