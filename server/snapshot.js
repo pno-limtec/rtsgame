@@ -4,9 +4,9 @@ import { SEA_LEVEL, WET_DEPTH, WATER_MAX_DEPTH, NAVIGABLE_DEPTH } from '../share
 import { resourceCapacity } from '../shared/world.js';
 const OIL_VIS_MAX = 900;
 
-// Dynamisches Wasser kompakt: nur Zellen, die spürbar von der statischen Seehöhe abweichen
-// (geflutet oder trockengelegt). Format: flaches Array [idx, q, idx, q, …], q = Tiefe·255/max.
-const WATER_DEV = WET_DEPTH * 0.5;
+// Dynamisches Wasser kompakt: auch flache Abflussfäden streamen, damit der Client sie als
+// nasse Bodentextur bis zum Meer zeigen kann. Format: [idx, q, idx, q, …], q = Tiefe·255/max.
+const WATER_DEV = WET_DEPTH * 0.22;
 export function serializeWater(world) {
   const t = world.terrain;
   const out = [];
@@ -64,8 +64,11 @@ export function serializeTerraform(world) {
 export function serializeSnow(world) {
   const t = world.terrain;
   if (!t.snow || !t.snowIdx) return [];
+  // Über das volle Schneefallband streamen, damit im Sturm gewachsener Neuschnee unterhalb der
+  // Gipfelkappe beim Client ankommt (Bandzellen ohne Schnee fallen über die Schwelle heraus).
+  const cells = t.snowFallIdx || t.snowIdx;
   const out = [];
-  for (const i of t.snowIdx) {
+  for (const i of cells) {
     if (t.snow[i] > 0.005) out.push(i, Math.min(100, Math.round(t.snow[i] * 100)));
   }
   return out;
@@ -124,6 +127,7 @@ export function serializeInit(world) {
       roads: serializeRoads(world), // Straßennetz — danach via snap.roads bei Änderung
       ground: serializeGroundWear(world), // Fahrzeugspuren/Matsch für Join-in-Progress
       bridge: Array.from(t.bridge), // neutrale Furten/Brücken aus der Weltgenerierung
+      sources: Array.from(t.sources || []), // Flussquellen (Quellzellen) — Client zeigt dort aufquellendes Wasser
     },
     players: world.players.map(playerView),
     controls: serializeControls(world),
@@ -169,6 +173,7 @@ export function serializeSnapshot(world) {
       wl: Math.max(0, Math.round(world.env.weatherLeft)),
       f: (world.env.forecast || []).slice(0, 3).map(x => [x.weather, Math.max(0, Math.round(x.duration))]),
       q: world.env.quake ? [r1(world.env.quake.x), r1(world.env.quake.y)] : 0,
+      c: (world.weatherClouds || []).slice(0, 8).map(c => [r1(c.x), r1(c.y), r1(c.r), r1(c.left)]),
     } : null,
     controls: serializeControls(world),
     events: world.events,
@@ -185,6 +190,9 @@ export function serializeSnapshot(world) {
   if (world.tick % 10 === 0) snap.snow = serializeSnow(world);
   // Straßennetz nur senden, wenn es sich geändert hat (roads.js setzt roadDirty).
   if (t.roadDirty) { snap.roads = serializeRoads(world); t.roadDirty = false; }
+  // Tunnel nur bei Änderung senden (Bau/Aktivierung/Versiegelung/Kollaps) — sonst günstig.
+  const tsig = tunnelSig(world);
+  if (tsig !== world._tunnelSig) { snap.tunnels = serializeTunnels(world); world._tunnelSig = tsig; }
   return snap;
 }
 
@@ -206,7 +214,7 @@ const KINDS = [
   'hq', 'power_plant', 'refinery', 'oil_derrick', 'barracks', 'factory', 'airbase', 'shipyard',
   'depot', 'turret', 'sam_site', 'wall', 'trench', 'builder', 'dam',
   'engineer', 'rifleman', 'at_soldier', 'scout', 'tank', 'artillery', 'flak_track', 'harvester',
-  'recon_drone', 'gunship', 'bomber', 'transport_air', 'patrol_boat', 'destroyer', 'submarine',
+  'recon_drone', 'gunship', 'bomber', 'cloud_seeder', 'transport_air', 'patrol_boat', 'destroyer', 'submarine',
   'amphib_transport', 'sea_builder', 'sonar',
   'solar_plant', 'water_pump', 'pipe', 'bridge', 'tunnel', 'road',
   'ore_depot', 'material_depot', 'water_tower', 'oil_depot', 'truck', 'earth_pile', 'tractor', 'ore_pile',
@@ -216,12 +224,28 @@ const KIND_INDEX = Object.fromEntries(KINDS.map((k, i) => [k, i]));
 export function kindId(k) { return KIND_INDEX[k] ?? -1; }
 export function kindName(i) { return KINDS[i]; }
 export const KIND_TABLE = KINDS;
-const ROLES = [null, 'ore', 'materials', 'earth'];
+const ROLES = [null, 'ore', 'build', 'earth'];
 const ROLE_INDEX = new Map(ROLES.map((r, i) => [r, i]));
-function roleId(r) { return ROLE_INDEX.get(r) || 0; }
+function roleId(r) { return ROLE_INDEX.get(r === 'materials' ? 'build' : r) || 0; }
 function unitFlags(world, e) {
   return (e.submerged ? 1 : 0)
-    | (e._exposeUntil != null && world.time < e._exposeUntil ? 2 : 0);
+    | (e._exposeUntil != null && world.time < e._exposeUntil ? 2 : 0)
+    | (e.inTunnel ? 4 : 0); // in der Tunnelröhre verborgen → Client zeichnet nur Umriss
+}
+
+// Tunnel-Strukturen kompakt: id, flache Tile-Liste, beide Mündungs-Tiles, Versiegelungs-/Aktivflags.
+export function serializeTunnels(world) {
+  return (world.tunnels || []).map(tn => ({
+    id: tn.id,
+    tiles: tn.tiles.flat(),
+    a: tn.aTile, b: tn.bTile,
+    sa: tn.sealedA ? 1 : 0, sb: tn.sealedB ? 1 : 0, on: tn.active ? 1 : 0,
+  }));
+}
+
+// Signatur der Tunnel (Anzahl + Zustände) — nur bei Änderung neu senden.
+function tunnelSig(world) {
+  return (world.tunnels || []).map(tn => `${tn.id}:${tn.active ? 1 : 0}${tn.sealedA ? 1 : 0}${tn.sealedB ? 1 : 0}`).join(',');
 }
 function ownerMask(owners) {
   let mask = 0;

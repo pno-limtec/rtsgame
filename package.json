@@ -8,6 +8,7 @@
     "test": "node test/sim-test.js",
     "ai-coverage": "node test/ai-coverage.js",
     "balance": "node test/balance-check.js",
+    "match-sim": "node test/match-sim.js",
     "smoke": "node test/smoke.js"
   },
   "engines": {

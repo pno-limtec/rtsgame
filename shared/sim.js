@@ -1,9 +1,9 @@
 // Simulations-Orchestrator: fester Tick-Loop, Befehlsverarbeitung, Lebenszyklus.
 // Kennt weder Rendering noch Netzwerk — rein deterministische Logik.
-import { DT, MAX_UNITS_PER_PLAYER, MUD_IMPASSABLE, TERRA_RAISE_COST } from './constants.js';
+import { DT, FLOOD_DEPTH, MAX_UNITS_PER_PLAYER, MUD_IMPASSABLE, TERRA_RAISE_COST } from './constants.js';
 import {
   createWorld, spawnBuilding, buildSpatial, ownerEntities,
-  canAfford, pay, effectiveCost, canPlaceBuilding, removeFortification, removeSolidBlock,
+  canAfford, pay, effectiveCost, canPlaceBuilding, requiresBuildingAnchor, removeFortification, removeSolidBlock,
 } from './world.js';
 import { stepEconomy } from './systems/economy.js';
 import { stepProduction } from './systems/production.js';
@@ -19,6 +19,7 @@ import { stepEnvironment } from './systems/environment.js';
 import { stepRoads } from './systems/roads.js';
 import { stepConstruction, addTerraJob, assignEarthPile } from './systems/construction.js';
 import { stepRecovery } from './systems/recovery.js';
+import { placeTunnel, onTunnelMouthDestroyed, stepTunnels } from './systems/tunnel.js';
 import { forestBlocks, inBounds, isPassable, tIdx, worldToTile, tileToWorld } from './terrain.js';
 import { stepAi, initAi } from './ai/ai.js';
 
@@ -50,6 +51,7 @@ export function step(world) {
   stepWater(world);        // dynamisches Wasser: Fluss, Stau, Fluten, Ertrinken
   stepAir(world);          // Luft-Logistik: leere Maschinen kehren zur Basis zum Nachladen zurück
   stepMovement(world);
+  stepTunnels(world);      // Tunnel: Zugehörigkeit (verborgene Einheiten) + Wasserfluss durch die Röhre
   stepRecovery(world);     // Traktoren bergen verlassene Fahrzeuge aus Matsch/Wasser
   stepConstruction(world); // Bagger: zu Baustellen/Terraform-Aufträgen fahren und arbeiten
   stepRoads(world);        // automatisches Straßennetz zwischen nahen Gebäuden
@@ -75,6 +77,7 @@ function cleanup(world) {
     if (e.dead || e.hp <= 0) {
       if (e.etype === 'building' && e._fortified) removeFortification(world, e); // Deckung/Sperre freigeben
       if (e.etype === 'building' && e._solid) removeSolidBlock(world, e);        // Kollisionssperre freigeben
+      if (e.etype === 'building' && e._tunnelId != null) onTunnelMouthDestroyed(world, e); // Mündung tot → versiegeln/kollabieren
       // Zerstörter Transporter reißt seine Insassen mit in den Untergang.
       if (e.carried && e.carried.length) {
         const waterDeath = e._deathCause === 'water';
@@ -172,9 +175,13 @@ function unitCanStopOn(world, u, tx, ty) {
   const t = world.terrain;
   if (!inBounds(t, tx, ty)) return false;
   if (u.domain === 'air') return true;
-  if (!isPassable(t, u.domain, tx, ty)) return false;
-  if (forestBlocks(t, u.domain, tx, ty, { category: u.category })) return false;
   const i = tIdx(t, tx, ty);
+  const muddyBuilder = u.kind === 'builder'
+    && u.domain === 'land'
+    && t.mud && t.mud[i] > 0.02
+    && (t.water?.[i] || 0) <= FLOOD_DEPTH;
+  if (!isPassable(t, u.domain, tx, ty) && !muddyBuilder) return false;
+  if (forestBlocks(t, u.domain, tx, ty, { category: u.category })) return false;
   if (u.heavy && u.domain === 'land' && t.mud && t.mud[i] >= MUD_IMPASSABLE) return false;
   return true;
 }
@@ -212,6 +219,17 @@ export function applyCommand(world, cmd, playerId) {
       }
       break;
     }
+    case 'seedCloud': {
+      const x = Number(cmd.x), y = Number(cmd.y);
+      if (!Number.isFinite(x) || !Number.isFinite(y)) break;
+      for (const u of commandUnits(world, cmd.units, playerId)) {
+        if (u.kind !== 'cloud_seeder' || !u.weapon?.weatherCloud) continue;
+        u.order = { type: 'seedCloud', x, y };
+        u.target = null;
+        if (Math.hypot(x - u.x, y - u.y) > u.weapon.range * 0.85) setMoveGoal(world, u, x, y);
+      }
+      break;
+    }
     case 'stop': {
       for (const id of cmd.units) {
         const u = world.entities.get(id);
@@ -221,7 +239,8 @@ export function applyCommand(world, cmd, playerId) {
       break;
     }
     case 'setRole': {
-      const role = ['ore', 'materials', 'earth'].includes(cmd.role) ? cmd.role : 'materials';
+      const rawRole = cmd.role === 'materials' ? 'build' : cmd.role;
+      const role = ['ore', 'build', 'earth'].includes(rawRole) ? rawRole : 'build';
       for (const id of cmd.units || []) {
         const u = world.entities.get(id);
         if (!u || u.etype !== 'unit' || u.owner !== playerId || u.kind !== 'builder') continue;
@@ -268,6 +287,11 @@ export function applyCommand(world, cmd, playerId) {
       placeBuilding(world, player, cmd);
       break;
     }
+    case 'tunnel': {
+      // Tunnel als EIN Liniengebäude (Mündung→Mündung), nicht je Tile ein Gebäude.
+      placeTunnel(world, player, cmd.sx | 0, cmd.sy | 0, cmd.ex | 0, cmd.ey | 0, inBuildRadius);
+      break;
+    }
     case 'assist': {
       // Manuelle Zuweisung: selektierten Bagger/LKW zu Baustelle/Erdhaufen/Terraform-Auftrag
       // schicken — die Funktion passt sich automatisch an (Bagger ↔ Bau/Terraforming, LKW ↔ Abfuhr).
@@ -282,7 +306,7 @@ export function applyCommand(world, cmd, playerId) {
             u.order = { type: 'haul_pile', pile: tgt.id, state: 'toPile', resource };
             setMoveGoal(world, u, tgt.x, tgt.y);
           } else if (tgt.buildProgress < 1 && u.kind === 'builder') {
-            u.resourceRole = 'materials';   // Funktion automatisch anpassen
+            u.resourceRole = 'build';   // Funktion automatisch anpassen
             u.order = { type: 'construct', site: tgt.id }; u.target = null;
             setMoveGoal(world, u, tgt.x, tgt.y);
           }
@@ -295,7 +319,7 @@ export function applyCommand(world, cmd, playerId) {
             if (d < bestD) { bestD = d; best = j; }
           }
           if (best) {
-            u.resourceRole = 'materials';
+            u.resourceRole = 'earth';
             u.order = { type: 'terra', job: best.id }; u.target = null;
             setMoveGoal(world, u, best.tx * 2 + 1, best.ty * 2 + 1);
           }
@@ -352,8 +376,8 @@ function placeBuilding(world, player, cmd) {
   const def = world.data.buildings[cmd.building];
   if (!def) return;
   const size = def.size || 1;
-  if (!canPlaceBuilding(world, cmd.tx, cmd.ty, size, def)) return;
-  if (!def.remoteBuild && !inBuildRadius(world, player.id, cmd.tx, cmd.ty, size)) return;
+  if (!canPlaceBuilding(world, cmd.tx, cmd.ty, size, def, player.id)) return;
+  if (!def.remoteBuild && !requiresBuildingAnchor(def) && !inBuildRadius(world, player.id, cmd.tx, cmd.ty, size)) return;
   const bcost = effectiveCost(world, player.id, def);
   if (!canAfford(player, bcost)) return;
   pay(player, bcost);

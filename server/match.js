@@ -87,6 +87,35 @@ export class Match {
     return seat.id;
   }
 
+  // Zuschauer übernimmt gezielt einen aktuell von der KI gesteuerten, freien Sitz.
+  takeoverAi(name, preferredSeat) {
+    const seat = this.seats.find(s => s.id === preferredSeat && !s.occupant);
+    const player = seat ? this.player(seat.id) : null;
+    if (!seat || !player || player.defeated || player.controller !== 'ai') return null;
+    seat.occupant = name || 'Spieler';
+    seat.disconnectAt = null;
+    applyCommand(this.world, { type: 'setController', playerId: seat.id, controller: 'human', name: seat.occupant }, seat.id);
+    this.syncSpectatorControls();
+    return seat.id;
+  }
+
+  // Mensch gibt seinen Sitz sofort wieder an die KI zurück und kann weiter zuschauen.
+  releaseHuman(seatId) {
+    const seat = this.seats.find(s => s.id === seatId);
+    const player = seat ? this.player(seat.id) : null;
+    if (!seat || !player || !seat.occupant) return null;
+    seat.occupant = null;
+    seat.disconnectAt = null;
+    applyCommand(this.world, {
+      type: 'setController',
+      playerId: seat.id,
+      controller: 'ai',
+      name: `KI-${seat.id + 1}`,
+    }, seat.id);
+    this.syncSpectatorControls();
+    return seat.id;
+  }
+
   // Verbindung verloren: Sitz nicht sofort räumen — KI übernimmt nach Timeout (Reconnect-Fenster).
   markDisconnected(seatId) {
     const seat = this.seats.find(s => s.id === seatId);

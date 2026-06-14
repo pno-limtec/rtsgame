@@ -28,8 +28,8 @@
   "pipe": {
     "label": "Pipeline", "role": "economy",
     "hp": 150, "cost": { "ore": 30, "materials": 5 }, "buildTime": 1,
-    "power": 0, "size": 1, "sight": 2, "pipe": true, "buildRadius": 3,
-    "desc": "Verbindet Pumpwerke mit Wassertürmen und Bohrtürme mit Öldepots. Verwundbar — Leitungsbruch stoppt die Förderung."
+    "power": 0, "size": 1, "sight": 2, "pipe": true, "buildRadius": 3, "waterOptional": true, "remoteBuild": true,
+    "desc": "Verbindet Pumpwerke mit Wassertürmen und Bohrtürme mit Öldepots. Kann auch durchs Wasser verlegt werden. Verwundbar — Leitungsbruch stoppt die Förderung."
   },
   "refinery": {
     "label": "Raffinerie", "role": "economy",
@@ -85,10 +85,10 @@
   },
   "airbase": {
     "label": "Luftbasis", "role": "production",
-    "hp": 800, "cost": { "ore": 500 }, "buildTime": 12,
-    "power": -50, "size": 3, "sight": 7,
+    "hp": 800, "cost": { "ore": 1200 }, "buildTime": 20,
+    "power": -80, "size": 3, "sight": 7,
     "produces_category": "air",
-    "desc": "Baut und betankt Luftfahrzeuge."
+    "desc": "Teure Spezialproduktion: baut und betankt Luftfahrzeuge."
   },
   "shipyard": {
     "label": "Werft", "role": "production",
@@ -137,20 +137,21 @@
   "road": {
     "label": "Straße", "role": "infrastructure",
     "hp": 250, "cost": { "ore": 20, "materials": 4 }, "buildTime": 1,
-    "power": 0, "size": 1, "sight": 1, "roadBuilt": true, "buildRadius": 4, "earthYield": 2,
-    "desc": "Befestigte Fahrbahn, auch weit außerhalb der Basis kettenbar. Fahrzeuge fahren schneller und überwinden steilere Hänge (Serpentinen)."
+    "power": 0, "size": 1, "sight": 1, "roadBuilt": true, "buildRadius": 4, "waterOptional": true, "remoteBuild": true, "earthYield": 2,
+    "desc": "Befestigte Fahrbahn, auch weit außerhalb der Basis kettenbar (auch als Furt durchs Wasser). Fahrzeuge fahren schneller und überwinden steilere Hänge (Serpentinen)."
   },
   "bridge": {
     "label": "Brücke", "role": "infrastructure",
     "hp": 700, "cost": { "ore": 120, "materials": 25 }, "buildTime": 5,
-    "power": 0, "size": 1, "sight": 3, "bridges": true, "buildOnWater": true, "buildRadius": 3,
-    "desc": "Landeinheiten überqueren Wasser; Schiffe passieren darunter. Zerstörbar — Nachschublinien sichern!"
+    "power": 0, "size": 1, "sight": 3, "bridges": true, "buildOnWater": true, "buildRadius": 3, "lineBuild": true, "remoteBuild": true,
+    "desc": "Per Linie über Wasser gezogen (Ufer zu Ufer, wie ein Tunnel). Landeinheiten überqueren Wasser; Schiffe passieren darunter. Zerstörbar — Nachschublinien sichern!"
   },
   "tunnel": {
     "label": "Tunnel", "role": "infrastructure",
-    "hp": 900, "cost": { "ore": 150, "materials": 30 }, "buildTime": 6,
+    "hp": 900, "cost": { "ore": 60, "materials": 10 }, "buildTime": 6,
     "power": 0, "size": 1, "sight": 2, "tunnels": true, "buildOnCliff": true, "buildRadius": 3, "earthYield": 25,
-    "desc": "Gräbt einen Durchgang durch Klippen/Berge. Der Aushub liefert Erde als Baumaterial."
+    "lineBuild": true,
+    "desc": "Durchgehende Röhre durch Klippen/Berge — wie eine Straße per Linie gezogen (Hang zu Hang), aber deutlich teurer (Kosten je Tile). Fahrzeuge UND Wasser kommen durch; Einheiten sind in der Röhre verborgen. Eine zerstörte Mündung versiegelt das Ende, zwei lassen den Tunnel mit allen Einheiten darin einstürzen."
   },
   "wall": {
     "label": "Wall", "role": "fortification",

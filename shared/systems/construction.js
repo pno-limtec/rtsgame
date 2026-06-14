@@ -6,9 +6,9 @@
 // Läuft in sim.js NACH stepMovement (frische Positionen). Baustellen tragen
 // `_builderNear = world.tick`, das stepProduction im Folge-Tick als „Arbeiter vor Ort" liest.
 import {
-  DT, CONSTRUCT_RANGE, TERRA_JOB_DELTA, TERRA_JOB_RATE, TERRA_LOWER_YIELD,
+  BUILDER_WADE_DEPTH, DT, CONSTRUCT_RANGE, TERRA_JOB_DELTA, TERRA_JOB_RATE, TERRA_LOWER_YIELD,
 } from '../constants.js';
-import { tileToWorld, applyHeightDelta, wakeWaterAround, tIdx, inBounds, isPassable } from '../terrain.js';
+import { TT, tileToWorld, applyHeightDelta, wakeWaterAround, tIdx, inBounds, isPassable } from '../terrain.js';
 import { addResource, canPlaceBuilding, hasResourceDepot, spawnBuilding } from '../world.js';
 import { setMoveGoal, stopMove } from './movement.js';
 
@@ -36,6 +36,7 @@ const canBuildSite = (w) => isBuilder(w);
 const canTerraform = (w) => isBuilder(w);
 const isFree = (e) => e.order.type === 'idle' || e.order.type === 'guard';
 const canHaulPile = (u, pile) => u.kind === 'truck' || (pileResource(pile) === 'ore' && u.abilities?.includes('harvest'));
+const builderRole = (w) => w.resourceRole === 'materials' ? 'build' : w.resourceRole;
 
 export function stepConstruction(world) {
   const jobs = world.terraJobs || (world.terraJobs = []);
@@ -74,22 +75,24 @@ export function stepConstruction(world) {
   // Unbesetzte Aufgaben an die nächsten freien Arbeiter vergeben.
   for (const s of sites) {
     if (claimedSites.has(s.id)) continue;
-    // Bevorzugt der Material-Bagger; NOTFALL-RESERVE: ist kein anderer Bauarbeiter mehr am
+    // Bevorzugt der Bau-Bagger; NOTFALL-RESERVE: ist kein anderer Bauarbeiter mehr am
     // Leben, springt auch der Erz-Bagger ein — sonst Deadlock (Fabrik unfertig → kein
     // Ersatz-Bagger baubar → Wirtschaft steht für immer; in KI-Matches verifiziert).
-    const w = nearestFree(workersByOwner.get(s.owner), s.x, s.y, w => canBuildSite(w, s) && w.resourceRole !== 'ore', w => w.resourceRole === 'materials')
+    const w = nearestFree(workersByOwner.get(s.owner), s.x, s.y, w => canBuildSite(w, s) && builderRole(w) !== 'ore', w => builderRole(w) === 'build')
       || nearestFree(workersByOwner.get(s.owner), s.x, s.y, w => canBuildSite(w, s), null,
         w => isFree(w) || w.order.type === 'harvest');   // Mining unterbrechen — Baustelle geht vor
     if (!w) continue;
     w.order = { type: 'construct', site: s.id }; w.target = null;
-    setMoveGoal(world, w, s.x, s.y);
+    {
+      const [ax, ay] = buildingAccessPoint(world, w, s);
+      setMoveGoal(world, w, ax, ay);
+    }
     claimedSites.add(s.id);
   }
   for (const j of jobs) {
     if (claimedJobs.has(j.id)) continue;
     const [jx, jy] = tileToWorld(j.tx, j.ty);
-    // Bevorzugt der Bagger mit Erde-Funktion (resourceRole 'materials' — 'earth' existiert nicht!).
-    const w = nearestFree(workersByOwner.get(j.owner), jx, jy, w => canTerraform(w) && w.resourceRole !== 'ore', w => w.resourceRole === 'materials');
+    const w = nearestFree(workersByOwner.get(j.owner), jx, jy, w => canTerraform(w) && builderRole(w) !== 'ore', w => builderRole(w) === 'earth');
     if (!w) continue;
     w.order = { type: 'terra', job: j.id }; w.target = null;
     setMoveGoal(world, w, jx, jy);
@@ -110,7 +113,10 @@ export function stepConstruction(world) {
         s._builderNear = world.tick;        // stepProduction lässt den Bau nur damit voranschreiten
         world.events.push({ type: 'dig', x: w.x, y: w.y, owner: w.owner });
       } else {
-        if (!w.moveTarget) setMoveGoal(world, w, s.x, s.y);
+        if (!w.moveTarget) {
+          const [ax, ay] = buildingAccessPoint(world, w, s);
+          setMoveGoal(world, w, ax, ay);
+        }
         // UNERREICHBARE BAUSTELLE: kommt der Arbeiter 45 s lang nicht an (Fluss/Steilhang/
         // zugebaut), wird die Baustelle abgebrochen und größtenteils erstattet — sonst hängt
         // die gesamte Bauwirtschaft für immer an einem Geisterprojekt (KI-Deadlock, verifiziert).
@@ -231,7 +237,10 @@ function assignTruckHauling(world, workersByOwner) {
         t.resourceRole = t.cargoResource;
         t.order = { type: 'haul_pile', pile: t.order.pile || null, state: 'toDepot', resource: t.cargoResource };
         const depot = nearestResourceDepot(world, t, t.cargoResource);
-        if (depot) setMoveGoal(world, t, depot.x, depot.y);
+        if (depot) {
+          const [ax, ay] = buildingAccessPoint(world, t, depot);
+          setMoveGoal(world, t, ax, ay);
+        }
         continue;
       }
       if (!piles.length) continue;
@@ -273,7 +282,11 @@ function stepTruckHaul(world, t) {
   }
   const depot = nearestResourceDepot(world, t, resource);
   if (!depot) { t.order = { type: 'idle' }; return; }
-  if (Math.hypot(depot.x - t.x, depot.y - t.y) > depot.size + 2) { if (!t.moveTarget) setMoveGoal(world, t, depot.x, depot.y); return; }
+  const [dx, dy] = buildingAccessPoint(world, t, depot);
+  if (Math.hypot(depot.x - t.x, depot.y - t.y) > depot.size + 2) {
+    if (!t.moveTarget) setMoveGoal(world, t, dx, dy);
+    return;
+  }
   const pl = world.players.find(p => p.id === t.owner);
   if (pl) addResource(world, pl, resource, t.cargo || 0);
   world.events.push({ type: 'dump', x: t.x, y: t.y, dx: depot.x, dy: depot.y, unit: t.id, owner: t.owner, amount: Math.round(t.cargo || 0), resource });
@@ -287,13 +300,45 @@ function pileAccessPoint(world, unit, pile) {
     for (let dy = -r; dy <= r; dy++) for (let dx = -r; dx <= r; dx++) {
       if (Math.max(Math.abs(dx), Math.abs(dy)) !== r) continue;
       const tx = pile.tx + dx, ty = pile.ty + dy;
-      if (!inBounds(terrain, tx, ty) || !isPassable(terrain, unit.domain || 'land', tx, ty)) continue;
+      if (!workerAccessPassable(terrain, unit, tx, ty)) continue;
       const [wx, wy] = tileToWorld(tx, ty);
       const d = (wx - unit.x) ** 2 + (wy - unit.y) ** 2;
       if (d < bestD) { bestD = d; best = [wx, wy]; }
     }
   }
   return best || [pile.x, pile.y];
+}
+
+function buildingAccessPoint(world, unit, building) {
+  const terrain = world.terrain;
+  let best = null, bestD = Infinity;
+  const size = building.size || 1;
+  for (let r = 1; r <= 5; r++) {
+    for (let ty = building.ty - r; ty < building.ty + size + r; ty++) {
+      for (let tx = building.tx - r; tx < building.tx + size + r; tx++) {
+        const edge = tx === building.tx - r || tx === building.tx + size + r - 1
+          || ty === building.ty - r || ty === building.ty + size + r - 1;
+        if (!edge || !workerAccessPassable(terrain, unit, tx, ty)) continue;
+        const [wx, wy] = tileToWorld(tx, ty);
+        if (Math.hypot(building.x - wx, building.y - wy) > size + 2) continue;
+        const d = (wx - unit.x) ** 2 + (wy - unit.y) ** 2;
+        if (d < bestD) { bestD = d; best = [wx, wy]; }
+      }
+    }
+    if (best) break;
+  }
+  return best || [building.x, building.y];
+}
+
+function workerAccessPassable(terrain, unit, tx, ty) {
+  if (!inBounds(terrain, tx, ty)) return false;
+  if (isPassable(terrain, unit.domain || 'land', tx, ty)) return true;
+  if (unit.kind !== 'builder' || unit.domain !== 'land') return false;
+  const i = tIdx(terrain, tx, ty);
+  if ((terrain.water?.[i] || 0) > BUILDER_WADE_DEPTH) return false;
+  const inTunnel = terrain.tunnel && terrain.tunnel[i] > 0;
+  const blocked = terrain.block && terrain.block[i] > 0;
+  return (terrain.type[i] !== TT.CLIFF || inTunnel) && !blocked;
 }
 
 function nearestResourceDepot(world, t, resource) {

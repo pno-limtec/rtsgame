@@ -1,12 +1,13 @@
 // A*-Pfadfindung auf dem Tile-Grid, domänenabhängig (land/air/water/amphibious),
 // mit Steigungslimit je Einheit (Straßen erlauben steilere Passagen — Serpentinen).
 import { isPassable, inBounds, tIdx, heightAt, TT, tileType, slopeOk, forestBlocks } from './terrain.js';
-import { MUD_IMPASSABLE, SLOPE_ON_ROAD } from './constants.js';
+import { BUILDER_WADE_DEPTH, FLOOD_DEPTH, MUD_IMPASSABLE, SLOPE_ON_ROAD, SLOPE_TERRAFORM_BUILDER, WET_DEPTH } from './constants.js';
 
 const NEI = [
   [1, 0, 1], [-1, 0, 1], [0, 1, 1], [0, -1, 1],
   [1, 1, 1.414], [1, -1, 1.414], [-1, 1, 1.414], [-1, -1, 1.414],
 ];
+const GOAL_FALLBACK_RADIUS = 8;
 
 // Bewegungskosten einer Zelle: Steigung & Hügel verteuern, Deckung neutral.
 function tileCost(t, tx, ty, opts) {
@@ -16,46 +17,84 @@ function tileCost(t, tx, ty, opts) {
   return c;
 }
 
+function mudCrawlerPassable(t, domain, tx, ty, opts) {
+  if ((!opts?.mudCrawler && !opts?.builderWade) || domain !== 'land' || !inBounds(t, tx, ty)) return false;
+  const i = tIdx(t, tx, ty);
+  const inTunnel = t.tunnel && t.tunnel[i] > 0;
+  const blocked = t.block && t.block[i] > 0;
+  const depth = t.water?.[i] || 0;
+  const mudOk = opts?.mudCrawler && t.mud && t.mud[i] > 0.02 && depth <= FLOOD_DEPTH;
+  const wadeOk = opts?.builderWade && depth > WET_DEPTH && depth <= BUILDER_WADE_DEPTH;
+  return (t.type[i] !== TT.CLIFF || inTunnel)
+    && !blocked
+    && (mudOk || wadeOk);
+}
+
 function passableFor(t, domain, tx, ty, opts) {
-  if (!isPassable(t, domain, tx, ty)) return false;
+  if (!isPassable(t, domain, tx, ty, opts?.category) && !mudCrawlerPassable(t, domain, tx, ty, opts)) return false;
   if (forestBlocks(t, domain, tx, ty, opts)) return false;
   if (opts && opts.heavy && domain === 'land' && t.mud && t.mud[tIdx(t, tx, ty)] >= MUD_IMPASSABLE) return false;
   return true;
 }
 
 export function findPath(t, domain, sx, sy, gx, gy, maxIter = 6000, maxSlope = Infinity, opts = null) {
-  if (!inBounds(t, gx, gy)) return null;
-  if (sx === gx && sy === gy) return [];
-  // Ziel unpassierbar → nächste passierbare Nachbarzelle suchen.
-  if (!passableFor(t, domain, gx, gy, opts)) {
-    let best = null, bestD = Infinity;
-    for (let r = 1; r <= 4 && !best; r++) {
-      for (let y = -r; y <= r; y++) for (let x = -r; x <= r; x++) {
-        const nx = gx + x, ny = gy + y;
-        if (!passableFor(t, domain, nx, ny, opts)) continue;
-        const d = x * x + y * y;
-        if (d < bestD) { bestD = d; best = [nx, ny]; }
-      }
-    }
-    if (!best) return null;
-    gx = best[0]; gy = best[1];
-  }
+  sx = clampTile(sx, t.w);
+  sy = clampTile(sy, t.h);
+  gx = clampTile(gx, t.w);
+  gy = clampTile(gy, t.h);
+  if (sx === gx && sy === gy) return markGoal([], sx, sy);
 
+  const exactI = gy * t.w + gx;
+  if (passableFor(t, domain, gx, gy, opts)) {
+    return searchPath(t, domain, sx, sy, gx, gy, new Set([exactI]), 0, maxIter, maxSlope, opts);
+  }
+  const fallback = collectGoalCandidates(t, domain, gx, gy, opts);
+  if (!fallback.length) return null;
+  return searchPath(t, domain, sx, sy, gx, gy, new Set(fallback), GOAL_FALLBACK_RADIUS, maxIter, maxSlope, opts);
+}
+
+function clampTile(v, max) {
+  return Math.max(0, Math.min(max - 1, v | 0));
+}
+
+function collectGoalCandidates(t, domain, gx, gy, opts) {
+  const out = [];
+  for (let r = 0; r <= GOAL_FALLBACK_RADIUS; r++) {
+    for (let dy = -r; dy <= r; dy++) for (let dx = -r; dx <= r; dx++) {
+      if (Math.max(Math.abs(dx), Math.abs(dy)) !== r) continue;
+      const nx = gx + dx, ny = gy + dy;
+      if (!passableFor(t, domain, nx, ny, opts)) continue;
+      out.push({ i: ny * t.w + nx, d: dx * dx + dy * dy });
+    }
+  }
+  out.sort((a, b) => a.d - b.d);
+  return out.map(c => c.i);
+}
+
+function searchPath(t, domain, sx, sy, hx, hy, goalSet, goalRadius, maxIter, maxSlope, opts) {
   const W = t.w;
+  const N = W * t.h;
   const open = [];                 // binärer Min-Heap (Array von [f, idx])
-  const came = new Map();
-  const g = new Map();
-  const startI = sy * W + sx, goalI = gy * W + gx;
-  const H = (i) => { const ix = i % W, iy = (i / W) | 0; return Math.hypot(ix - gx, iy - gy); };
-  g.set(startI, 0);
+  const came = new Int32Array(N); came.fill(-1);
+  const closed = new Uint8Array(N);
+  const g = new Float64Array(N); g.fill(Infinity);
+  const startI = sy * W + sx;
+  if (goalSet.has(startI)) return markGoal([], sx, sy);
+  const H = (i) => {
+    const ix = i % W, iy = (i / W) | 0;
+    return Math.max(0, Math.hypot(ix - hx, iy - hy) - goalRadius);
+  };
+  g[startI] = 0;
   heapPush(open, [H(startI), startI]);
   let iter = 0;
 
   while (open.length && iter++ < maxIter) {
     const cur = heapPop(open)[1];
-    if (cur === goalI) return reconstruct(came, cur, W);
+    if (closed[cur]) continue;
+    closed[cur] = 1;
+    if (goalSet.has(cur)) return reconstruct(came, cur, W);
     const cx = cur % W, cy = (cur / W) | 0;
-    const cg = g.get(cur);
+    const cg = g[cur];
     for (const [dx, dy, base] of NEI) {
       const nx = cx + dx, ny = cy + dy;
       if (!passableFor(t, domain, nx, ny, opts)) continue;
@@ -64,10 +103,10 @@ export function findPath(t, domain, sx, sy, gx, gy, maxIter = 6000, maxSlope = I
       const ni = ny * W + nx;
       // Steigungslimit (nur Boden): zu steile Übergänge sind tabu — außer auf Straßen.
       if (maxSlope !== Infinity && (domain === 'land' || domain === 'amphibious')
-        && !slopeOk(t, cur, ni, maxSlope, SLOPE_ON_ROAD)) continue;
+        && !slopeOk(t, cur, ni, maxSlope, SLOPE_ON_ROAD, opts?.terraCrawler ? SLOPE_TERRAFORM_BUILDER : null)) continue;
       const ng = cg + base * tileCost(t, nx, ny, opts);
-      if (ng < (g.get(ni) ?? Infinity)) {
-        g.set(ni, ng); came.set(ni, cur);
+      if (ng < g[ni]) {
+        g[ni] = ng; came[ni] = cur;
         heapPush(open, [ng + H(ni), ni]);
       }
     }
@@ -77,8 +116,14 @@ export function findPath(t, domain, sx, sy, gx, gy, maxIter = 6000, maxSlope = I
 
 function reconstruct(came, cur, W) {
   const path = [];
-  while (came.has(cur)) { path.push([cur % W, (cur / W) | 0]); cur = came.get(cur); }
+  const goal = [cur % W, (cur / W) | 0];
+  while (came[cur] >= 0) { path.push([cur % W, (cur / W) | 0]); cur = came[cur]; }
   path.reverse();
+  return markGoal(path, goal[0], goal[1]);
+}
+
+function markGoal(path, gx, gy) {
+  path.goal = [gx, gy];
   return path;
 }
 

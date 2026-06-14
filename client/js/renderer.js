@@ -1,7 +1,7 @@
 // 3D-Rendering mit Three.js: Gelände aus Höhenkarte, Einheiten/Gebäude-Meshes,
 // Kamera, Picking, einfache Effekte (Explosionen, Mündungsfeuer).
 import * as THREE from 'three';
-import { cloudReflectionTexture, groundTexture, meadowTexture, oilSlickTexture, panelTexture, puffTexture } from './textures.js';
+import { groundTexture, meadowTexture, oilSlickTexture, panelTexture, puffTexture } from './textures.js';
 import { ModelLibrary } from './models.js';
 import { makeBuildingMesh } from './buildings3d.js';
 
@@ -20,28 +20,60 @@ const WEATHER_SNOW_LINE = 0.82;
 const SUB_DETECT_RANGE = 5;
 const TERRA_PREVIEW_DELTA = 0.12;
 const TERRA_PREVIEW_MIN_HEIGHT = 0.02;
-const TERRA_PREVIEW_MAX_HEIGHT = 1.68;
+const TERRA_PREVIEW_MAX_HEIGHT = 1.92;
 const CLIENT_NAVIGABLE_DEPTH = 0.12;
 const WATER_SHOW_DEPTH = 0.05;
 const WATER_HIDE_DEPTH = 0.032;
-const FLOOD_RUNOFF_DEPTH = 0.028;
-const FLOOD_SURFACE_DEPTH = CLIENT_NAVIGABLE_DEPTH;
-const WET_GROUND_MIN_DEPTH = 0.018;
+// Wasser-Glättung: die sichtbare Tiefe gleitet in kleinen Schritten zur Snapshot-Zieltiefe,
+// statt alle 250 ms ruckartig zu springen (staccato). Reine Optik, keine Simulationswirkung.
+const WATER_EASE_RATE = 5.0;        // Annäherungsrate pro Sekunde (exponentielles Gleiten)
+const WATER_EASE_SNAP = 5e-4;       // unter dieser Restdifferenz auf den Zielwert einrasten
+const WATER_ANIM_INTERVAL = 1 / 30; // Glättung mit ~30 Hz auffrischen (begrenzt Mesh-Neuaufbau)
+const FLOOD_RUNOFF_DEPTH = 0.055;
+const FLOOD_SURFACE_DEPTH = 0.058;
+const WET_GROUND_MIN_DEPTH = 0.008;
+const WET_GROUND_FULL_DEPTH = 0.036;
+const WET_GROUND_NEIGHBOR_DEPTH = 0.010;
+const WATER_EDGE_THRESHOLD = 0.46;
+const FLOOD_VIS_SHOW = 0.58;
+const FLOOD_VIS_HIDE = 0.36;
+const WATER_SURFACE_CLEAR = 0.075;
+const WATER_EDGE_CLOSE_MAX_LIFT = 0.05;  // wie hoch Wasser eine Trockenlücke überbrücken darf — niedriger = weniger Wasserflächen, die durchs Ufer/Felsen stechen (Clipping)
+const WATER_PLANE_LINK_EPS = 0.42;     // world units: Zellen mit ähnlichem Pegel bilden eine ebene Fläche
+const WATER_PLANE_QUANT = 0;           // 0 = kein Pegel-Raster; Pegel steigt/sinkt kontinuierlich
+const WATER_PLANE_DEADBAND = 0.018;    // nur winziges CA-Rauschen ignorieren
+const WATER_PLANE_RISE_SMOOTH = 0.070; // Regenpegel weich, aber sichtbar nachführen
+const WATER_PLANE_FALL_SMOOTH = 0.045; // Abfluss trocknet langsamer aus als er flutet
+const FLOOD_CHANNEL_DEPTH = 0.052;
+const WATER_DARK_DEPTH_START = 0.085;
+const WATER_DARK_DEPTH_RANGE = 0.34;
+const WATER_EDGE_TUCK_Y = 0.026;
+const WATER_NIGHT_COLOR_MIN = 0.16;
+const WATER_NIGHT_OPACITY_MIN = 0.40;
+const WATER_STANDING_FLOW_MAX = 0.13;
+const WATER_STANDING_LEVEL_QUANTILE = 0.68;
 
 // Tag/Nacht-Farbpaletten für Himmel & Nebel (werden nach Tageslicht überblendet).
 const SKY_DAY = new THREE.Color(0x9ec8e8), SKY_NIGHT = new THREE.Color(0x070b14);
 const SKY_RAIN = new THREE.Color(0x5d6b78);
 const SKY_DROUGHT = new THREE.Color(0xd2b77a);
+const WEATHER_FOG_DAY = new THREE.Color(0x9faab0);
+const WEATHER_FOG_NIGHT = new THREE.Color(0x111821);
 const WATER_KINDS = new Set(['patrol_boat', 'destroyer', 'amphib_transport', 'sea_builder', 'submarine', 'underwater_drone']);
+const SURFACE_SHIP_KINDS = new Set(['patrol_boat', 'destroyer', 'amphib_transport', 'sea_builder']);
 // Bauten, die ans Pipeline-Netz andocken (für die optische Rohrverbindung).
 const PIPE_CONNECT = new Set(['pipe', 'water_pump', 'water_tower', 'oil_derrick', 'oil_depot']);
+const PIPE_BRIDGE_CHAIN_MIN = TILE * 8;
+const PIPE_BRIDGE_SPACING = TILE * 7;
+const PIPE_BRIDGE_WIDTH = TILE * 1.8;
+const PIPE_BRIDGE_LIFT = 1.05;
 const INFANTRY_KINDS = new Set(['engineer', 'rifleman', 'at_soldier', 'aa_soldier']);
-const AIR_UNIT_KINDS = new Set(['recon_drone', 'gunship', 'bomber', 'transport_air']);
+const AIR_UNIT_KINDS = new Set(['recon_drone', 'gunship', 'bomber', 'cloud_seeder', 'transport_air']);
 const LAND_VEHICLE_KINDS = new Set(['scout', 'tank', 'artillery', 'flak_track', 'harvester', 'builder', 'truck', 'tractor']);
 const HEAVY_TRACK_KINDS = new Set(['tank', 'artillery', 'harvester']);
 const LIGHTED_UNIT_KINDS = new Set([
   'scout', 'tank', 'artillery', 'flak_track', 'harvester', 'builder', 'truck', 'tractor',
-  'recon_drone', 'gunship', 'bomber', 'transport_air',
+  'recon_drone', 'gunship', 'bomber', 'cloud_seeder', 'transport_air',
   'patrol_boat', 'destroyer', 'submarine', 'underwater_drone', 'amphib_transport', 'sea_builder',
 ]);
 const wrapAngle = (a) => { while (a > Math.PI) a -= Math.PI * 2; while (a < -Math.PI) a += Math.PI * 2; return a; };
@@ -50,6 +82,8 @@ const smoothstep = (a, b, x) => {
   const t = Math.max(0, Math.min(1, (x - a) / Math.max(1e-6, b - a)));
   return t * t * (3 - 2 * t);
 };
+const UNDERWATER_OBJECT_TINT = new THREE.Color(0x071923);
+const DEEP_SEA_SKIRT_COLOR = new THREE.Color(0x062c46);
 function hash01(x, y, s = 0) {
   let h = Math.imul(x | 0, 374761393) ^ Math.imul(y | 0, 668265263) ^ Math.imul(s | 0, 224682251);
   h = Math.imul(h ^ (h >>> 13), 1274126177);
@@ -88,6 +122,7 @@ function perfProfile(level) {
       rainDrops: 360,
       effectCap: 150,
       faunaStep: 0.10,
+      waterAnimStep: 0.11,
       uiInterval: 450,
     },
     medium: {
@@ -108,6 +143,7 @@ function perfProfile(level) {
       rainDrops: 620,
       effectCap: 250,
       faunaStep: 0.055,
+      waterAnimStep: 0.07,
       uiInterval: 320,
     },
     high: {
@@ -128,6 +164,7 @@ function perfProfile(level) {
       rainDrops: 950,
       effectCap: 360,
       faunaStep: 0.03,
+      waterAnimStep: 0.035,
       uiInterval: 250,
     },
   };
@@ -189,6 +226,9 @@ export class Renderer {
     this._lastDt = 1 / 60;      // Render-Delta für zeitbasiertes Mesh-Smoothing
     this._quakeAmp = 0;         // Kamera-Shake-Amplitude (Erdbeben)
     this._flash = 0;            // Blitz-Aufhellung (klingt schnell ab)
+    this._waterAnimT = 0;
+    this._waterDeltaSig = null;
+    this._waterSeaIndices = [];
     this._shadowDirty = true;
     this._shadowDynamic = false;
     this._shadowWait = 0;
@@ -212,9 +252,11 @@ export class Renderer {
     this.oilAmount = null;
     this._oilSet = new Set();
     this._currentFxAt = 0;
+    this._modelPreviewCache = new Map();
+    this._modelPreviewRenderer = null;
 
     // Prozedurale Texturen (CC0/eigenerstellt): Boden-Detail + Partikel-Sprite; Material-Cache je Farbe.
-    this.tex = { ground: groundTexture(), meadow: meadowTexture(), oil: oilSlickTexture(), puff: puffTexture(), clouds: cloudReflectionTexture() };
+    this.tex = { ground: groundTexture(), meadow: meadowTexture(), oil: oilSlickTexture(), puff: puffTexture() };
     this._matCache = new Map();
 
     // Geteilte neutrale Baumaterialien + EIN globales Fenster-Material (emissiv bei Nacht:
@@ -348,7 +390,7 @@ export class Renderer {
     this._fowEnemyMist.clear();
     for (const obj of [
       this.terrainMesh, this.fowMesh, this.waterMesh, this.skirtMesh, this.floodMesh,
-      this.wetGroundMesh, this.trackMesh, this.mudMesh, this.roadMesh, this.bridgeInst, this.oilMesh, this.rockInst, this.grassInst,
+      this.wetGroundMesh, this.trackMesh, this.mudMesh, this.roadMesh, this.bridgeMesh, this.pipeMesh, this.oilMesh, this.rockInst, this.grassInst,
       ...(this.oreMeshes || []),
       ...Object.values(this.treeInst || {}),
       ...(this.wildlife || []).map(a => a.group),
@@ -357,7 +399,7 @@ export class Renderer {
     ]) remove(obj);
     this.terrainMesh = this.fowMesh = this.waterMesh = this.skirtMesh = this.floodMesh = null;
     this.wetGroundMesh = null;
-    this.trackMesh = this.mudMesh = this.roadMesh = this.bridgeInst = this.oilMesh = null;
+    this.trackMesh = this.mudMesh = this.roadMesh = this.bridgeMesh = this.pipeMesh = this.oilMesh = null;
     this.rockInst = this.grassInst = null;
     this.treeInst = null;
     this.oreMats = null;
@@ -365,6 +407,8 @@ export class Renderer {
     this.oilAmount = null;
     this._oilSet = new Set();
     this._oilSig = null;
+    this._wetAmount = null;
+    this._wetScratch = null;
     this._currentFxAt = 0;
     this.wildlife = [];
     this.fish = [];
@@ -374,6 +418,20 @@ export class Renderer {
     this._cachedLampSpots.length = 0;
     this._cachedBeamSpots.length = 0;
     this._lastEntities = [];
+    this._baseBridgeCells = [];
+    this._bridgeSig = '';
+    this._pipeSig = '';
+    this._waterSurfaceVisual = null;
+    this._waterDeltaSig = null;
+    this._waterEasing = null;
+    this._waterAnimAccum = 0;
+    this._floodMaskSettled = false;
+    this.waterSources = [];
+    this._sourceFxAt = 0;
+    this._waterSeaIndices = [];
+    this._waterWaveBase = null;
+    this._waterAnimT = 0;
+    this._rockWaterTint = null;
     this.height = null;
     this.terrainType = null;
     this._permanentWater = null;
@@ -435,6 +493,10 @@ export class Renderer {
     this._colAttr = geo.attributes.color;     // für Schnee-Einfärbung (updateSnow)
     this._rawBaseColors = colors.slice();
     this._baseColors = colors.slice();
+    this._mudAmount = new Float32Array(w * h);
+    this._wetAmount = new Float32Array(w * h);
+    this._wetScratch = new Float32Array(w * h);
+    this._snowPairs = [];
     this.oilAmount = new Uint8Array(w * h);
     this._oilSet = new Set();
     if (init.terrain.oil) this._applyOilDelta(init.terrain.oil);
@@ -470,11 +532,16 @@ export class Renderer {
       ? Float64Array.from(init.terrain.baseWater)
       : Float64Array.from(height, (hv) => Math.max(0, waterLevel - hv));
     this.waterDepth = Float64Array.from(this.waterBase);
+    this.waterTarget = Float64Array.from(this.waterBase); // Snapshot-Zieltiefen; waterDepth gleitet hierher
+    this._waterEasing = new Set();                        // Zellen, deren sichtbare Tiefe gerade nachzieht
+    this._waterAnimAccum = 0;
+    this._floodMaskSettled = false;
     this._waterShown = new Uint8Array(cellCount); // Hysterese-Flag gegen Ufer-Flackern
     this._floodShown = new Uint8Array(cellCount);
     this._floodVisual = new Float32Array(cellCount);
     this._floodGoal = new Float32Array(cellCount);
     this._floodScratch = new Float32Array(cellCount);
+    this._waterSurfaceVisual = new Float32Array(cellCount);
     this._permanentWater = new Uint8Array(cellCount);
     for (let i = 0; i < cellCount; i++) if (type[i] === 3) this._permanentWater[i] = 1;
     if (init.terrain.waterDepth) {
@@ -488,8 +555,12 @@ export class Renderer {
       }
     }
     this._waterOverrides = new Set();
+    // Flussquellen: an diesen Zellen quillt sichtbar Wasser auf — so ist erkennbar, WOHER das
+    // Oberflächenwasser kommt. Snapshot-Strömungspartikel zeigen anschließend, WOHIN es fließt.
+    this.waterSources = Array.isArray(init.terrain.sources) ? init.terrain.sources.slice() : [];
+    this._sourceFxAt = 0;
     this._setWaterGeometryRefs(wgeo);
-    const wmat = makeWaterMaterial(this.tex.clouds);
+    const wmat = makeWaterMaterial();
     this.waterMat = wmat;
     const water = new THREE.Mesh(wgeo, wmat);
     water.renderOrder = 1;
@@ -504,7 +575,7 @@ export class Renderer {
     // schwarzes Loch klafft. Deutlich unter der Seefläche — kein Z-Fighting in der Distanz.
     const skirtGeo = new THREE.PlaneGeometry(w * TILE * 14, h * TILE * 14);
     skirtGeo.rotateX(-Math.PI / 2);
-    this.skirtMat = new THREE.MeshLambertMaterial({ color: 0x0b4f82 });
+    this.skirtMat = new THREE.MeshLambertMaterial({ color: DEEP_SEA_SKIRT_COLOR });
     const skirt = new THREE.Mesh(skirtGeo, this.skirtMat);
     skirt.position.set(w * TILE / 2, waterY - 1.4, h * TILE / 2);
     skirt.receiveShadow = true;
@@ -530,51 +601,59 @@ export class Renderer {
     this._oilDummy = new THREE.Object3D();
     this._buildOilOverlay();
 
-    // Fahrzeugspuren: zwei dunkle Rillen je betroffener Zelle; Matsch als breiter matter Fleck.
+    // Fahrzeugspuren: zwei dunkle Rillen je betroffener Zelle. Matsch färbt die Terrainbasis
+    // braun, statt als rundes Overlay über der Grastextur zu liegen.
     const rutGeo = new THREE.PlaneGeometry(TILE * 0.18, TILE * 0.78); rutGeo.rotateX(-Math.PI / 2);
     this.trackMesh = new THREE.InstancedMesh(rutGeo, new THREE.MeshLambertMaterial({ color: 0x2b241c, transparent: true, opacity: 0.55, depthWrite: false }), 6000);
     this.trackMesh.renderOrder = 2; this.trackMesh.count = 0; this.trackMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
     this.scene.add(this.trackMesh);
-    const mudGeo = new THREE.CircleGeometry(TILE * 0.48, 14); mudGeo.rotateX(-Math.PI / 2);
-    this.mudMesh = new THREE.InstancedMesh(mudGeo, new THREE.MeshLambertMaterial({ color: 0x3a2d20, transparent: true, opacity: 0.68, depthWrite: false }), 3000);
-    this.mudMesh.renderOrder = 2; this.mudMesh.count = 0; this.mudMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
-    this.scene.add(this.mudMesh);
-    const wetGeo = new THREE.CircleGeometry(TILE * 0.50, 14); wetGeo.rotateX(-Math.PI / 2);
+    this.mudMesh = null;
+    const wetGeo = new THREE.CircleGeometry(TILE * 0.64, 18); wetGeo.rotateX(-Math.PI / 2);
     this.wetGroundMesh = new THREE.InstancedMesh(wetGeo,
-      new THREE.MeshLambertMaterial({ color: 0x263326, transparent: true, opacity: 0.50, depthWrite: false }), 9000);
+      new THREE.MeshLambertMaterial({ color: 0x2f3d32, transparent: true, opacity: 0.34, depthWrite: false }), 9000);
     this.wetGroundMesh.renderOrder = 1;
     this.wetGroundMesh.count = 0;
     this.wetGroundMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
     this.scene.add(this.wetGroundMesh);
     this._refreshWetGroundOverlay();
 
-    // Straßen-Overlay (automatisches Netz zwischen Gebäuden) — instanziert, dynamisch.
-    const roadGeo = new THREE.PlaneGeometry(TILE * 1.04, TILE * 1.04); roadGeo.rotateX(-Math.PI / 2);
-    this.roadMesh = new THREE.InstancedMesh(roadGeo, new THREE.MeshLambertMaterial({ color: 0x3b3f44 }), 6000);
-    this.roadMesh.count = 0;
-    this.roadMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    // Straßen-/Brücken-/Pipeline-Overlays: ein zusammenhängendes Mesh pro Netz statt
+    // einzelner Kacheln/Objektstücke. Die Spiellogik bleibt zellbasiert, nur die Optik glättet.
+    this.roadMat = new THREE.MeshLambertMaterial({ color: 0x3b3f44 });
+    this.roadMesh = new THREE.Mesh(this._makeEmptyOverlayGeometry(), this.roadMat);
+    this.roadMesh.renderOrder = 2;
     this.roadMesh.receiveShadow = true;
     this.scene.add(this.roadMesh);
 
-    // Neutrale Furten/Brücken aus der Weltgenerierung (sichern die Landwege über die Flüsse).
+    // Tunnel: durchgehende, dunkle Röhre entlang der Tunneltiles (ein Mesh, leicht über dem
+    // Bergrücken erhaben). Die zwei Mündungsportale rendern als normale Gebäude an den Enden.
+    this.tunnelMat = new THREE.MeshStandardMaterial({ color: 0x231f1a, roughness: 0.92, metalness: 0.04 });
+    this.tunnelMesh = new THREE.Mesh(this._makeEmptyOverlayGeometry(), this.tunnelMat);
+    this.tunnelMesh.renderOrder = 3;
+    this.tunnelMesh.castShadow = true;
+    this.tunnelMesh.receiveShadow = true;
+    this.scene.add(this.tunnelMesh);
+    this._tunnelSig = '';
+
+    this.bridgeMat = new THREE.MeshStandardMaterial({ color: 0x6b5a44, roughness: 0.85 });
+    this.bridgeMesh = new THREE.Mesh(this._makeEmptyOverlayGeometry(), this.bridgeMat);
+    this.bridgeMesh.renderOrder = 3;
+    this.bridgeMesh.castShadow = true;
+    this.bridgeMesh.receiveShadow = true;
+    this.scene.add(this.bridgeMesh);
+    this._baseBridgeCells = [];
     if (init.terrain.bridge) {
-      const cells = [];
-      for (let i = 0; i < init.terrain.bridge.length; i++) if (init.terrain.bridge[i]) cells.push(i);
-      if (cells.length) {
-        const bGeo = new THREE.BoxGeometry(TILE * 1.02, 0.35, TILE * 1.02);
-        const bMat = new THREE.MeshStandardMaterial({ color: 0x6b5a44, roughness: 0.85 });
-        const binst = new THREE.InstancedMesh(bGeo, bMat, cells.length);
-        binst.castShadow = true; binst.receiveShadow = true;
-        const bd = new THREE.Object3D();
-        for (let k = 0; k < cells.length; k++) {
-          const gx = cells[k] % w, gy = (cells[k] / w) | 0;
-          bd.position.set(gx * TILE, Math.max(this.heightAt(gx * TILE, gy * TILE), waterY) + 0.22, gy * TILE);
-          bd.updateMatrix(); binst.setMatrixAt(k, bd.matrix);
-        }
-        this.scene.add(binst);
-        this.bridgeInst = binst;
-      }
+      for (let i = 0; i < init.terrain.bridge.length; i++) if (init.terrain.bridge[i]) this._baseBridgeCells.push(i);
     }
+    this._bridgeSig = '';
+    this.updateBridgeOverlay();
+
+    this.pipeMat = new THREE.MeshStandardMaterial({ color: 0x9aa3ad, roughness: 0.42, metalness: 0.55 });
+    this.pipeMesh = new THREE.Mesh(this._makeEmptyOverlayGeometry(), this.pipeMat);
+    this.pipeMesh.renderOrder = 3;
+    this.pipeMesh.castShadow = true;
+    this.pipeMesh.receiveShadow = true;
+    this.scene.add(this.pipeMesh);
 
     // Erzvorkommen: gedämpftes Muttergestein mit erdigen Adern; nachts verschwindet es im Gelände.
     const ore = init.terrain.ore;
@@ -749,8 +828,11 @@ export class Renderer {
       inst.instanceMatrix.setUsage(THREE.StaticDrawUsage);
       inst.castShadow = true; inst.receiveShadow = true;
       const tint = new THREE.Color();
+      const baseColors = new Float32Array(rocks.length * 3);
+      const cells = new Int32Array(rocks.length);
       for (let k = 0; k < rocks.length; k++) {
         const [idx, gx, gy, kind] = rocks[k];
+        cells[k] = idx;
         const r = hash01(gx, gy, 101);
         const cliff = kind === 2, shore = kind === 1;
         const wx = gx * TILE + (hash01(gx, gy, 111) - 0.5) * TILE * (cliff ? 0.36 : 0.52);
@@ -769,11 +851,15 @@ export class Renderer {
         d.updateMatrix(); inst.setMatrixAt(k, d.matrix);
         const v = 0.72 + hash01(gx, gy, 181) * 0.38;
         tint.setRGB(v * (shore ? 0.70 : cliff ? 0.58 : 0.62), v * (shore ? 0.68 : cliff ? 0.59 : 0.62), v * (shore ? 0.60 : cliff ? 0.55 : 0.58));
+        baseColors[k * 3] = tint.r;
+        baseColors[k * 3 + 1] = tint.g;
+        baseColors[k * 3 + 2] = tint.b;
         inst.setColorAt(k, tint);
       }
       inst.instanceColor.needsUpdate = true;
       this.scene.add(inst);
       this.rockInst = inst;
+      this._rockWaterTint = { inst, cells, baseColors };
     }
     if (meadows.length) {
       const geo = new THREE.PlaneGeometry(TILE * 2.2, TILE * 2.2);
@@ -1042,42 +1128,154 @@ export class Renderer {
   _makeEmptyWaterGeometry() {
     const geo = new THREE.BufferGeometry();
     geo.setAttribute('position', new THREE.Float32BufferAttribute([], 3));
-    geo.setAttribute('aAmp', new THREE.Float32BufferAttribute([], 1));
-    geo.setAttribute('aWet', new THREE.Float32BufferAttribute([], 1));
-    geo.setAttribute('aDepth', new THREE.Float32BufferAttribute([], 1));
-    geo.setAttribute('aFlow', new THREE.Float32BufferAttribute([], 2));
+    geo.setAttribute('uv', new THREE.Float32BufferAttribute([], 2));
+    geo.setAttribute('color', new THREE.Float32BufferAttribute([], 3));
     geo.setAttribute('aSea', new THREE.Float32BufferAttribute([], 1));
     geo.setIndex([]);
     return geo;
   }
 
-  _setWaterGeometryRefs(geo) {
+  _setWaterGeometryRefs(geo, seaIndices = []) {
     this._waterPosAttr = geo.attributes.position || null;
-    this._waterAmpAttr = geo.attributes.aAmp || null;
-    this._waterWetAttr = geo.attributes.aWet || null;
-    this._waterDepthAttr = geo.attributes.aDepth || null;
-    this._waterFlowAttr = geo.attributes.aFlow || null;
     this._waterSeaAttr = geo.attributes.aSea || null;
+    this._waterWaveBase = null;
+    this._waterSeaIndices = seaIndices;
   }
 
-  _writeWaterCellData(idx, renderDepth, surface, amp, wet, depthAttr, flowX, flowZ, sea) {
+  _writeWaterCellData(idx, renderDepth, surface, flowX, flowZ) {
     const terrainY = this.height[idx] * HEIGHT_SCALE;
-    const clear = 0.14;
-    const surf = Math.max(this._smoothedWaterSurface(idx) * HEIGHT_SCALE - 0.045, terrainY + clear);
-    const inland = this.height[idx] + renderDepth > (this.seaLevel ?? 0.28) + 0.02;
-    const waveDepth = Math.max(0, renderDepth - 0.09);
-    const headroom = Math.max(0, (surf - terrainY - 0.04) / 1.8);
+    const clear = WATER_SURFACE_CLEAR;
+    const surf = Math.max((this.height[idx] + renderDepth) * HEIGHT_SCALE, terrainY + clear);
     const flow = this._waterFlowAt(idx);
-    const openSea = this.terrainType?.[idx] === 3 && this.height[idx] + renderDepth <= (this.seaLevel ?? 0.28) + 0.04;
     surface[idx] = surf;
-    amp[idx] = Math.min(headroom, inland
-      ? Math.min(0.10, Math.max(0, renderDepth - 0.14) * HEIGHT_SCALE * 0.16)
-      : Math.min(0.28, waveDepth * HEIGHT_SCALE * 0.30));
-    wet[idx] = this._isPermanentWaterCell(idx) ? 1 : Math.max(0.36, Math.min(1, this._floodVisual?.[idx] || 0));
-    depthAttr[idx] = Math.min(1, Math.max(0, (renderDepth - 0.012) / 0.22));
     flowX[idx] = flow.x;
     flowZ[idx] = flow.z;
-    sea[idx] = openSea ? 1 : 0;
+  }
+
+  _waterColorForDepth(depth, cover = 1, sea = 0, edgeOpen = 0) {
+    const seaAmt = Math.max(0, Math.min(1, sea));
+    const openSea = seaAmt * Math.max(0, Math.min(1, edgeOpen));
+    const effectiveDepth = seaAmt > 0.35 ? Math.max(depth, 0.18 + openSea * 0.34) : depth;
+    const depthDark = smoothstep(WATER_DARK_DEPTH_START, WATER_DARK_DEPTH_START + WATER_DARK_DEPTH_RANGE, effectiveDepth);
+    const deep = Math.max(depthDark, openSea * 0.92);
+    const shallow = 1 - deep;
+    const shore = seaAmt > 0.35
+      ? shallow * (1 - openSea) * 0.28
+      : Math.max(0, Math.min(1, (0.72 - cover) / 0.26)) * 0.22;
+    return {
+      r: Math.min(1, Math.max(0.045, 0.08 + shallow * 0.54 + shore * 0.08)),
+      g: Math.min(1, Math.max(0.16, 0.20 + shallow * 0.58 + shore * 0.07)),
+      b: Math.min(1, Math.max(0.30, 0.34 + shallow * 0.60 + shore * 0.04)),
+    };
+  }
+
+  _seaEdgeOpenAt(wx, wz) {
+    if (!this.mapW || !this.mapH) return 0;
+    const gx = wx / TILE, gy = wz / TILE;
+    const d = Math.min(gx, gy, this.mapW - 1 - gx, this.mapH - 1 - gy);
+    return 1 - smoothstep(2, Math.max(8, Math.min(this.mapW, this.mapH) * 0.075), d);
+  }
+
+  _isSeaWaterCell(idx, depth = 0) {
+    if (this.terrainType?.[idx] !== 3 || !this.height) return false;
+    return this.height[idx] <= (this.seaLevel ?? 0.28) + 0.025
+      && Math.max(depth, this.waterBase?.[idx] || 0) > 0.012;
+  }
+
+  _stabilizeWaterSurfaces(visible, surface, flowX = null, flowZ = null, seaVis = null) {
+    const w = this.mapW, h = this.mapH, n = w * h;
+    if (!this._waterSurfaceVisual || this._waterSurfaceVisual.length !== n) this._waterSurfaceVisual = new Float32Array(n);
+    const visual = this._waterSurfaceVisual;
+    const seen = new Uint8Array(n);
+    const broadSeen = new Uint8Array(n);
+    const stack = [];
+    const dirs = [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [1, -1], [-1, 1], [-1, -1]];
+
+    for (let i = 0; i < n; i++) {
+      if (!visible[i] || broadSeen[i]) continue;
+      const cells = [];
+      const levels = [];
+      let hasSea = false, hasChannel = false, maxFlow = 0;
+      broadSeen[i] = 1;
+      stack.length = 0;
+      stack.push(i);
+      while (stack.length) {
+        const cur = stack.pop();
+        cells.push(cur);
+        levels.push(surface[cur]);
+        hasSea = hasSea || (seaVis ? seaVis[cur] > 0.35 : this._isSeaWaterCell(cur, this.waterDepth?.[cur] || 0));
+        hasChannel = hasChannel || (this.terrainType?.[cur] === 3 && (this.waterBase?.[cur] || 0) > WATER_SHOW_DEPTH * 0.75 && !hasSea);
+        maxFlow = Math.max(maxFlow, Math.hypot(flowX?.[cur] || 0, flowZ?.[cur] || 0));
+        const x = cur % w, y = (cur / w) | 0;
+        for (const [dx, dy] of dirs) {
+          const nx = x + dx, ny = y + dy;
+          if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
+          const j = ny * w + nx;
+          if (broadSeen[j] || !visible[j]) continue;
+          broadSeen[j] = 1;
+          stack.push(j);
+        }
+      }
+      if (hasSea || hasChannel || maxFlow > WATER_STANDING_FLOW_MAX || cells.length < 2) continue;
+      levels.sort((a, b) => a - b);
+      let target = levels[Math.min(levels.length - 1, Math.floor(levels.length * WATER_STANDING_LEVEL_QUANTILE))] || surface[i];
+      if (WATER_PLANE_QUANT > 0) target = Math.round(target / WATER_PLANE_QUANT) * WATER_PLANE_QUANT;
+      for (const cell of cells) {
+        const minY = this.height[cell] * HEIGHT_SCALE + WATER_SURFACE_CLEAR;
+        const cellTarget = target >= minY ? target : Math.max(surface[cell], minY);
+        const prev = visual[cell] || cellTarget;
+        const alpha = cellTarget > prev ? WATER_PLANE_RISE_SMOOTH : WATER_PLANE_FALL_SMOOTH;
+        const next = Math.abs(cellTarget - prev) <= WATER_PLANE_DEADBAND
+          ? prev
+          : prev + (cellTarget - prev) * alpha;
+        visual[cell] = next;
+        surface[cell] = next;
+        seen[cell] = 1;
+      }
+    }
+
+    for (let i = 0; i < n; i++) {
+      if (!visible[i]) { visual[i] = 0; continue; }
+      if (seen[i]) continue;
+      const cells = [];
+      const levels = [];
+      let hasSea = false;
+      const seedSurface = surface[i];
+      seen[i] = 1;
+      stack.length = 0;
+      stack.push(i);
+      while (stack.length) {
+        const cur = stack.pop();
+        cells.push(cur);
+        levels.push(surface[cur]);
+        hasSea = hasSea || (seaVis ? seaVis[cur] > 0.35 : this.terrainType?.[cur] === 3);
+        const x = cur % w, y = (cur / w) | 0;
+        for (const [dx, dy] of dirs) {
+          const nx = x + dx, ny = y + dy;
+          if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
+          const j = ny * w + nx;
+          if (seen[j] || !visible[j]) continue;
+          if (Math.abs(surface[j] - seedSurface) > WATER_PLANE_LINK_EPS) continue;
+          seen[j] = 1;
+          stack.push(j);
+        }
+      }
+      levels.sort((a, b) => a - b);
+      const sample = levels[Math.min(levels.length - 1, Math.floor(levels.length * 0.55))] || seedSurface;
+      let target = hasSea ? (this.seaY ?? sample) : sample;
+      if (WATER_PLANE_QUANT > 0) target = Math.round(target / WATER_PLANE_QUANT) * WATER_PLANE_QUANT;
+      for (const cell of cells) {
+        const minY = this.height[cell] * HEIGHT_SCALE + WATER_SURFACE_CLEAR;
+        const cellTarget = target >= minY ? target : Math.max(surface[cell], minY);
+        const prev = visual[cell] || cellTarget;
+        const alpha = cellTarget > prev ? WATER_PLANE_RISE_SMOOTH : WATER_PLANE_FALL_SMOOTH;
+        const next = Math.abs(cellTarget - prev) <= WATER_PLANE_DEADBAND
+          ? prev
+          : prev + (cellTarget - prev) * alpha;
+        visual[cell] = next;
+        surface[cell] = next;
+      }
+    }
   }
 
   _rebuildWaterMesh() {
@@ -1087,12 +1285,10 @@ export class Renderer {
 
     const visible = new Uint8Array(n);
     const surface = new Float32Array(n);
-    const amp = new Float32Array(n);
-    const wet = new Float32Array(n);
-    const depthAttr = new Float32Array(n);
     const flowX = new Float32Array(n);
     const flowZ = new Float32Array(n);
-    const sea = new Float32Array(n);
+    const depthVis = new Float32Array(n);
+    const seaVis = new Float32Array(n);
 
     let visibleCount = 0;
     for (let i = 0; i < n; i++) {
@@ -1100,7 +1296,9 @@ export class Renderer {
       if (renderDepth <= 0.012) continue;
       visible[i] = 1;
       visibleCount++;
-      this._writeWaterCellData(i, renderDepth, surface, amp, wet, depthAttr, flowX, flowZ, sea);
+      depthVis[i] = renderDepth;
+      seaVis[i] = this._isSeaWaterCell(i, renderDepth) ? 1 : 0;
+      this._writeWaterCellData(i, renderDepth, surface, flowX, flowZ);
     }
 
     // Optische Schließung: schmale, einzelne Trockenlücken zwischen nassen Zellen werden als
@@ -1121,7 +1319,7 @@ export class Renderer {
         const bridged = (l && r) || (u && d) || (ul && dr) || (ur && dl);
         if (!(bridged || n4 >= 3 || n8 >= (pass === 0 ? 5 : 6))) continue;
 
-        let count = 0, surfSum = 0, ampSum = 0, flowSumX = 0, flowSumZ = 0, maxWet = 0, maxDepth = 0, maxSea = 0;
+        let count = 0, surfSum = 0, flowSumX = 0, flowSumZ = 0, depthSum = 0, seaSum = 0;
         for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
           if (!dx && !dy) continue;
           const nx = x + dx, ny = y + dy;
@@ -1130,99 +1328,172 @@ export class Renderer {
           if (!source[j]) continue;
           count++;
           surfSum += surface[j];
-          ampSum += amp[j];
           flowSumX += flowX[j];
           flowSumZ += flowZ[j];
-          maxWet = Math.max(maxWet, wet[j]);
-          maxDepth = Math.max(maxDepth, depthAttr[j]);
-          maxSea = Math.max(maxSea, sea[j]);
+          depthSum += depthVis[j];
+          seaSum += seaVis[j];
         }
         if (!count) continue;
         const avgSurf = surfSum / count;
-        if (this.height[i] * HEIGHT_SCALE > avgSurf + 0.35) continue;
+        if (this.height[i] * HEIGHT_SCALE + WATER_SURFACE_CLEAR > avgSurf + WATER_EDGE_CLOSE_MAX_LIFT) continue;
         visible[i] = 1;
         visibleCount++;
-        surface[i] = Math.max(avgSurf, this.height[i] * HEIGHT_SCALE + 0.08);
-        amp[i] = (ampSum / count) * 0.65;
-        wet[i] = Math.max(0.36, maxWet);
-        depthAttr[i] = Math.max(0.18, maxDepth * 0.82);
+        surface[i] = Math.max(avgSurf, this.height[i] * HEIGHT_SCALE + WATER_SURFACE_CLEAR);
         flowX[i] = flowSumX / count;
         flowZ[i] = flowSumZ / count;
-        sea[i] = maxSea;
+        depthVis[i] = depthSum / count;
+        seaVis[i] = seaSum / count;
       }
     }
+    this._stabilizeWaterSurfaces(visible, surface, flowX, flowZ, seaVis);
 
     if (!visibleCount) {
       const old = this.waterMesh.geometry;
       const geo = this._makeEmptyWaterGeometry();
       this.waterMesh.geometry = geo;
       if (old && old !== geo) old.dispose();
-      this._setWaterGeometryRefs(geo);
+      this._setWaterGeometryRefs(geo, []);
       return;
     }
 
-    const positions = [], amps = [], wets = [], depths = [], flows = [], seas = [], indices = [];
-    const corners = new Int32Array((w + 1) * (h + 1));
-    corners.fill(-1);
-    const ensureCorner = (cx, cy) => {
-      const key = cy * (w + 1) + cx;
-      const cached = corners[key];
-      if (cached >= 0) return cached;
+    const positions = [], uvs = [], colors = [], seaVals = [], indices = [];
+    const seaIndices = [];
+    const fw = w + 1, fh = h + 1, fn = fw * fh;
+    const cover = new Float32Array(fn);
+    const cornerSurface = new Float32Array(fn);
+    const cornerFlowX = new Float32Array(fn);
+    const cornerFlowZ = new Float32Array(fn);
+    const cornerDepth = new Float32Array(fn);
+    const cornerSea = new Float32Array(fn);
+    const cornerX = (cx) => Math.max(0, Math.min((w - 1) * TILE, (cx - 0.5) * TILE));
+    const cornerZ = (cy) => Math.max(0, Math.min((h - 1) * TILE, (cy - 0.5) * TILE));
+    const clamp01 = (v) => Math.max(0, Math.min(1, v));
 
-      let count = 0, surfSum = 0, ampSum = 0, flowSumX = 0, flowSumZ = 0, maxWet = 0, maxDepth = 0, maxSea = 0;
-      let waterTerrainMax = -Infinity;
-      for (let oy = -1; oy <= 0; oy++) for (let ox = -1; ox <= 0; ox++) {
-        const x = cx + ox, y = cy + oy;
-        if (x < 0 || y < 0 || x >= w || y >= h) continue;
-        const i = y * w + x;
-        if (!visible[i]) continue;
-        waterTerrainMax = Math.max(waterTerrainMax, this.height[i] * HEIGHT_SCALE + 0.08);
-        count++;
-        surfSum += surface[i];
-        ampSum += amp[i];
-        flowSumX += flowX[i];
-        flowSumZ += flowZ[i];
-        maxWet = Math.max(maxWet, wet[i]);
-        maxDepth = Math.max(maxDepth, depthAttr[i]);
-        maxSea = Math.max(maxSea, sea[i]);
+    for (let cy = 0; cy < fh; cy++) for (let cx = 0; cx < fw; cx++) {
+      const px = cx - 0.5, py = cy - 0.5;
+      let totalWeight = 0, waterWeight = 0, surfSum = 0, flowSumX = 0, flowSumZ = 0, depthSum = 0, seaSum = 0;
+      let surfaceFloor = 0;
+      for (let yy = Math.max(0, cy - 2); yy <= Math.min(h - 1, cy + 1); yy++) {
+        for (let xx = Math.max(0, cx - 2); xx <= Math.min(w - 1, cx + 1); xx++) {
+          const dx = xx - px, dy = yy - py, d2 = dx * dx + dy * dy;
+          if (d2 > 3.25) continue;
+          const weight = d2 <= 0.55 ? 1 : d2 <= 1.65 ? 0.42 : 0.14;
+          totalWeight += weight;
+          const idx = yy * w + xx;
+          if (!visible[idx]) continue;
+          waterWeight += weight;
+          surfSum += surface[idx] * weight;
+          surfaceFloor = Math.max(surfaceFloor, this.height[idx] * HEIGHT_SCALE + WATER_SURFACE_CLEAR);
+          flowSumX += flowX[idx] * weight;
+          flowSumZ += flowZ[idx] * weight;
+          depthSum += depthVis[idx] * weight;
+          seaSum += seaVis[idx] * weight;
+        }
       }
+      const key = cy * fw + cx;
+      const nearestX = Math.max(0, Math.min(w - 1, Math.round(px)));
+      const nearestY = Math.max(0, Math.min(h - 1, Math.round(py)));
+      const nearest = nearestY * w + nearestX;
+      cover[key] = totalWeight > 0 ? waterWeight / totalWeight : 0;
+      cornerSurface[key] = waterWeight > 0
+        ? Math.max(surfSum / waterWeight, surfaceFloor)
+        : (surface[nearest] || this.height[nearest] * HEIGHT_SCALE + WATER_SURFACE_CLEAR);
+      cornerFlowX[key] = waterWeight > 0 ? flowSumX / waterWeight : 0;
+      cornerFlowZ[key] = waterWeight > 0 ? flowSumZ / waterWeight : 0;
+      cornerDepth[key] = waterWeight > 0 ? depthSum / waterWeight : (depthVis[nearest] || 0);
+      cornerSea[key] = waterWeight > 0 ? seaSum / waterWeight : (seaVis[nearest] || 0);
+    }
+
+    const corner = (cx, cy) => {
+      const key = cy * fw + cx;
+      return {
+        x: cornerX(cx),
+        z: cornerZ(cy),
+        v: cover[key],
+        y: cornerSurface[key],
+        fx: cornerFlowX[key],
+        fz: cornerFlowZ[key],
+        depth: cornerDepth[key],
+        sea: cornerSea[key],
+      };
+    };
+    const lerpPoint = (a, b) => {
+      const span = b.v - a.v;
+      const t = clamp01(Math.abs(span) > 1e-6 ? (WATER_EDGE_THRESHOLD - a.v) / span : 0.5);
+      const waterSide = a.v >= WATER_EDGE_THRESHOLD ? a : b;
+      const drySide = a.v >= WATER_EDGE_THRESHOLD ? b : a;
+      const x = a.x + (b.x - a.x) * t;
+      const z = a.z + (b.z - a.z) * t;
+      const dryGround = this.heightAt(drySide.x, drySide.z);
+      const ground = Math.max(this.heightAt(x, z), Math.min(waterSide.y, dryGround));
+      return {
+        x,
+        z,
+        v: WATER_EDGE_THRESHOLD,
+        y: Math.min(waterSide.y, ground + WATER_EDGE_TUCK_Y),
+        fx: a.fx + (b.fx - a.fx) * t,
+        fz: a.fz + (b.fz - a.fz) * t,
+        depth: a.depth + (b.depth - a.depth) * t,
+        sea: a.sea + (b.sea - a.sea) * t,
+      };
+    };
+    const clipWaterPoly = (poly) => {
+      const out = [];
+      for (let k = 0; k < poly.length; k++) {
+        const a = poly[k], b = poly[(k + 1) % poly.length];
+        const ai = a.v >= WATER_EDGE_THRESHOLD, bi = b.v >= WATER_EDGE_THRESHOLD;
+        if (ai && bi) out.push(b);
+        else if (ai && !bi) out.push(lerpPoint(a, b));
+        else if (!ai && bi) {
+          out.push(lerpPoint(a, b));
+          out.push(b);
+        }
+      }
+      return out;
+    };
+    const pushWaterVertex = (p) => {
       const vx = positions.length / 3;
-      const wx = Math.max(0, Math.min((w - 1) * TILE, (cx - 0.5) * TILE));
-      const wz = Math.max(0, Math.min((h - 1) * TILE, (cy - 0.5) * TILE));
-      const y = Math.max(count ? surfSum / count : 0, Number.isFinite(waterTerrainMax) ? waterTerrainMax : 0);
-      positions.push(wx, y, wz);
-      amps.push(count ? ampSum / count : 0);
-      wets.push(count ? maxWet : 0);
-      depths.push(count ? maxDepth : 0);
-      flows.push(count ? flowSumX / count : 0, count ? flowSumZ / count : 0);
-      seas.push(count ? maxSea : 0);
-      corners[key] = vx;
+      positions.push(p.x, p.y, p.z);
+      const fl = Math.hypot(p.fx, p.fz);
+      const dirX = fl > 0.012 ? p.fx / fl : 0.82;
+      const dirZ = fl > 0.012 ? p.fz / fl : 0.36;
+      const sideX = -dirZ;
+      const sideZ = dirX;
+      const uvScale = 0.105;
+      uvs.push((p.x * sideX + p.z * sideZ) * uvScale, (p.x * dirX + p.z * dirZ) * uvScale);
+      const edgeOpen = p.sea > 0.35 ? this._seaEdgeOpenAt(p.x, p.z) : 0;
+      const c = this._waterColorForDepth(p.depth, p.v, p.sea, edgeOpen);
+      colors.push(c.r, c.g, c.b);
+      const seaVal = Math.max(0, Math.min(1, p.sea));
+      seaVals.push(seaVal);
+      if (seaVal > 0.35) seaIndices.push(vx);
       return vx;
     };
 
     for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
-      const i = y * w + x;
-      if (!visible[i]) continue;
-      const a = ensureCorner(x, y);
-      const b = ensureCorner(x + 1, y);
-      const c = ensureCorner(x, y + 1);
-      const d = ensureCorner(x + 1, y + 1);
-      indices.push(a, c, b, b, c, d);
+      const poly = clipWaterPoly([
+        corner(x, y),
+        corner(x + 1, y),
+        corner(x + 1, y + 1),
+        corner(x, y + 1),
+      ]);
+      if (poly.length < 3) continue;
+      const base = positions.length / 3;
+      for (const p of poly) pushWaterVertex(p);
+      for (let k = 1; k < poly.length - 1; k++) indices.push(base, base + k, base + k + 1);
     }
 
     const geo = new THREE.BufferGeometry();
     geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
-    geo.setAttribute('aAmp', new THREE.Float32BufferAttribute(amps, 1));
-    geo.setAttribute('aWet', new THREE.Float32BufferAttribute(wets, 1));
-    geo.setAttribute('aDepth', new THREE.Float32BufferAttribute(depths, 1));
-    geo.setAttribute('aFlow', new THREE.Float32BufferAttribute(flows, 2));
-    geo.setAttribute('aSea', new THREE.Float32BufferAttribute(seas, 1));
+    geo.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+    geo.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+    geo.setAttribute('aSea', new THREE.Float32BufferAttribute(seaVals, 1));
     geo.setIndex(indices);
     geo.computeBoundingSphere();
     const old = this.waterMesh.geometry;
     this.waterMesh.geometry = geo;
     if (old && old !== geo) old.dispose();
-    this._setWaterGeometryRefs(geo);
+    this._setWaterGeometryRefs(geo, seaIndices);
   }
 
   _renderWaterDepth(idx, depth) {
@@ -1232,7 +1503,7 @@ export class Renderer {
     }
     if (!this._isPermanentWaterCell(idx)) {
       if (this._waterShown) this._waterShown[idx] = 0;
-      return this._floodOverlayDepth(idx, depth);
+      return this._floodOverlayDepth(idx, depth, true);
     }
     // Hysterese gegen Ufer-Flackern: eine Zelle wird erst ab klarer Tiefe als Wasser gezeigt
     // und erst weit darunter wieder versteckt. So toggelt eine Uferzelle, deren Sim-Tiefe um
@@ -1279,17 +1550,20 @@ export class Renderer {
     return this._floodOverlayDepth(idx, depth);
   }
 
-  _floodOverlayDepth(idx, depth) {
+  _floodOverlayDepth(idx, depth, commit = false) {
     if (!this._floodVisual || this._isPermanentWaterCell(idx)) return 0;
     const wet = this._floodVisual[idx] || 0;
-    return wet > 0.42 && depth >= FLOOD_SURFACE_DEPTH ? Math.max(depth, FLOOD_SURFACE_DEPTH) : 0;
+    const shown = this._floodShown;
+    const vis = (shown?.[idx] ? wet > FLOOD_VIS_HIDE : wet > FLOOD_VIS_SHOW) && depth >= FLOOD_SURFACE_DEPTH;
+    if (commit && shown) shown[idx] = vis ? 1 : 0;
+    return vis ? Math.max(depth, FLOOD_SURFACE_DEPTH) : 0;
   }
 
   _floodSourceStrength(idx, depth) {
     if (!this.height || this._isPermanentWaterCell(idx) || depth <= FLOOD_RUNOFF_DEPTH) return 0;
     const w = this.mapW, h = this.mapH, x = idx % w, y = (idx / w) | 0;
     let wetNear = 0, wetWide = 0, nearPermanent = false;
-    let maxDownhill = 0, maxUphill = 0;
+    let maxDownhill = 0, maxUphill = 0, higherGroundNear = 0;
     const s0 = this.height[idx] + depth;
     for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) {
       if (!dx && !dy) continue;
@@ -1307,18 +1581,26 @@ export class Renderer {
         const grad = (s0 - (this.height[j] + d)) / dist;
         maxDownhill = Math.max(maxDownhill, grad);
         maxUphill = Math.max(maxUphill, -grad);
+        if (this.height[j] > this.height[idx] + 0.024) higherGroundNear++;
       }
     }
     const slope = this._slopeAt(idx);
-    const basin = slope <= 0.035 && wetWide >= 13 && wetNear >= 4;
-    const overflow = nearPermanent && slope <= 0.065 && wetWide >= 9 && wetNear >= 3;
-    const deepPool = slope <= 0.05 && depth >= 0.22 && wetWide >= 7;
-    const runoff = depth >= FLOOD_RUNOFF_DEPTH
-      && wetNear >= 1
-      && (nearPermanent || maxDownhill > 0.008 || maxUphill > 0.014)
-      && (slope > 0.018 || maxDownhill > 0.012);
-    if (!basin && !overflow && !deepPool && !runoff) return 0;
-    const strength = basin || overflow || deepPool
+    const dug = this.height0 && this.height0[idx] - this.height[idx] > 0.030;
+    const basin = depth >= 0.080 && slope <= 0.035 && wetWide >= 11 && wetNear >= 3;
+    const overflow = depth >= 0.095 && nearPermanent && slope <= 0.065 && wetWide >= 9 && wetNear >= 3;
+    const deepPool = slope <= 0.05 && depth >= 0.17 && wetWide >= 6;
+    const channel = depth >= FLOOD_CHANNEL_DEPTH
+      && wetWide >= (dug ? 1 : 2)
+      && (dug || higherGroundNear >= 2 || maxUphill > 0.024);
+    const runoff = depth >= 0.135
+      && wetNear >= 2
+      && nearPermanent
+      && maxDownhill > 0.014
+      && slope > 0.024;
+    if (!basin && !overflow && !deepPool && !channel && !runoff) return 0;
+    const strength = channel
+      ? (depth - FLOOD_RUNOFF_DEPTH) / 0.09 + Math.min(0.38, maxUphill * 10) + (dug ? 0.22 : 0)
+      : basin || overflow || deepPool
       ? (depth - 0.055) / 0.18
       : (depth - FLOOD_RUNOFF_DEPTH) / 0.12 + Math.min(0.35, maxDownhill * 14);
     return Math.max(0, Math.min(1, strength));
@@ -1364,37 +1646,53 @@ export class Renderer {
       if (target > visual[i] && !nearPermanent && maxFront < 0.08 && target < 0.82) target = Math.min(target, visual[i] + 0.08);
       const rate = target > visual[i] ? (nearPermanent || maxFront > 0.18 ? 0.34 : 0.18) : 0.22;
       const next = force ? target : visual[i] + (target - visual[i]) * rate;
-      if (Math.abs(next - visual[i]) > 0.01) changed = true;
+      if (Math.abs(next - visual[i]) > 0.018) changed = true;
       visual[i] = next < 0.018 ? 0 : next;
-      if (this._floodShown) this._floodShown[i] = visual[i] > 0.08 ? 1 : 0;
     }
     return changed || force;
   }
 
   _refreshWetGroundOverlay() {
     if (!this.wetGroundMesh || !this.waterDepth || !this.height || !this._floodDummy) return;
-    const d = this._floodDummy, w = this.mapW;
-    const cap = this.wetGroundMesh.instanceMatrix.count || 9000;
-    let k = 0;
-    for (let i = 0; i < this.waterDepth.length && k < cap; i++) {
+    if (this.wetGroundMesh.count !== 0) {
+      this.wetGroundMesh.count = 0;
+      this.wetGroundMesh.instanceMatrix.needsUpdate = true;
+    }
+    const n = this.waterDepth.length, w = this.mapW, h = this.mapH;
+    if (!this._wetAmount || this._wetAmount.length !== n) this._wetAmount = new Float32Array(n);
+    if (!this._wetScratch || this._wetScratch.length !== n) this._wetScratch = new Float32Array(n);
+    const wet = this._wetAmount, scratch = this._wetScratch;
+    scratch.fill(0);
+    for (let i = 0; i < n; i++) {
       if (this._isPermanentWaterCell(i)) continue;
       const depth = this.waterDepth[i] || 0;
       if (depth <= WET_GROUND_MIN_DEPTH || this._floodOverlayDepth(i, depth) > 0) continue;
-      const visual = Math.max(this._floodVisual?.[i] || 0, Math.min(1, (depth - WET_GROUND_MIN_DEPTH) / (CLIENT_NAVIGABLE_DEPTH - WET_GROUND_MIN_DEPTH)));
-      if (visual <= 0.08) continue;
       const gx = i % w, gy = (i / w) | 0;
-      d.position.set(gx * TILE, this.height[i] * HEIGHT_SCALE + 0.065, gy * TILE);
-      this._alignToTerrain(d, i);
-      d.rotation.y += hash01(gx, gy, 913) * Math.PI * 2;
-      const sx = 0.65 + visual * 0.55 + hash01(gx, gy, 917) * 0.18;
-      const sz = 0.60 + visual * 0.50 + hash01(gx, gy, 919) * 0.16;
-      d.scale.set(sx, 1, sz);
-      d.updateMatrix();
-      this.wetGroundMesh.setMatrixAt(k++, d.matrix);
+      const wetDepth = smoothstep(WET_GROUND_MIN_DEPTH, WET_GROUND_FULL_DEPTH, depth);
+      const flow = this._waterFlowAt(i);
+      const flowMag = Math.hypot(flow.x, flow.z);
+      let wetN = 0, nearPermanent = false;
+      for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+        if (!dx && !dy) continue;
+        const nx = gx + dx, ny = gy + dy;
+        if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
+        const j = ny * w + nx;
+        if (this._isPermanentWaterCell(j)) nearPermanent = true;
+        else if ((this.waterDepth[j] || 0) > WET_GROUND_NEIGHBOR_DEPTH) wetN++;
+      }
+      const visual = Math.min(1, wetDepth * 0.68 + flowMag * 0.42 + (this._floodVisual?.[i] || 0) * 0.36);
+      if (visual <= 0.025) continue;
+      if (!nearPermanent && wetN < 1 && flowMag < 0.08 && visual < 0.18) continue;
+      scratch[i] = Math.max(scratch[i], visual);
     }
-    d.scale.set(1, 1, 1);
-    this.wetGroundMesh.count = k;
-    this.wetGroundMesh.instanceMatrix.needsUpdate = true;
+    let changed = false;
+    for (let i = 0; i < n; i++) {
+      if (Math.abs(wet[i] - scratch[i]) > 0.018) { changed = true; break; }
+    }
+    if (changed) {
+      wet.set(scratch);
+      this._rebuildTerrainBaseColors();
+    }
   }
 
   _waterFlowAt(idx) {
@@ -1426,22 +1724,39 @@ export class Renderer {
     return { x: (vx / mag) * strength, z: (vz / mag) * strength };
   }
 
-  // Wasseroberfläche über einen 5×5-Bereich glätten → ein Fluss/See wird zu einer durchgehenden,
-  // schräg verlaufenden Fläche statt einer Treppe aus Einzelzellen.
-  _smoothedWaterSurface(idx) {
-    const w = this.mapW, h = this.mapH, x = idx % w, y = (idx / w) | 0;
-    let sum = 0, weight = 0;
-    for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) {
-      const nx = x + dx, ny = y + dy;
-      if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
-      const j = ny * w + nx;
-      const d = this._visibleWaterDepth(j);
-      if (d <= 0.012) continue;
-      const ww = 1 / (1 + dx * dx + dy * dy);   // Gauß-artig: Zentrum stark, Rand schwach
-      sum += (this.height[j] + d) * ww;
-      weight += ww;
+  _animateSeaWaterMesh() {
+    const pos = this._waterPosAttr;
+    const sea = this._waterSeaAttr;
+    const seaIndices = this._waterSeaIndices;
+    if (!pos || !sea || !pos.array || !sea.array || !pos.count || !seaIndices?.length) return;
+    const step = this.camDist > 360
+      ? 0.16
+      : this.camDist > 240
+      ? Math.max(0.09, this.perf?.waterAnimStep || 0)
+      : (this.perf?.waterAnimStep || 0);
+    if (step > 0) {
+      this._waterAnimT = (this._waterAnimT || 0) + (this._lastDt || 1 / 60);
+      if (this._waterAnimT < step) return;
+      this._waterAnimT = 0;
     }
-    return weight > 0 ? sum / weight : this.height[idx] + (this.waterDepth[idx] || 0);
+    if (!this._waterWaveBase || this._waterWaveBase.length !== pos.count) {
+      this._waterWaveBase = new Float32Array(pos.count);
+      for (let i = 0; i < pos.count; i++) this._waterWaveBase[i] = pos.array[i * 3 + 1];
+    }
+    const arr = pos.array;
+    const seaArr = sea.array;
+    let changed = false;
+    for (let n = 0; n < seaIndices.length; n++) {
+      const i = seaIndices[n];
+      const baseY = this._waterWaveBase[i];
+      const si = seaArr[i] || 0;
+      const y = baseY + this._seaWaveUnchecked(arr[i * 3], arr[i * 3 + 2]) * si;
+      if (Math.abs(arr[i * 3 + 1] - y) > 0.0005) {
+        arr[i * 3 + 1] = y;
+        changed = true;
+      }
+    }
+    if (changed) pos.needsUpdate = true;
   }
 
   _refreshFloodOverlay() {
@@ -1456,39 +1771,94 @@ export class Renderer {
   // Dynamisches Wasser aus dem Snapshot: dauerhafte Gewässer aktualisieren ihr Oberflächenmesh;
   // temporäre Fluten werden nur als größere, flache Staubereiche ins Mesh übernommen.
   updateWater(delta) {
-    if (!this.floodMesh || !this.height) return;
-    // 1) Oberflächenmesh: aktuelle Tiefen = Basis + Snapshot-Abweichungen.
-    if (this.waterDepth) {
-      const cur = new Set();
-      let changed = false;
-      if (delta) for (let n = 0; n < delta.length; n += 2) {
-        const idx = delta[n], depth = (delta[n + 1] / 255) * 0.7;
-        cur.add(idx);
-        if (Math.abs(this.waterDepth[idx] - depth) > 1e-4) {
-          this.waterDepth[idx] = depth; changed = true;
-        }
+    if (!this.floodMesh || !this.height || !this.waterDepth) return;
+    // Snapshot liefert nur ZIELtiefen. Die sichtbare Tiefe (waterDepth) gleitet in animateWater
+    // pro Frame in kleinen Schritten dorthin — so breitet sich Wasser fließend aus, statt alle
+    // 250 ms ruckartig zu springen. Hier werden nur die Ziele und die zu animierenden Zellen gesetzt.
+    const sig = delta ? this._cellListSig(delta) : '0';
+    if (sig === this._waterDeltaSig) return;
+    this._waterDeltaSig = sig;
+    const touched = [];
+    const cur = new Set();
+    if (delta) for (let n = 0; n < delta.length; n += 2) {
+      const idx = delta[n], depth = (delta[n + 1] / 255) * 0.7;
+      cur.add(idx);
+      this.waterTarget[idx] = depth;
+      touched.push(idx);
+    }
+    for (const idx of this._waterOverrides) {
+      if (cur.has(idx)) continue;
+      this.waterTarget[idx] = this.waterBase[idx];   // weggefallene Flutzelle: zurück auf Basistiefe
+      touched.push(idx);
+    }
+    this._waterOverrides = cur;
+    for (const idx of touched) {
+      if (Math.abs(this.waterTarget[idx] - this.waterDepth[idx]) > WATER_EASE_SNAP) this._waterEasing.add(idx);
+    }
+    this._floodMaskSettled = false;   // Flutmaske muss neu einschwingen
+  }
+
+  // Pro-Frame-Glättung: zieht waterDepth in kleinen Schritten an waterTarget heran und schwingt
+  // die Flut-Overlay-Maske weich ein. Kostet nichts, sobald alles eingerastet ist.
+  animateWater(dt) {
+    if (!this.waterMesh || !this.waterDepth || !this._waterEasing) return;
+    if (!this._waterEasing.size && this._floodMaskSettled) return;
+    this._waterAnimAccum += dt;
+    if (this._waterAnimAccum < WATER_ANIM_INTERVAL) return;
+    const step = this._waterAnimAccum;
+    this._waterAnimAccum = 0;
+    const k = 1 - Math.exp(-WATER_EASE_RATE * step);
+    let depthChanged = false;
+    for (const idx of this._waterEasing) {
+      const target = this.waterTarget[idx];
+      const diff = target - this.waterDepth[idx];
+      if (Math.abs(diff) <= WATER_EASE_SNAP) {
+        this.waterDepth[idx] = target;
+        this._waterEasing.delete(idx);
+      } else {
+        this.waterDepth[idx] += diff * k;
       }
-      for (const idx of this._waterOverrides) {
-        if (cur.has(idx)) continue;
-        this.waterDepth[idx] = this.waterBase[idx]; changed = true;
-      }
-      this._waterOverrides = cur;
-      const maskChanged = this._refreshFloodVisualMask(false);
-      if (changed || maskChanged) {
-        this._rebuildWaterMesh();
-        this._refreshWetGroundOverlay();
-        this._refreshFloodOverlay();
-      }
+      depthChanged = true;
+    }
+    const maskChanged = this._refreshFloodVisualMask(false);
+    this._floodMaskSettled = !maskChanged;
+    if (depthChanged || maskChanged) {
+      this._rebuildWaterMesh();
+      this._updateRockWaterTint();
+      this._refreshWetGroundOverlay();
+      this._refreshFloodOverlay();
     }
   }
 
+  _updateRockWaterTint() {
+    const state = this._rockWaterTint;
+    if (!state?.inst?.instanceColor || !this.waterDepth) return;
+    const tint = this._rockTintScratch || (this._rockTintScratch = new THREE.Color());
+    let changed = false;
+    for (let k = 0; k < state.cells.length; k++) {
+      const idx = state.cells[k];
+      const depth = this.waterDepth[idx] || 0;
+      const f = smoothstep(WATER_SHOW_DEPTH * 0.65, WATER_SHOW_DEPTH * 2.8, depth);
+      const o = k * 3;
+      tint.setRGB(state.baseColors[o], state.baseColors[o + 1], state.baseColors[o + 2]);
+      if (f > 0.01) {
+        tint.lerp(UNDERWATER_OBJECT_TINT, f * 0.68);
+        tint.multiplyScalar(1 - f * 0.34);
+      }
+      state.inst.setColorAt(k, tint);
+      changed = true;
+    }
+    if (changed) state.inst.instanceColor.needsUpdate = true;
+  }
+
   updateGroundWear(list) {
-    if (!this.trackMesh || !this.mudMesh || !this.height || !list) return;
+    if (!this.trackMesh || !this.height || !list) return;
     const sig = list.length + ':' + (list.length ? list[list.length - 1] : 0);
     if (sig === this._groundSig) return;
     this._groundSig = sig;
+    this._updateMudTint(list);
     const d = this._floodDummy, w = this.mapW;
-    let tk = 0, mk = 0;
+    let tk = 0;
     for (let n = 0; n < list.length; n += 4) {
       const idx = list[n], tr = list[n + 1] / 255, md = list[n + 2] / 255, dir = list[n + 3] || 0;
       const gx = idx % w, gy = (idx / w) | 0;
@@ -1505,18 +1875,20 @@ export class Renderer {
           d.updateMatrix(); this.trackMesh.setMatrixAt(tk++, d.matrix);
         }
       }
-      if (md > 0.04 && mk < 3000) {
-        d.position.set(gx * TILE, baseY + 0.015, gy * TILE);
-        this._alignToTerrain(d, idx);
-        d.rotation.y += angle * 0.5;
-        d.scale.set(0.7 + md * 0.8, 1, 0.55 + md * 0.9);
-        d.updateMatrix(); this.mudMesh.setMatrixAt(mk++, d.matrix);
-      }
     }
     d.scale.set(1, 1, 1);
-    this.trackMesh.count = tk; this.mudMesh.count = mk;
+    this.trackMesh.count = tk;
     this.trackMesh.instanceMatrix.needsUpdate = true;
-    this.mudMesh.instanceMatrix.needsUpdate = true;
+  }
+
+  _updateMudTint(list) {
+    if (!this._mudAmount) this._mudAmount = new Float32Array((this.mapW || 0) * (this.mapH || 0));
+    this._mudAmount.fill(0);
+    for (let n = 0; n < list.length; n += 4) {
+      const idx = list[n], md = list[n + 2] / 255;
+      if (md > 0.04) this._mudAmount[idx] = md;
+    }
+    this._rebuildTerrainBaseColors();
   }
 
   _alignToTerrain(obj, idx) {
@@ -1547,29 +1919,146 @@ export class Renderer {
     return Math.hypot(hR - hL, hU - hD) * 0.5;
   }
 
-  // Straßennetz aus dem Snapshot: Indexliste → instanzierte Fahrbahn-Kacheln knapp über dem Boden.
+  _makeEmptyOverlayGeometry() {
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.Float32BufferAttribute([], 3));
+    geo.setIndex([]);
+    return geo;
+  }
+
+  _replaceMeshGeometry(mesh, geo) {
+    if (!mesh) return;
+    const old = mesh.geometry;
+    mesh.geometry = geo;
+    if (old && old !== geo) old.dispose();
+  }
+
+  _cellListSig(list) {
+    let h = 2166136261 >>> 0;
+    for (let i = 0; i < list.length; i++) h = Math.imul(h ^ (list[i] | 0), 16777619) >>> 0;
+    return `${list.length}:${h}`;
+  }
+
+  _overlayY(x, z, offset, water = false) {
+    const ground = this.heightAt(x, z);
+    if (!water) return ground + offset;
+    const info = this._waterInfoAt(x, z);
+    return Math.max(ground, info.surface, this.seaY ?? ground) + offset;
+  }
+
+  _makeRibbonGeometry(cells, opts = {}) {
+    const width = opts.width ?? TILE * 0.72;
+    const offset = opts.offset ?? 0.08;
+    const water = !!opts.water;
+    const set = new Set(cells);
+    const positions = [], indices = [];
+    const directions = [[1, 0], [0, 1], [1, 1], [1, -1]];
+    const addVertex = (x, z) => {
+      positions.push(x, this._overlayY(x, z, offset, water), z);
+      return positions.length / 3 - 1;
+    };
+    const addQuad = (a, b, c, d) => {
+      const n = positions.length / 3;
+      positions.push(
+        a[0], this._overlayY(a[0], a[1], offset, water), a[1],
+        b[0], this._overlayY(b[0], b[1], offset, water), b[1],
+        c[0], this._overlayY(c[0], c[1], offset, water), c[1],
+        d[0], this._overlayY(d[0], d[1], offset, water), d[1],
+      );
+      indices.push(n, n + 1, n + 2, n, n + 2, n + 3);
+    };
+    const addSegment = (x0, z0, x1, z1) => {
+      const dx = x1 - x0, dz = z1 - z0, len = Math.hypot(dx, dz);
+      if (len <= 0.001) return;
+      const px = -dz / len * width * 0.5, pz = dx / len * width * 0.5;
+      addQuad([x0 + px, z0 + pz], [x1 + px, z1 + pz], [x1 - px, z1 - pz], [x0 - px, z0 - pz]);
+    };
+    const addCap = (x, z) => {
+      const c = addVertex(x, z);
+      const r = width * 0.53, seg = 10;
+      const ring = [];
+      for (let n = 0; n < seg; n++) {
+        const a = (n / seg) * Math.PI * 2;
+        ring.push(addVertex(x + Math.cos(a) * r, z + Math.sin(a) * r));
+      }
+      for (let n = 0; n < seg; n++) indices.push(c, ring[(n + 1) % seg], ring[n]);
+    };
+
+    for (const idx of cells) {
+      const gx = idx % this.mapW, gy = (idx / this.mapW) | 0;
+      const x = gx * TILE, z = gy * TILE;
+      addCap(x, z);
+      for (const [dx, dy] of directions) {
+        const nx = gx + dx, ny = gy + dy;
+        if (nx < 0 || ny < 0 || nx >= this.mapW || ny >= this.mapH) continue;
+        if (!set.has(ny * this.mapW + nx)) continue;
+        addSegment(x, z, nx * TILE, ny * TILE);
+      }
+    }
+
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+    geo.setIndex(indices);
+    geo.computeVertexNormals();
+    geo.computeBoundingSphere();
+    return geo;
+  }
+
+  // Straßennetz aus dem Snapshot: Indexliste → durchgehendes Fahrbahn-Ribbon knapp über dem Boden.
   updateRoads(list) {
     if (!this.roadMesh || !this.height || !list) return;
-    const sig = list.length + ':' + (list.length ? list[list.length - 1] : 0);
+    const sig = this._cellListSig(list);
     if (sig === this._roadSig) return;
     this._roadSig = sig;
-    const d = this._floodDummy, w = this.mapW;
-    let k = 0;
-    for (let n = 0; n < list.length && k < 6000; n++) {
-      const gx = list[n] % w, gy = (list[n] / w) | 0;
-      d.position.set(gx * TILE, this.height[list[n]] * HEIGHT_SCALE + 0.07, gy * TILE);
-      d.rotation.set(0, 0, 0);
-      d.scale.set(1, 1, 1);
-      d.updateMatrix();
-      this.roadMesh.setMatrixAt(k++, d.matrix);
+    const cells = Array.from(list).slice(0, 9000);
+    this._replaceMeshGeometry(this.roadMesh, this._makeRibbonGeometry(cells, { width: TILE * 0.74, offset: 0.085 }));
+  }
+
+  // Tunnel aus dem Snapshot: alle Tunneltiles → eine durchgehende, erhabene dunkle Röhre.
+  updateTunnels(tunnels) {
+    if (!this.tunnelMesh || !this.height) return;
+    const cells = [];
+    for (const tn of tunnels || []) {
+      const ti = tn.tiles || [];
+      for (let k = 0; k + 1 < ti.length; k += 2) {
+        const gx = ti[k], gy = ti[k + 1];
+        if (gx >= 0 && gy >= 0 && gx < this.mapW && gy < this.mapH) cells.push(gy * this.mapW + gx);
+      }
     }
-    this.roadMesh.count = k;
-    this.roadMesh.instanceMatrix.needsUpdate = true;
+    cells.sort((a, b) => a - b);
+    const sig = this._cellListSig(cells);
+    if (sig === this._tunnelSig) return;
+    this._tunnelSig = sig;
+    this._replaceMeshGeometry(this.tunnelMesh, this._makeRibbonGeometry(cells, { width: TILE * 0.92, offset: 0.5 }));
+  }
+
+  updateBridgeOverlay(entities = null, preparedCells = null) {
+    if (!this.bridgeMesh || !this.height) return;
+    const cells = preparedCells || new Set(this._baseBridgeCells || []);
+    if (!preparedCells) {
+      for (const e of entities || []) {
+        if (e.etype !== 'building' || e.kind !== 'bridge' || (e.buildProgress ?? 1) < 1) continue;
+        const tx = Math.round(e.x / TILE - 0.5), ty = Math.round(e.y / TILE - 0.5);
+        const size = Math.max(1, e.size || 1);
+        for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) {
+          const gx = tx + x, gy = ty + y;
+          if (gx >= 0 && gy >= 0 && gx < this.mapW && gy < this.mapH) cells.add(gy * this.mapW + gx);
+        }
+      }
+    }
+    const list = [...cells].sort((a, b) => a - b);
+    const sig = this._cellListSig(list);
+    if (sig === this._bridgeSig) return;
+    this._bridgeSig = sig;
+    this._replaceMeshGeometry(this.bridgeMesh, this._makeRibbonGeometry(list, { width: TILE * 1.15, offset: 0.34, water: true }));
   }
 
   // Schneedecke: Vertex-Farben Richtung Weiß mischen; geschmolzene Zellen kehren zur Basisfarbe zurück.
   updateSnow(pairs) {
     if (!this._colAttr || !pairs) return;
+    if (!this._snowSet) this._snowSet = new Set();
+    if (!this._snowAmount) this._snowAmount = new Map();
+    this._snowPairs = pairs;
     const sig = pairs.length + ':' + (pairs.length ? pairs[1] + '/' + pairs[pairs.length - 1] : 0);
     if (sig === this._snowSig) return;
     this._snowSig = sig;
@@ -1618,26 +2107,76 @@ export class Renderer {
     if (sig === this._oilSig) return;
     this._oilSig = sig;
     this._applyOilDelta(delta);
-    this._colAttr.needsUpdate = true;
   }
 
   _applyOilDelta(delta) {
-    const col = this._colAttr.array, base = this._baseColors, raw = this._rawBaseColors || base;
     for (let n = 0; n < delta.length; n += 2) {
       const idx = delta[n], q = delta[n + 1] || 0;
       this.oilAmount[idx] = q;
       if (q > 0) this._oilSet.add(idx); else this._oilSet.delete(idx);
-      const f = Math.min(0.96, (q / 255) * 0.96);
-      const o = idx * 3;
-      const tarR = 0.004, tarG = 0.0035, tarB = 0.003;
-      base[o] = raw[o] * (1 - f) + tarR * f;
-      base[o + 1] = raw[o + 1] * (1 - f) + tarG * f;
-      base[o + 2] = raw[o + 2] * (1 - f) + tarB * f;
-      if (!this._snowSet || !this._snowSet.has(idx)) {
-        col[o] = base[o]; col[o + 1] = base[o + 1]; col[o + 2] = base[o + 2];
+    }
+    this._rebuildTerrainBaseColors();
+    this._refreshOilOverlay();
+  }
+
+  _rebuildTerrainBaseColors() {
+    const col = this._colAttr?.array, base = this._baseColors, raw = this._rawBaseColors;
+    if (!col || !base || !raw) return;
+    base.set(raw);
+    if (this._mudAmount) {
+      const w = this.mapW || 0, h = this.mapH || 0;
+      for (let idx = 0; idx < this._mudAmount.length; idx++) {
+        const md = this._mudAmount[idx];
+        if (md <= 0.04) continue;
+        const x = idx % w, y = (idx / w) | 0;
+        for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+          const nx = x + dx, ny = y + dy;
+          if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
+          const d = Math.hypot(dx, dy);
+          const weight = d < 0.1 ? 1 : d < 1.1 ? 0.45 : 0.22;
+          const f = Math.min(0.58, md * 0.62 * weight);
+          const o = (ny * w + nx) * 3;
+          base[o] = base[o] * (1 - f) + 0.33 * f;
+          base[o + 1] = base[o + 1] * (1 - f) + 0.23 * f;
+          base[o + 2] = base[o + 2] * (1 - f) + 0.12 * f;
+        }
       }
     }
-    this._refreshOilOverlay();
+    if (this._wetAmount) {
+      const w = this.mapW || 0, h = this.mapH || 0;
+      for (let idx = 0; idx < this._wetAmount.length; idx++) {
+        const wet = this._wetAmount[idx];
+        if (wet <= 0.018) continue;
+        const x = idx % w, y = (idx / w) | 0;
+        for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+          const nx = x + dx, ny = y + dy;
+          if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
+          const d = Math.hypot(dx, dy);
+          const weight = d < 0.1 ? 1 : d < 1.1 ? 0.38 : 0.14;
+          const f = Math.min(0.50, wet * 0.58 * weight);
+          const o = (ny * w + nx) * 3;
+          base[o] = base[o] * (1 - f) + 0.14 * f;
+          base[o + 1] = base[o + 1] * (1 - f) + 0.24 * f;
+          base[o + 2] = base[o + 2] * (1 - f) + 0.21 * f;
+        }
+      }
+    }
+    if (this.oilAmount && this._oilSet) for (const idx of this._oilSet) {
+      const q = this.oilAmount[idx] || 0;
+      if (q <= 0) continue;
+      const f = Math.min(0.96, (q / 255) * 0.96);
+      const o = idx * 3;
+      base[o] = base[o] * (1 - f) + 0.004 * f;
+      base[o + 1] = base[o + 1] * (1 - f) + 0.0035 * f;
+      base[o + 2] = base[o + 2] * (1 - f) + 0.003 * f;
+    }
+    if (this._snowPairs) {
+      this._snowSig = null;
+      this.updateSnow(this._snowPairs);
+    } else {
+      col.set(base);
+      this._colAttr.needsUpdate = true;
+    }
   }
 
   _buildOilOverlay() {
@@ -1747,22 +2286,55 @@ export class Renderer {
     return this.height[gy * this.mapW + gx] * HEIGHT_SCALE;
   }
 
+  _waterSurfaceYAtIdx(idx) {
+    if (!this.height) return 0;
+    const ground = this.height[idx] * HEIGHT_SCALE;
+    if (!this.waterDepth || this._visibleWaterDepth(idx) <= 0.012) return ground;
+    const visual = this._waterSurfaceVisual?.[idx] || 0;
+    if (visual > 0) return visual;
+    return Math.max((this.height[idx] + (this.waterDepth[idx] || 0)) * HEIGHT_SCALE, ground + 0.14);
+  }
+
   waterSurfaceAt(wx, wz) {
     if (!this.waterDepth || !this.height) return this.heightAt(wx, wz);
-    const fx = Math.max(0, Math.min(this.mapW - 1, wx / TILE));
-    const fz = Math.max(0, Math.min(this.mapH - 1, wz / TILE));
-    const x0 = Math.floor(fx), z0 = Math.floor(fz);
-    const x1 = Math.min(this.mapW - 1, x0 + 1), z1 = Math.min(this.mapH - 1, z0 + 1);
-    const tx = fx - x0, tz = fz - z0;
-    const sample = (x, z) => {
-      const idx = z * this.mapW + x;
-      return (this._visibleWaterDepth(idx) > 0.012
-        ? this._smoothedWaterSurface(idx)
-        : this.height[idx]) * HEIGHT_SCALE;
+    const gx = Math.max(0, Math.min(this.mapW - 1, Math.round(wx / TILE)));
+    const gy = Math.max(0, Math.min(this.mapH - 1, Math.round(wz / TILE)));
+    return this._waterSurfaceYAtIdx(gy * this.mapW + gx) + this._seaWaveAt(wx, wz);
+  }
+
+  _isSeaWorldPoint(wx, wz) {
+    const idx = this._tileIndexAt(wx, wz);
+    if (idx < 0) return false;
+    return this._isSeaWaterCell(idx, this.waterDepth?.[idx] || 0);
+  }
+
+  _seaWaveAt(wx, wz) {
+    if (!this._isSeaWorldPoint(wx, wz)) return 0;
+    return this._seaWaveUnchecked(wx, wz);
+  }
+
+  _seaWaveUnchecked(wx, wz) {
+    const edgeOpen = this._seaEdgeOpenAt(wx, wz);
+    const storm = this._waterStorm || 0;
+    const amp = 0.075 + edgeOpen * 0.075 + storm * 0.045;
+    const t = this.time;
+    return (Math.sin(wx * 0.085 + wz * 0.020 + t * (1.55 + storm * 0.45))
+      + Math.sin(wz * 0.070 - wx * 0.032 + t * (1.05 + storm * 0.35)) * 0.58) * amp;
+  }
+
+  _seaWaveTiltAt(wx, wz, facing) {
+    if (!this._isSeaWorldPoint(wx, wz)) return { pitch: 0, roll: 0 };
+    const fx = Math.cos(facing), fz = Math.sin(facing);
+    const sx = -fz, sz = fx;
+    const l = 2.2;
+    const hF = this._seaWaveAt(wx + fx * l, wz + fz * l);
+    const hB = this._seaWaveAt(wx - fx * l, wz - fz * l);
+    const hL = this._seaWaveAt(wx - sx * l, wz - sz * l);
+    const hR = this._seaWaveAt(wx + sx * l, wz + sz * l);
+    return {
+      pitch: Math.max(-0.24, Math.min(0.24, -Math.atan2(hF - hB, 2 * l))),
+      roll: Math.max(-0.28, Math.min(0.28, Math.atan2(hR - hL, 2 * l))),
     };
-    const a = sample(x0, z0) * (1 - tx) + sample(x1, z0) * tx;
-    const b = sample(x0, z1) * (1 - tx) + sample(x1, z1) * tx;
-    return a * (1 - tz) + b * tz;
   }
 
   setFogOfWar(enabled, data = null) {
@@ -1842,6 +2414,8 @@ export class Renderer {
     u.uCount.value = this._fowCircles.length;
     u.uNight.value = night ? 1 : 0;
     if (u.uWeatherFog) u.uWeatherFog.value = this._fowWeatherFog || 0;
+    if (u.uFogColor && this.scene.fog) u.uFogColor.value.copy(this.scene.fog.color); // Dunst-Harmonie statt Schwarz
+
     for (let i = 0; i < u.uCircles.value.length; i++) {
       const c = this._fowCircles[i];
       u.uCircles.value[i].set(c?.x || 0, c?.y || 0, c?.r || 0);
@@ -1854,14 +2428,26 @@ export class Renderer {
     // Pipeline-Netz: alle verbindbaren Bauten (Leitung + Endpunkte), damit Rohre als
     // durchgehende Leitung mit Kurven/T-Stücken/Kreuzungen aufgebaut werden.
     this._pipeAnchors = [];
+    const bridgeCells = new Set(this._baseBridgeCells || []);
     for (const e of entities) {
       if (e.etype !== 'building') continue;
-      if (PIPE_CONNECT.has(e.kind)) {
+      if (PIPE_CONNECT.has(e.kind) && (e.buildProgress ?? 1) >= 1) {
         const tx = e.x / TILE - 0.5, ty = e.y / TILE - 0.5;
         this._pipeAnchors.push({ id: e.id, owner: e.owner, kind: e.kind, x: e.x, z: e.y, tx, ty, size: e.size || 1 });
       }
+      if (e.kind === 'bridge' && (e.buildProgress ?? 1) >= 1) {
+        const tx = Math.round(e.x / TILE - 0.5), ty = Math.round(e.y / TILE - 0.5);
+        const size = Math.max(1, e.size || 1);
+        for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) {
+          const gx = tx + x, gy = ty + y;
+          if (gx >= 0 && gy >= 0 && gx < this.mapW && gy < this.mapH) bridgeCells.add(gy * this.mapW + gx);
+        }
+      }
     }
+    this.updatePipelineOverlay();
+    this.updateBridgeOverlay(null, bridgeCells);
     const seen = new Set();
+    const tunnelGhostSeen = new Set();
     const mistBuckets = new Map();
     const washouts = new Map();
     for (const ev of events || []) if (ev.type === 'washout' && ev.id != null) washouts.set(ev.id, ev);
@@ -1885,6 +2471,13 @@ export class Renderer {
         continue;
       }
       const color = e.abandoned ? '#8b8d8f' : ((players.find(p => p.id === e.owner) || {}).color || '#cccccc');
+      // In der Tunnelröhre verborgen: normales Modell aus, nur ein Umriss-Geist wandert über den Berg.
+      if (e.inTunnel) {
+        if (g) g.visible = false;
+        this._showTunnelGhost(e, color);
+        tunnelGhostSeen.add(e.id);
+        continue;
+      }
       if (g && (g.userData.owner !== e.owner || g.userData.abandoned !== !!e.abandoned)) {
         this.scene.remove(g);
         this.meshes.delete(e.id);
@@ -1934,7 +2527,7 @@ export class Renderer {
         y = Math.max(this.waterSurfaceAt(e.x, e.y), this.seaY ?? y);
         if (e.kind === 'submarine') y -= 0.5;                                 // getaucht: nur Turm schaut raus
         else if (e.kind === 'underwater_drone') y -= 0.42;                    // klein und knapp unter der Oberfläche
-        else y += Math.sin(this.time * 1.3 + e.id) * 0.06;                    // leichtes Dümpeln
+        else if (!this._isSeaWorldPoint(e.x, e.y)) y += Math.sin(this.time * 1.3 + e.id) * 0.06; // Binnenwasser-Dümpeln
       } else if ((g.userData.lift || 0) >= 5) {
         y += Math.sin(this.time * 1.7 + e.id * 0.7) * 0.35;                   // Schwebe-Bob der Luftfahrzeuge
       }
@@ -2010,6 +2603,13 @@ export class Renderer {
             g.rotation.z + (roll - g.rotation.z) * tiltAlpha);
         } else {
           g.rotation.y = g.userData._smoothYaw;
+        }
+        if (SURFACE_SHIP_KINDS.has(e.kind)) {
+          const waveTilt = this._seaWaveTiltAt(e.x, e.y, e.facing);
+          const waveAlpha = smoothAlpha(this._lastDt, 4.2);
+          g.rotation.order = 'YXZ';
+          g.rotation.x += (waveTilt.pitch - g.rotation.x) * waveAlpha;
+          g.rotation.z += (waveTilt.roll - g.rotation.z) * waveAlpha;
         }
         // Staubfahne fahrender Landfahrzeuge (gedrosselt; nicht auf Straßen-Optik geprüft — günstig).
         if (g.userData.dusts) {
@@ -2098,8 +2698,13 @@ export class Renderer {
           if (ch.visible) ch.material.color.setHex(col);
         }
       }
+      this._updateUnderwaterTint(g, e, renderY);
     }
     this._syncEnemyMist(mistBuckets);
+    // Tunnel-Umrisse ausblenden, deren Einheit die Röhre verlassen hat (oder weg ist).
+    if (this._tunnelGhosts) for (const [id, m] of this._tunnelGhosts) {
+      if (!tunnelGhostSeen.has(id)) { m.visible = false; if (!seen.has(id)) { this.scene.remove(m); this._tunnelGhosts.delete(id); } }
+    }
     // Entfernte Entities: normale Verluste explodieren, Wasserverluste sinken/treiben weg.
     for (const [id, g] of this.meshes) {
       if (!seen.has(id)) {
@@ -2116,6 +2721,23 @@ export class Renderer {
       }
     }
     if (movedShadowCaster) this._markShadowsDirty(true);
+  }
+
+  // Umriss-Geist einer Einheit, die gerade verborgen durch eine Tunnelröhre wandert.
+  _showTunnelGhost(e, color) {
+    const map = this._tunnelGhosts || (this._tunnelGhosts = new Map());
+    let m = map.get(e.id);
+    if (!m) {
+      const box = new THREE.BoxGeometry(1.5, 1.3, 1.5);
+      m = new THREE.LineSegments(new THREE.EdgesGeometry(box),
+        new THREE.LineBasicMaterial({ transparent: true, opacity: 0.55, depthTest: false }));
+      m.renderOrder = 8;
+      this.scene.add(m);
+      map.set(e.id, m);
+    }
+    m.material.color.set(color);
+    m.visible = true;
+    m.position.set(e.x, this.heightAt(e.x, e.y) + 1.0, e.y);
   }
 
   _syncEnemyMist(buckets) {
@@ -2175,6 +2797,136 @@ export class Renderer {
     for (const [id, g] of this.meshes) {
       if (set.has(g.userData.kind)) { this.scene.remove(g); this.meshes.delete(id); this._markShadowsDirty(false); }
     }
+    if (this._modelPreviewCache) for (const key of [...this._modelPreviewCache.keys()]) {
+      if (kinds.some(kind => key.includes('|' + kind + '|'))) this._modelPreviewCache.delete(key);
+    }
+    this.onModelPreviewsReady?.(kinds);
+  }
+
+  modelPreviewDataUrl(type, kind, def = {}, colorHex = '#36c5f0', width = 96, height = 76) {
+    if (typeof document === 'undefined') return '';
+    const etype = type === 'unit' ? 'unit' : 'building';
+    const modelLoaded = this.models?.meta(kind) ? (this.models.instance(kind, colorHex) ? 1 : 0) : 1;
+    const key = `${etype}|${kind}|${colorHex}|${width}x${height}|${modelLoaded}`;
+    const cached = this._modelPreviewCache?.get(key);
+    if (cached) return cached;
+
+    const ctx = this._ensureModelPreviewRenderer(width, height);
+    if (!ctx) return '';
+    const { renderer, scene, camera } = ctx;
+    while (scene.children.length > ctx.lightCount) scene.remove(scene.children[ctx.lightCount]);
+
+    const entity = {
+      id: -1,
+      etype,
+      kind,
+      owner: 0,
+      faction: 'KBN',
+      size: def.size || 1,
+      hp: def.hp || 100,
+      maxHp: def.hp || 100,
+      buildProgress: 1,
+      x: 0,
+      y: 0,
+      facing: Math.PI * 0.2,
+      category: def.category,
+      domain: def.domain,
+      abilities: def.abilities || [],
+      harvestCap: def.harvestCap || 160,
+    };
+    let group = this.makeMesh(entity, colorHex);
+    this._prepareModelPreviewGroup(group);
+    let box = new THREE.Box3().setFromObject(group);
+    if (box.isEmpty() || box.getSize(new THREE.Vector3()).length() < 0.1) {
+      group = this._makeModelPreviewFallback(etype, kind, colorHex);
+      box = new THREE.Box3().setFromObject(group);
+    }
+    const center = box.getCenter(new THREE.Vector3());
+    group.position.sub(center);
+    group.rotation.y = -0.55;
+    scene.add(group);
+
+    box = new THREE.Box3().setFromObject(group);
+    const size = box.getSize(new THREE.Vector3());
+    const maxDim = Math.max(1, size.x, size.y, size.z);
+    const target = new THREE.Vector3(0, Math.min(0.45, size.y * 0.06), 0);
+    camera.aspect = width / height;
+    camera.near = 0.1;
+    camera.far = Math.max(60, maxDim * 8);
+    camera.position.set(maxDim * 1.05, maxDim * 0.72, maxDim * 1.45);
+    camera.lookAt(target);
+    camera.updateProjectionMatrix();
+
+    renderer.setSize(width, height, false);
+    renderer.render(scene, camera);
+    const url = renderer.domElement.toDataURL('image/png');
+    scene.remove(group);
+    this._modelPreviewCache.set(key, url);
+    return url;
+  }
+
+  _ensureModelPreviewRenderer(width, height) {
+    if (this._modelPreviewRenderer) return this._modelPreviewRenderer;
+    const canvas = document.createElement('canvas');
+    const renderer = new THREE.WebGLRenderer({
+      canvas,
+      alpha: true,
+      antialias: true,
+      powerPreference: 'low-power',
+      preserveDrawingBuffer: true,
+    });
+    renderer.setPixelRatio(1);
+    renderer.setClearColor(0x000000, 0);
+    renderer.shadowMap.enabled = false;
+    renderer.setSize(width, height, false);
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(36, width / height, 0.1, 80);
+    const hemi = new THREE.HemisphereLight(0xd8ecff, 0x26301f, 1.75);
+    const key = new THREE.DirectionalLight(0xffffff, 2.2);
+    key.position.set(4, 7, 6);
+    const fill = new THREE.DirectionalLight(0x7bbdff, 0.75);
+    fill.position.set(-5, 4, -3);
+    scene.add(hemi, key, fill);
+    this._modelPreviewRenderer = { renderer, scene, camera, lightCount: scene.children.length };
+    return this._modelPreviewRenderer;
+  }
+
+  _prepareModelPreviewGroup(group) {
+    const hidden = [
+      group.userData.ring,
+      group.userData.bar,
+      group.userData.barBack,
+      group.userData.build,
+      ...(group.userData.chevrons || []),
+    ].filter(Boolean);
+    for (const o of hidden) o.visible = false;
+    group.traverse((o) => {
+      if (!o.isMesh) return;
+      o.castShadow = false;
+      o.receiveShadow = false;
+      if (o.userData.billboard) o.visible = false;
+    });
+  }
+
+  _makeModelPreviewFallback(type, kind, colorHex) {
+    const g = new THREE.Group();
+    const mat = this.unitMat(colorHex);
+    const dark = this.envMats.dark;
+    if (kind === 'road') {
+      g.add(boxMesh(2.8, 0.12, 1.0, dark, 0, 0.06, 0));
+      g.add(boxMesh(0.16, 0.14, 0.62, this.envMats.hazard, -0.6, 0.15, 0));
+      g.add(boxMesh(0.16, 0.14, 0.62, this.envMats.hazard, 0.25, 0.15, 0));
+      g.add(boxMesh(0.16, 0.14, 0.62, this.envMats.hazard, 1.1, 0.15, 0));
+    } else if (kind === 'bridge') {
+      g.add(boxMesh(3.0, 0.22, 1.15, this.envMats.roof, 0, 0.35, 0));
+      g.add(boxMesh(3.1, 0.16, 0.14, dark, 0, 0.58, -0.54));
+      g.add(boxMesh(3.1, 0.16, 0.14, dark, 0, 0.58, 0.54));
+      for (const x of [-1.1, 0, 1.1]) g.add(cylMesh(0.08, 0.08, 0.7, dark, x, 0.16, -0.42, 6));
+    } else {
+      g.add(new THREE.Mesh(new THREE.BoxGeometry(1.6, 1.2, 1.6), mat));
+      g.children[0].position.y = 0.6;
+    }
+    return g;
   }
 
   updateConstructionJobs(jobs) {
@@ -2302,9 +3054,152 @@ export class Renderer {
     this.spawnConstructionDust(x + Math.cos(a) * 0.8, z + Math.sin(a) * 0.8, false);
   }
 
-  // Rohr zur Leitungs-Nachbarschaft formen: statt ein einzelnes Modell zu drehen, entstehen
-  // Rohrarme in alle verbundenen Richtungen. So sind Kurven, T-Stücke, Kreuzungen und Anschlüsse
-  // an Pumpwerk/Wasserturm/Bohrturm/Depot als durchgehende Pipeline sichtbar.
+  updatePipelineOverlay() {
+    if (!this.pipeMesh || !this.height || !this._pipeAnchors) return;
+    const anchors = this._pipeAnchors;
+    let h = 2166136261 >>> 0;
+    for (const a of anchors) {
+      h = Math.imul(h ^ (a.id | 0), 16777619) >>> 0;
+      h = Math.imul(h ^ Math.round(a.x * 10), 16777619) >>> 0;
+      h = Math.imul(h ^ Math.round(a.z * 10), 16777619) >>> 0;
+    }
+    const sig = `${anchors.length}:${h}`;
+    if (sig === this._pipeSig) return;
+    this._pipeSig = sig;
+    this._replaceMeshGeometry(this.pipeMesh, this._makePipelineGeometry(this._pipelineEdges()));
+  }
+
+  _pipelineEdges() {
+    const edges = [], used = new Set();
+    const pipes = (this._pipeAnchors || []).filter(a => a.kind === 'pipe');
+    for (const a of pipes) {
+      const byDir = new Map();
+      for (const b of this._pipeAnchors || []) {
+        if (a.id === b.id || a.owner !== b.owner) continue;
+        const dx = b.x - a.x, dz = b.z - a.z;
+        const dist = Math.hypot(dx, dz);
+        if (dist < 0.05) continue;
+        const tileDist = Math.max(Math.abs(b.tx - a.tx), Math.abs(b.ty - a.ty));
+        const maxDist = b.kind === 'pipe' ? 2.05 : 3.15;
+        if (tileDist > maxDist) continue;
+        const dir = this._pipeDirection(dx, dz);
+        if (!dir) continue;
+        const key = `${dir.x.toFixed(3)},${dir.z.toFixed(3)}`;
+        const prev = byDir.get(key);
+        if (!prev || dist < prev.dist) byDir.set(key, { b, dist, dir });
+      }
+      for (const { b, dist } of byDir.values()) {
+        const key = a.id < b.id ? `${a.id}:${b.id}` : `${b.id}:${a.id}`;
+        if (used.has(key)) continue;
+        used.add(key);
+        const dx = b.x - a.x, dz = b.z - a.z;
+        const len = Math.hypot(dx, dz);
+        if (len < 0.1) continue;
+        const ux = dx / len, uz = dz / len;
+        let x1 = b.x, z1 = b.z;
+        if (b.kind !== 'pipe') {
+          const inset = Math.max(0.45, (b.size || 1) * TILE * 0.36);
+          x1 -= ux * inset;
+          z1 -= uz * inset;
+        }
+        if (Math.hypot(x1 - a.x, z1 - a.z) > 0.35) edges.push({ x0: a.x, z0: a.z, x1, z1, dist });
+      }
+    }
+    return edges;
+  }
+
+  _makePipelineGeometry(edges) {
+    if (!edges.length) return this._makeEmptyOverlayGeometry();
+    const positions = [], indices = [];
+    const seg = 8, radius = 0.17;
+    const edgeInfos = edges.map((e, index) => {
+      const dx = e.x1 - e.x0, dz = e.z1 - e.z0, len = Math.hypot(dx, dz);
+      const ux = len > 0 ? dx / len : 1, uz = len > 0 ? dz / len : 0;
+      return { e, index, len, ux, uz, rx: -uz, rz: ux, passThrough: false };
+    });
+    const pointKey = (x, z) => `${Math.round(x * 100)},${Math.round(z * 100)}`;
+    const endpointMap = new Map();
+    const addEndpoint = (key, index) => {
+      const list = endpointMap.get(key);
+      if (list) list.push(index);
+      else endpointMap.set(key, [index]);
+    };
+    for (const info of edgeInfos) {
+      if (info.len < 0.05) continue;
+      info.k0 = pointKey(info.e.x0, info.e.z0);
+      info.k1 = pointKey(info.e.x1, info.e.z1);
+      addEndpoint(info.k0, info.index);
+      addEndpoint(info.k1, info.index);
+    }
+    const seen = new Set();
+    for (const info of edgeInfos) {
+      if (info.len < 0.05 || seen.has(info.index)) continue;
+      const stack = [info.index], component = [];
+      let total = 0;
+      seen.add(info.index);
+      while (stack.length) {
+        const idx = stack.pop();
+        const cur = edgeInfos[idx];
+        component.push(cur);
+        total += cur.len;
+        for (const key of [cur.k0, cur.k1]) {
+          for (const next of endpointMap.get(key) || []) {
+            if (seen.has(next)) continue;
+            seen.add(next);
+            stack.push(next);
+          }
+        }
+      }
+      if (total >= PIPE_BRIDGE_CHAIN_MIN) for (const cur of component) cur.passThrough = true;
+    }
+    const liftAt = (x, z, ux, uz, enabled) => {
+      if (!enabled) return 0;
+      const along = x * ux + z * uz;
+      const phase = ((along % PIPE_BRIDGE_SPACING) + PIPE_BRIDGE_SPACING) % PIPE_BRIDGE_SPACING;
+      const d = Math.abs(phase - PIPE_BRIDGE_SPACING * 0.5);
+      const half = PIPE_BRIDGE_WIDTH * 0.5;
+      if (d >= half) return 0;
+      const u = 1 - d / half;
+      return Math.sin(u * Math.PI * 0.5) * PIPE_BRIDGE_LIFT;
+    };
+    const addRing = (x, y, z, rx, rz) => {
+      const start = positions.length / 3;
+      for (let n = 0; n < seg; n++) {
+        const a = (n / seg) * Math.PI * 2;
+        const side = Math.cos(a) * radius, up = Math.sin(a) * radius;
+        positions.push(x + rx * side, y + up, z + rz * side);
+      }
+      return start;
+    };
+    for (const info of edgeInfos) {
+      if (info.len < 0.05) continue;
+      let prev = -1;
+      const steps = Math.max(1, Math.ceil(info.len / (TILE * 0.45)));
+      for (let s = 0; s <= steps; s++) {
+        const f = s / steps;
+        const x = info.e.x0 + (info.e.x1 - info.e.x0) * f;
+        const z = info.e.z0 + (info.e.z1 - info.e.z0) * f;
+        const y = this.heightAt(x, z) + 0.42 + liftAt(x, z, info.ux, info.uz, info.passThrough);
+        const cur = addRing(x, y, z, info.rx, info.rz);
+        if (prev >= 0) {
+          for (let n = 0; n < seg; n++) {
+            const p = (n + 1) % seg;
+            indices.push(prev + n, prev + p, cur + p, prev + n, cur + p, cur + n);
+          }
+        }
+        prev = cur;
+      }
+    }
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+    geo.setIndex(indices);
+    geo.computeVertexNormals();
+    geo.computeBoundingSphere();
+    return geo;
+  }
+
+  // Pipe-Gebäude selbst sind nur noch Kupplungen; die langen Rohrstrecken entstehen im
+  // globalen Pipeline-Mesh, damit die Leitung nicht als Sammlung gedrehter Einzelstücke wirkt.
   _orientPipe(g, e) {
     const body = g.userData.body;
     if (!body || !this._pipeAnchors) return;
@@ -2366,26 +3261,15 @@ export class Renderer {
     }
     const metal = this.envMats.metal, dark = this.envMats.dark, signal = this.envMats.signal || this.envMats.hazard;
     const y = 0.28;
-    const dirs = links.length ? links : [{ dirX: 1, dirZ: 0, length: TILE * 0.58, targetKind: 'stub' }];
-    for (const l of dirs) {
-      const len = Math.max(0.42, l.length);
-      const cx = l.dirX * len * 0.5, cz = l.dirZ * len * 0.5;
-      const pipe = cylMesh(0.18, 0.18, len, metal, cx, y, cz, 12);
-      pipe.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), new THREE.Vector3(l.dirX, 0, l.dirZ).normalize());
-      body.add(pipe);
-      const band = cylMesh(0.22, 0.22, 0.13, dark, l.dirX * Math.min(len, TILE * 0.72), y, l.dirZ * Math.min(len, TILE * 0.72), 12);
-      band.quaternion.copy(pipe.quaternion);
-      body.add(band);
-    }
     const hub = cylMesh(0.28, 0.28, 0.24, dark, 0, y, 0, 14);
     hub.rotation.x = Math.PI / 2;
     body.add(hub);
-    body.add(boxMesh(0.42, 0.10, 0.42, dark, 0, 0.05, 0));
+    const valve = cylMesh(0.09, 0.09, 0.72, metal, 0, y + 0.1, 0, 8);
+    valve.rotation.z = Math.PI / 2;
+    body.add(valve);
+    body.add(boxMesh(0.46, 0.10, 0.46, dark, 0, 0.05, 0));
     if (links.length <= 1) {
-      const capDir = links[0] || { dirX: 1, dirZ: 0, length: TILE * 0.58 };
-      const cap = cylMesh(0.21, 0.21, 0.10, signal, -capDir.dirX * 0.28, y, -capDir.dirZ * 0.28, 12);
-      cap.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), new THREE.Vector3(capDir.dirX ?? 1, 0, capDir.dirZ ?? 0).normalize());
-      body.add(cap);
+      body.add(boxMesh(0.18, 0.16, 0.18, signal, -0.24, y + 0.04, 0));
     }
   }
 
@@ -2642,19 +3526,27 @@ export class Renderer {
         barrel.rotation.x = Math.PI / 2 - 0.5; body.add(barrel);
         body.add(boxMesh(1.9, 0.3, 0.5, dark, 0, 0.2, -1.3));               // Erdsporn
         g.userData.lift = 0;
-      } else if (e.kind === 'bomber' || e.kind === 'transport_air') {
+      } else if (e.kind === 'bomber' || e.kind === 'transport_air' || e.kind === 'cloud_seeder') {
         // Starrflügler: Rumpf, Tragflächen, Leitwerk, Triebwerksgondeln.
         body = new THREE.Group();
-        const fat = e.kind === 'transport_air' ? 0.55 : 0.4;
+        const fat = e.kind === 'transport_air' ? 0.55 : e.kind === 'cloud_seeder' ? 0.34 : 0.4;
         const fus = cylMesh(fat, fat * 0.8, 3.4, m, 0, 0, 0.2, 10);
         fus.rotation.x = Math.PI / 2; body.add(fus);
         const nose = new THREE.Mesh(new THREE.SphereGeometry(fat, 8, 6), m); nose.position.set(0, 0, 1.95); body.add(nose);
-        body.add(boxMesh(4.0, 0.12, 1.0, m, 0, 0.1, 0.3));                   // Flügel
+        body.add(boxMesh(e.kind === 'cloud_seeder' ? 4.5 : 4.0, 0.12, 1.0, m, 0, 0.1, 0.3)); // Flügel
         body.add(boxMesh(1.5, 0.1, 0.6, m, 0, 0.45, -1.5));                  // Höhenleitwerk
         body.add(boxMesh(0.1, 0.8, 0.7, m, 0, 0.5, -1.5));                   // Seitenleitwerk
         for (const sx of [-1.1, 1.1]) {
           const pod = cylMesh(0.18, 0.18, 0.7, dark, sx, -0.08, 0.55, 8);
           pod.rotation.x = Math.PI / 2; body.add(pod);
+        }
+        if (e.kind === 'cloud_seeder') {
+          for (const sx of [-1.65, 1.65]) {
+            const tank = cylMesh(0.16, 0.16, 0.82, this.envMats.glass, sx, -0.12, 0.12, 9);
+            tank.rotation.x = Math.PI / 2; body.add(tank);
+            const nozzle = cylMesh(0.035, 0.035, 0.34, this.envMats.metal, sx, -0.26, -0.4, 6);
+            nozzle.rotation.x = Math.PI / 2; body.add(nozzle);
+          }
         }
         g.userData.lift = 9;
       } else if (e.kind === 'recon_drone') {
@@ -2689,7 +3581,7 @@ export class Renderer {
         body.add(cylMesh(0.04, 0.04, 0.8, metal, 0.1, 1.5, 0.1, 6));        // Periskop
         body.add(boxMesh(1.6, 0.08, 0.5, dark, 0, 0.3, -1.2));              // Heckruder
         g.userData.lift = 0;
-      } else if (['recon_drone', 'gunship', 'bomber', 'transport_air'].includes(e.kind)) {
+      } else if (['recon_drone', 'gunship', 'bomber', 'cloud_seeder', 'transport_air'].includes(e.kind)) {
         body = new THREE.Mesh(new THREE.ConeGeometry(0.8, 2.2, 6), m); body.rotation.x = Math.PI / 2; body.position.y = 0; g.userData.lift = 9;
         if (e.kind === 'gunship') this._addHeliRotors(g, body);
       } else if (['patrol_boat', 'destroyer', 'amphib_transport', 'sea_builder'].includes(e.kind)) {
@@ -2978,6 +3870,67 @@ export class Renderer {
     return { depth, surface: this.waterSurfaceAt(wx, wz) };
   }
 
+  _updateUnderwaterTint(g, e, baseY) {
+    const info = this._waterInfoAt(e.x, e.y);
+    if (info.depth <= WATER_SHOW_DEPTH * 0.7) {
+      this._setObjectUnderwaterTint(g, 0);
+      return;
+    }
+    const cover = info.surface - (baseY + 0.10);
+    let factor = smoothstep(0.08, 0.85, cover);
+    if (e.submerged || e.kind === 'underwater_drone') factor = Math.max(factor, 0.78);
+    else if (e.kind === 'submarine') factor = Math.max(factor, 0.62);
+    this._setObjectUnderwaterTint(g, factor);
+  }
+
+  _setObjectUnderwaterTint(g, factor) {
+    const f = Math.max(0, Math.min(1, factor || 0));
+    const skip = new Set([g.userData.ring, g.userData.bar, g.userData.barBack, ...(g.userData.chevrons || [])].filter(Boolean));
+    g.traverse((o) => {
+      if (!o.isMesh || !o.material || skip.has(o) || o.userData.billboard) return;
+      const current = Array.isArray(o.material) ? o.material : [o.material];
+      let state = o.userData._underwaterTint;
+      const usingBases = state && current.length === state.bases.length && current.every((m, i) => m === state.bases[i]);
+      const usingClones = state && current.length === state.clones.length && current.every((m, i) => m === state.clones[i]);
+      if (!state || (!usingBases && !usingClones)) {
+        state = {
+          isArray: Array.isArray(o.material),
+          bases: current.slice(),
+          clones: current.map((m) => (m?.clone ? m.clone() : m)),
+        };
+        o.userData._underwaterTint = state;
+      }
+      if (f <= 0.01) {
+        if (!usingBases) o.material = state.isArray ? state.bases : state.bases[0];
+        return;
+      }
+      for (let i = 0; i < state.clones.length; i++) this._syncUnderwaterMaterial(state.clones[i], state.bases[i], f);
+      o.material = state.isArray ? state.clones : state.clones[0];
+    });
+  }
+
+  _syncUnderwaterMaterial(clone, base, factor) {
+    if (!clone || !base || clone === base) return;
+    if ('transparent' in clone && 'transparent' in base) clone.transparent = base.transparent;
+    if ('opacity' in clone && 'opacity' in base) clone.opacity = base.opacity;
+    if ('alphaTest' in clone && 'alphaTest' in base) clone.alphaTest = base.alphaTest;
+    if ('depthWrite' in clone && 'depthWrite' in base) clone.depthWrite = base.depthWrite;
+    if ('depthTest' in clone && 'depthTest' in base) clone.depthTest = base.depthTest;
+    if ('side' in clone && 'side' in base) clone.side = base.side;
+    if ('roughness' in clone && 'roughness' in base) clone.roughness = base.roughness;
+    if ('metalness' in clone && 'metalness' in base) clone.metalness = base.metalness;
+    if ('emissiveIntensity' in clone && 'emissiveIntensity' in base) clone.emissiveIntensity = base.emissiveIntensity * (1 - factor * 0.86);
+    if (clone.map !== base.map) { clone.map = base.map; clone.needsUpdate = true; }
+    if (clone.normalMap !== base.normalMap) { clone.normalMap = base.normalMap; clone.needsUpdate = true; }
+    if (clone.color && base.color) {
+      clone.color.copy(base.color).lerp(UNDERWATER_OBJECT_TINT, factor * 0.58);
+      clone.color.r *= 1 - factor * 0.72;
+      clone.color.g *= 1 - factor * 0.62;
+      clone.color.b *= 1 - factor * 0.50;
+    }
+    if (clone.emissive && base.emissive) clone.emissive.copy(base.emissive).multiplyScalar(1 - factor * 0.9);
+  }
+
   spawnExplosion(x, y, z, scale = 1) {
     const cy = y + 1;
     // 1) greller additiver Blitz
@@ -3035,6 +3988,7 @@ export class Renderer {
         m.material.transparent = true;
         m.material.depthWrite = false;
       });
+      this._setObjectUnderwaterTint(sourceGroup, 0.82);
       this._addEffect({
         mesh: sourceGroup,
         life: 0,
@@ -3494,6 +4448,19 @@ export class Renderer {
     }
   }
 
+  spawnRainCloud(x, z, r = 13, duration = 22) {
+    if (!this._particlesVisible()) return;
+    const y = this.heightAt(x, z) + 8.5;
+    const puffs = this.quality === 'low' ? 3 : this.quality === 'medium' ? 5 : 7;
+    for (let i = 0; i < puffs && this._canSpawnEffect(); i++) {
+      const a = Math.random() * Math.PI * 2;
+      const d = Math.sqrt(Math.random()) * r * 0.45;
+      this._sprite(0x31434b, x + Math.cos(a) * d, y + (Math.random() - 0.5) * 0.9, z + Math.sin(a) * d,
+        r * (0.22 + Math.random() * 0.11), Math.min(8, duration), { opacity: 0.32, grow: 0.25 });
+    }
+    this._localCloudFxAt = 0;
+  }
+
   // Distanzabhängige Lautstärke relativ zum Kamerafokus (0..1).
   _volAt(x, z) {
     const d = Math.hypot(x - this.camTarget.x, z - this.camTarget.z);
@@ -3511,6 +4478,8 @@ export class Renderer {
         this.spawnTracer(ev.x, this.heightAt(ev.x, ev.y), ev.y, ev.tx, this.heightAt(ev.tx, ev.ty), ev.ty);
         this.spawnShotParticles(ev.x, ev.y, ev.tx, ev.ty, ev.kind);
         if (audio) audio.fire(ev.kind, vol);
+      } else if (ev.type === 'rain_cloud') {
+        this.spawnRainCloud(ev.x, ev.y, ev.r || 13, ev.duration || 22);
       } else if (ev.type === 'death') {
         const sc = ev.etype === 'building' ? 3 : 1.2;
         this.spawnExplosion(ev.x, this.heightAt(ev.x, ev.y), ev.y, sc);
@@ -3576,6 +4545,7 @@ export class Renderer {
   updateEffects(dt) {
     const visible = this._particlesVisible();
     this._spawnCurrentParticles(dt);
+    this._spawnSourceParticles(dt);
     for (let i = this.effects.length - 1; i >= 0; i--) {
       const f = this.effects[i]; f.life += dt;
       if (f.mesh.visible !== visible) f.mesh.visible = visible;
@@ -3641,35 +4611,106 @@ export class Renderer {
 
   _spawnCurrentParticles(dt) {
     if (!this._particlesVisible() || !this.waterDepth || !this.height || !this._canSpawnEffect(3)) return;
-    const gap = this.quality === 'low' ? 0.58 : this.quality === 'medium' ? 0.42 : 0.30;
+    const gap = this.quality === 'low' ? 0.40 : this.quality === 'medium' ? 0.24 : 0.16;
     this._currentFxAt = Math.max(0, (this._currentFxAt || 0) - dt);
     if (this._currentFxAt > 0) return;
     this._currentFxAt = gap;
-    const tries = this.quality === 'low' ? 5 : this.quality === 'medium' ? 8 : 12;
+    const tries = this.quality === 'low' ? 8 : this.quality === 'medium' ? 13 : 20;
+    const maxMade = this.quality === 'low' ? 2 : this.quality === 'medium' ? 4 : 6;
     const radius = Math.max(14, Math.min(42, this.camDist * 0.22));
     let made = 0;
-    for (let n = 0; n < tries && made < 2 && this._canSpawnEffect(1); n++) {
+    for (let n = 0; n < tries && made < maxMade && this._canSpawnEffect(1); n++) {
       const wx = this.camTarget.x + (Math.random() - 0.5) * radius * 2;
       const wz = this.camTarget.z + (Math.random() - 0.5) * radius * 2;
       const gx = Math.round(wx / TILE), gy = Math.round(wz / TILE);
       if (gx < 1 || gy < 1 || gx >= this.mapW - 1 || gy >= this.mapH - 1) continue;
       const idx = gy * this.mapW + gx;
       const depth = this.waterDepth[idx] || 0;
-      if (depth < 0.045) continue;
+      // Auch das dünne Abfluss-Rinnsal (unter der Render-Schwelle) bekommt Partikel: so ist überall
+      // sichtbar, WO Wasser abfließt — bis hinunter zum Meer, auch wenn die Fläche selbst nicht gemalt wird.
+      if (depth < 0.020) continue;
       const flow = this._waterFlowAt(idx);
       const speed = Math.hypot(flow.x, flow.z);
-      if (speed < 0.50) continue;
-      const x = gx * TILE + (Math.random() - 0.5) * TILE * 0.7;
-      const z = gy * TILE + (Math.random() - 0.5) * TILE * 0.7;
-      const y = this.waterSurfaceAt(x, z) + 0.08;
-      this._sprite(0xd8f6ff, x, y, z, 0.16 + speed * 0.16, 0.42 + speed * 0.18, {
-        vx: flow.x * (0.55 + speed * 0.65),
-        vz: flow.z * (0.55 + speed * 0.65),
-        vy: 0.08 + speed * 0.10,
-        grow: 0.9,
-        opacity: 0.24 + speed * 0.20,
-      });
+      if (speed < 0.20) continue;   // schon sanfte Oberflächenströmung zeigt ihre Richtung
+      const surge = Math.max(0, Math.min(1, (speed - 0.20) / 0.5));
+      // Von hier dem Gefälle bis zum Meer folgen und entlang des Laufs Partikel setzen — so ist der
+      // Abfluss als durchgehender Bach BIS ZUM MEER sichtbar, auch wo die Sim das dünne Rinnsal
+      // bereits abgetragen hat (rein optisch, keine Sim-/Perf-Last).
+      this._traceFlowToSea(gx, gy, surge);
       made++;
+    }
+  }
+
+  // Steilsten Abstieg (Boden + Wasser) von einer Wasserzelle bis zum Meer/Rand verfolgen und kleine
+  // Strömungspartikel entlang des Pfades streuen. Endet am Meer, am Kartenrand oder in einer Senke.
+  _traceFlowToSea(gx, gy, surge) {
+    const W = this.mapW, H = this.mapH;
+    const maxLen = this.quality === 'low' ? 8 : this.quality === 'medium' ? 14 : 22;
+    let cx = gx, cy = gy;
+    for (let step = 0; step < maxLen && this._canSpawnEffect(1); step++) {
+      const ci = cy * W + cx;
+      // Dem GELÄNDEBETT folgen (nicht der flachen Wasseroberfläche, sonst bleibt der Lauf in
+      // stehendem Wasser sofort hängen) — das Flussbett fällt durchgehend zum Meer ab.
+      const g0 = this.height[ci];
+      let bx = -1, by = -1, bg = g0 - 0.0004, ndx = 0, ndy = 0;
+      for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+        if (!dx && !dy) continue;
+        const nx = cx + dx, ny = cy + dy;
+        if (nx < 0 || ny < 0 || nx >= W || ny >= H) continue;
+        const j = ny * W + nx;
+        const gj = this.height[j];
+        if (gj < bg) { bg = gj; bx = nx; by = ny; ndx = dx; ndy = dy; }
+      }
+      if (bx < 0) break; // lokale Senke → Abfluss endet (staut)
+      const dist = Math.hypot(ndx, ndy) || 1;
+      const fx = ndx / dist, fz = ndy / dist;
+      const wx = cx * TILE + fx * TILE * 0.5 + (Math.random() - 0.5) * TILE * 0.6;
+      const wz = cy * TILE + fz * TILE * 0.5 + (Math.random() - 0.5) * TILE * 0.6;
+      const depth = this.waterDepth[ci] || 0;
+      const y = (depth > 0.02 ? this.waterSurfaceAt(wx, wz) : this.height[ci] * HEIGHT_SCALE) + 0.08;
+      const fade = 0.55 + 0.45 * (1 - step / (maxLen + 2)); // Lauf bleibt bis zum Meer gut sichtbar
+      // Kräftigere, hellere, länger sichtbare Strömungspartikel — der Bach soll deutlich auffallen.
+      this._sprite(surge > 0.4 ? 0xeaffff : 0xbfeeff, wx, y, wz, 0.30 + surge * 0.36, 0.7 + surge * 0.4, {
+        vx: fx * (1.1 + surge * 1.1), vz: fz * (1.1 + surge * 1.1), vy: 0.10 + surge * 0.18,
+        grow: 1.2 + surge * 0.5, opacity: (0.45 + surge * 0.40) * fade,
+      });
+      // Schaumkrone: heller, additiver Glanzpunkt obenauf — gibt dem Lauf sichtbares Funkeln.
+      if (this._canSpawnEffect(1) && (surge > 0.25 || step % 2 === 0)) {
+        this._sprite(0xffffff, wx + (Math.random() - 0.5) * 0.5, y + 0.12, wz + (Math.random() - 0.5) * 0.5,
+          0.16 + surge * 0.2, 0.5 + surge * 0.3,
+          { vx: fx * 0.8, vz: fz * 0.8, vy: 0.14 + surge * 0.12, grow: 1.3, opacity: (0.4 + surge * 0.35) * fade, additive: true });
+      }
+      cx = bx; cy = by;
+      if (this.terrainType?.[by * W + bx] === 3) break; // Meer erreicht
+    }
+  }
+
+  // Flussquellen sichtbar machen: an jeder Quellzelle nahe der Kamera quillt rhythmisch Wasser auf
+  // (kleine, aufsteigende und auseinanderlaufende Tropfen). So erkennt der Spieler den URSPRUNG der
+  // Bäche — die Strömungspartikel zeigen danach den Lauf flussabwärts.
+  _spawnSourceParticles(dt) {
+    if (!this.waterSources || !this.waterSources.length) return;
+    if (!this._particlesVisible() || !this.height || !this._canSpawnEffect(2)) return;
+    this._sourceFxAt = Math.max(0, (this._sourceFxAt || 0) - dt);
+    if (this._sourceFxAt > 0) return;
+    this._sourceFxAt = this.quality === 'low' ? 0.5 : this.quality === 'medium' ? 0.34 : 0.24;
+    const w = this.mapW;
+    const reach = Math.max(46, this.camDist * 0.6);
+    for (const idx of this.waterSources) {
+      if (!this._canSpawnEffect(2)) break;
+      const gx = idx % w, gy = (idx / w) | 0;
+      const x = gx * TILE, z = gy * TILE;
+      if (Math.abs(x - this.camTarget.x) > reach || Math.abs(z - this.camTarget.z) > reach) continue;
+      const y = this.waterSurfaceAt(x, z) + 0.05;
+      const ang = Math.random() * Math.PI * 2, spread = 0.45 + Math.random() * 0.5;
+      // Aufquellender Kern …
+      this._sprite(0xcdeeff, x, y, z, 0.22, 0.62, { vy: 0.55, vx: Math.cos(ang) * spread, vz: Math.sin(ang) * spread, grow: 1.5, opacity: 0.5 });
+      // … plus ein paar überlaufende Tropfen ringsum.
+      if (this._canSpawnEffect(1) && Math.random() < 0.7) {
+        const a2 = Math.random() * Math.PI * 2;
+        this._sprite(0xeafbff, x, y + 0.02, z, 0.12, 0.5,
+          { vy: 0.32, vx: Math.cos(a2) * (0.7 + Math.random() * 0.6), vz: Math.sin(a2) * (0.7 + Math.random() * 0.6), grow: 1.2, opacity: 0.4 });
+      }
     }
   }
 
@@ -3686,7 +4727,7 @@ export class Renderer {
   }
 
   // --- Tag/Nacht, Wetter & Beben aus dem Snapshot-Env auf Licht/Himmel/Partikel anwenden ---
-  // env = { t: Tageszeit 0..1, d: Tageslicht 0..1, w: 'clear'|'fog'|'rain'|'storm'|'drought', q: [x,y]|0 }
+  // env = { t: Tageszeit 0..1, d: Tageslicht 0..1, w: 'clear'|'fog'|'rain'|'storm'|'drought', q: [x,y]|0, c: Wolken }
   updateEnvironment(env, dt) {
     this._lastDt = Math.min(0.05, Math.max(0, dt || 1 / 60));
     this.time += this._lastDt;
@@ -3729,31 +4770,51 @@ export class Renderer {
     this.hemi.intensity = (0.11 + 0.30 * d) * (0.60 + 0.40 * wf) + this._flash;
     this._flash = Math.max(0, this._flash - dt * 9);                     // Blitz-Aufhellung klingt ab
 
-    // Himmel & Nebel: Tagblau ↔ Nachtschwarz, bei Regen/Gewitter graustichig, Nebel milchig.
+    // Himmel & Nebel: Tagblau ↔ Nachtschwarz. Der Szene-Fog hat bei Wetternebel eine
+    // eigene Nachtfarbe, sonst würden entfernte Objekte nachts in helles Himmelsgrau ausbleichen.
     const sky = SKY_NIGHT.clone().lerp(SKY_DAY, d);
     if (horizonWarm > 0.01) sky.lerp(new THREE.Color(0xff7650), horizonWarm * 0.22);
-    if (env.w === 'fog') sky.lerp(new THREE.Color(0x9faab0), 0.70 * Math.max(0.25, d));
-    else if (env.w === 'drought') sky.lerp(SKY_DROUGHT, 0.32 * Math.max(0.35, d));
-    else if (env.w !== 'clear') sky.lerp(SKY_RAIN, env.w === 'storm' ? 0.75 : 0.5);
+    const sceneFog = sky.clone();
+    if (env.w === 'fog') {
+      const fogDaylight = smoothstep(0.08, 0.85, d);
+      const fogColor = WEATHER_FOG_NIGHT.clone().lerp(WEATHER_FOG_DAY, fogDaylight);
+      sky.lerp(fogColor, 0.36 + fogDaylight * 0.34);
+      sceneFog.copy(fogColor).lerp(sky, 0.18);
+    } else if (env.w === 'drought') {
+      sky.lerp(SKY_DROUGHT, 0.32 * Math.max(0.35, d));
+      sceneFog.copy(sky);
+    } else if (env.w !== 'clear') {
+      sky.lerp(SKY_RAIN, env.w === 'storm' ? 0.75 : 0.5);
+      sceneFog.copy(sky);
+    }
     if (this._flash > 0.05) sky.lerp(new THREE.Color(0xcfe8ff), Math.min(1, this._flash));
     this.scene.background.copy(sky);
-    if (this.scene.fog) this.scene.fog.color.copy(sky);
-    if (this.skirtMat) this.skirtMat.color.copy(new THREE.Color(0x0b4f82).multiplyScalar(0.38 + 0.62 * d));
+    if (this.scene.fog) this.scene.fog.color.copy(sceneFog);
+    if (this.skirtMat) this.skirtMat.color.copy(DEEP_SEA_SKIRT_COLOR).multiplyScalar(0.34 + 0.58 * d);
     if (this.waterMat) {
-      this.waterMat.uniforms.uTime.value = this.time;
-      this.waterMat.uniforms.uDay.value = d;
-      this.waterMat.uniforms.uStorm.value += (((env.w === 'storm' ? 1 : env.w === 'rain' ? 0.45 : 0) - this.waterMat.uniforms.uStorm.value) * Math.min(1, dt * 1.6));
-      this.waterMat.uniforms.uFog.value += (((env.w === 'fog' ? 1 : 0) - this.waterMat.uniforms.uFog.value) * Math.min(1, dt * 1.4));
-      // Sonnenrichtung fürs Glitzern auf den Wellenkämmen (folgt der Tageslicht-Sonne).
-      if (this.sun) this.waterMat.uniforms.uSunDir.value.copy(this.sun.position).normalize();
+      const stormTarget = env.w === 'storm' ? 1 : env.w === 'rain' ? 0.45 : 0;
+      this._waterStorm = (this._waterStorm || 0) + (stormTarget - (this._waterStorm || 0)) * Math.min(1, dt * 1.6);
+      const tex = this.waterMat.userData.flowTexture || this.waterMat.map;
+      if (tex) {
+        tex.offset.y = -this.time * (0.006 + this._waterStorm * 0.003);
+        tex.offset.x = this.time * 0.0007;
+      }
+      const base = this.waterMat.userData.baseColor || new THREE.Color(0x49bde8);
+      const waterLight = WATER_NIGHT_COLOR_MIN + d * (1 - WATER_NIGHT_COLOR_MIN);
+      this.waterMat.color.copy(base);
+      if (env.w === 'fog') this.waterMat.color.lerp(new THREE.Color(0x7aa5b0), 0.22);
+      else if (stormTarget > 0) this.waterMat.color.lerp(new THREE.Color(0x2b78a5), 0.18 + stormTarget * 0.16);
+      this.waterMat.color.multiplyScalar(waterLight);
+      this.waterMat.opacity = WATER_NIGHT_OPACITY_MIN + d * 0.34 + this._waterStorm * 0.04;
     }
     if (this.floodWaterMat) {
-      this.floodWaterMat.uniforms.uTime.value = this.time;
-      this.floodWaterMat.uniforms.uDay.value = d;
-      this.floodWaterMat.uniforms.uStorm.value += (((env.w === 'storm' ? 1 : env.w === 'rain' ? 0.45 : 0) - this.floodWaterMat.uniforms.uStorm.value) * Math.min(1, dt * 1.8));
       const farFloodFade = this.camDist <= 150 ? 1 : Math.max(0, 1 - (this.camDist - 150) / 95);
       if (this.floodMesh) this.floodMesh.visible = farFloodFade > 0.03;
-      this.floodWaterMat.uniforms.uZoomFade.value += (farFloodFade - this.floodWaterMat.uniforms.uZoomFade.value) * Math.min(1, dt * 4);
+      const tex = this.floodWaterMat.userData.flowTexture || this.floodWaterMat.map;
+      if (tex) tex.offset.y = -this.time * 0.007;
+      const floodBase = this.floodWaterMat.userData.baseColor || new THREE.Color(0x3eb7e2);
+      this.floodWaterMat.color.copy(floodBase).multiplyScalar(WATER_NIGHT_COLOR_MIN + d * (1 - WATER_NIGHT_COLOR_MIN));
+      this.floodWaterMat.opacity = (WATER_NIGHT_OPACITY_MIN * 0.78 + d * 0.30) * farFloodFade;
     }
     if (this.oreMats) {
       const oreVis = Math.max(0, Math.min(1, (d - 0.18) / 0.42));
@@ -3848,6 +4909,7 @@ export class Renderer {
 
     // Regen: Partikelvorhang um den Kamerafokus; Dichte/Tempo nach Wetterlage.
     this._updateRain(env.w, dt);
+    this._updateLocalRainClouds(env.c, dt);
 
     // Beben: solange aktiv, Kamera rütteln (stärker nahe am Epizentrum).
     if (env.q) {
@@ -3921,6 +4983,36 @@ export class Renderer {
     this.rain.geometry.attributes.color.needsUpdate = true;
   }
 
+  _updateLocalRainClouds(clouds, dt) {
+    if (!Array.isArray(clouds) || !clouds.length || !this._particlesVisible() || this.camDist > PARTICLE_ZOOM_HIDE_DIST) return;
+    this._localCloudFxAt = Math.max(0, (this._localCloudFxAt || 0) - dt);
+    if (this._localCloudFxAt > 0) return;
+    this._localCloudFxAt = this.quality === 'low' ? 0.36 : this.quality === 'medium' ? 0.24 : 0.16;
+    const maxClouds = this.quality === 'low' ? 1 : 2;
+    let shown = 0;
+    for (const c of clouds) {
+      if (!c || shown >= maxClouds) break;
+      const x = c[0], z = c[1], r = c[2] || 13;
+      if (Math.hypot(x - this.camTarget.x, z - this.camTarget.z) > Math.max(55, this.camDist * 0.55)) continue;
+      shown++;
+      const drops = this.quality === 'low' ? 2 : this.quality === 'medium' ? 3 : 5;
+      for (let i = 0; i < drops && this._canSpawnEffect(); i++) {
+        const a = Math.random() * Math.PI * 2;
+        const d = Math.sqrt(Math.random()) * r * 0.82;
+        const px = x + Math.cos(a) * d;
+        const pz = z + Math.sin(a) * d;
+        const py = this.heightAt(px, pz) + 5.5 + Math.random() * 3.5;
+        const geo = new THREE.BufferGeometry().setFromPoints([
+          new THREE.Vector3(px, py, pz),
+          new THREE.Vector3(px + 0.18, py - 3.2, pz),
+        ]);
+        const line = new THREE.Line(geo, new THREE.LineBasicMaterial({ color: 0x9fc7e8, transparent: true, opacity: 0.52 }));
+        this.scene.add(line);
+        this._addEffect({ mesh: line, life: 0, max: 0.34 + Math.random() * 0.16, opacity: 0.52, vy: -8.5 });
+      }
+    }
+  }
+
   _resetDrop(i, anyHeight) {
     const c = this.camTarget;
     const R = Math.min(250, Math.max(110, this.camDist * 0.92));
@@ -3962,6 +5054,7 @@ export class Renderer {
   }
 
   render() {
+    this._animateSeaWaterMesh();
     if (this.perf.faunaStep > 0) {
       this._faunaUpdateT += this._lastDt;
       if (this._faunaUpdateT >= this.perf.faunaStep) {
@@ -4043,248 +5136,95 @@ function makeOrePileMesh(mat) {
   return g;
 }
 
-function makeWaterMaterial(cloudTexture) {
-  // Stilisiertes, animiertes Wasser für Meer & Seen: zwei gekreuzte Wellenzüge heben die
-  // Oberfläche und liefern eine analytische Normale für Fresnel (Himmel am streifenden Blick),
-  // Sonnen-Glitzern auf den Wellenkämmen und sanfte Schaumkronen. Tiefenabhängige Farbe
-  // (flach türkis → tief marineblau). Amplitude kommt je Vertex aus aAmp (Meer voll, Seen sanft,
-  // flache Flüsse/Filme = 0 → ruhig). Der Look nimmt die Idee geschichteter, choppy Wellen auf,
-  // bleibt aber meshbasiert und nutzt die echten Flussvektoren statt Vollbild-Raymarching.
-  return new THREE.ShaderMaterial({
+function makeWaterFlowTexture(size = 128) {
+  const canvas = document.createElement('canvas');
+  canvas.width = canvas.height = size;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return null;
+  const base = ctx.createLinearGradient(0, 0, 0, size);
+  base.addColorStop(0, '#45bde3');
+  base.addColorStop(1, '#2f9dcc');
+  ctx.fillStyle = base;
+  ctx.fillRect(0, 0, size, size);
+
+  ctx.globalCompositeOperation = 'screen';
+  for (let y = -size; y < size * 2; y += 38) {
+    const grad = ctx.createLinearGradient(0, y, 0, y + 24);
+    grad.addColorStop(0, 'rgba(255,255,255,0.00)');
+    grad.addColorStop(0.50, 'rgba(255,255,255,0.10)');
+    grad.addColorStop(1, 'rgba(255,255,255,0.00)');
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    ctx.moveTo(0, y);
+    ctx.lineTo(size, y + 6);
+    ctx.lineTo(size, y + 14);
+    ctx.lineTo(0, y + 8);
+    ctx.closePath();
+    ctx.fill();
+  }
+
+  ctx.globalCompositeOperation = 'source-over';
+  ctx.strokeStyle = 'rgba(225,248,255,0.16)';
+  ctx.lineWidth = 1.2;
+  ctx.lineCap = 'round';
+  for (let y = 18; y < size; y += 34) {
+    ctx.beginPath();
+    ctx.moveTo(0, y);
+    ctx.bezierCurveTo(size * 0.28, y - 4, size * 0.72, y + 4, size, y);
+    ctx.stroke();
+  }
+
+  ctx.strokeStyle = 'rgba(0,78,120,0.10)';
+  ctx.lineWidth = 1.4;
+  for (let y = 34; y < size; y += 42) {
+    ctx.beginPath();
+    ctx.moveTo(0, y);
+    ctx.bezierCurveTo(size * 0.33, y + 3, size * 0.66, y - 3, size, y + 1);
+    ctx.stroke();
+  }
+
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.wrapS = THREE.RepeatWrapping;
+  tex.wrapT = THREE.RepeatWrapping;
+  tex.repeat.set(1, 1);
+  tex.anisotropy = 2;
+  tex.needsUpdate = true;
+  return tex;
+}
+
+function makeWaterMaterial() {
+  const flowTexture = makeWaterFlowTexture();
+  const mat = new THREE.MeshBasicMaterial({
+    color: 0x55c8f2,
+    map: flowTexture,
     transparent: true,
+    opacity: 0.76,
+    vertexColors: true,
     depthWrite: false,
+    side: THREE.DoubleSide,
     polygonOffset: true,
     polygonOffsetFactor: -1,
     polygonOffsetUnits: -2,
-    uniforms: {
-      uTime: { value: 0 },
-      uDay: { value: 1 },
-      uStorm: { value: 0 },
-      uZoomFade: { value: 1 },
-      uFog: { value: 0 },
-      uSunDir: { value: new THREE.Vector3(0.4, 0.8, 0.45).normalize() },
-      uClouds: { value: cloudTexture },
-    },
-    vertexShader: `
-      uniform float uTime;
-      uniform float uStorm;
-      attribute float aAmp;
-      attribute float aWet;
-      attribute float aDepth;
-      attribute vec2 aFlow;
-      attribute float aSea;
-      varying float vWet;
-      varying float vDepth;
-      varying vec2 vFlow;
-      varying float vSea;
-      varying vec3 vWorld;
-      varying vec3 vWNormal;
-      varying float vCrest;
-      void main() {
-        vec3 p = position;
-        float amp = aAmp * (1.0 + uStorm * 1.1);
-        float k1 = 0.115, k2 = 0.082;
-        float s1 = uTime * (0.85 + uStorm * 0.5);
-        float s2 = uTime * (1.25 + uStorm * 0.6);
-        float ph1 = p.x * k1 + p.z * 0.028 + s1;
-        float ph2 = p.z * k2 - p.x * 0.046 + s2;
-        float wave = sin(ph1) + 0.7 * sin(ph2);
-        p.y += amp * wave;
-        // analytische Normale aus den Wellen-Ableitungen
-        float dX = amp * (k1 * cos(ph1) - 0.046 * 0.7 * cos(ph2));
-        float dZ = amp * (0.028 * cos(ph1) + k2 * 0.7 * cos(ph2));
-        vWNormal = normalize(vec3(-dX, 1.0, -dZ));
-        vCrest = clamp(amp * wave * 1.4, 0.0, 1.0);
-        vWet = aWet;
-        vDepth = aDepth;
-        vFlow = aFlow;
-        vSea = aSea;
-        vec4 wp = modelMatrix * vec4(p, 1.0);
-        vWorld = wp.xyz;
-        gl_Position = projectionMatrix * viewMatrix * wp;
-      }
-    `,
-    fragmentShader: `
-      uniform float uTime;
-      uniform float uDay;
-      uniform float uStorm;
-      uniform float uFog;
-      uniform vec3 uSunDir;
-      uniform sampler2D uClouds;
-      varying float vWet;
-      varying float vDepth;
-      varying vec2 vFlow;
-      varying float vSea;
-      varying vec3 vWorld;
-      varying vec3 vWNormal;
-      varying float vCrest;
-
-      // Himmelsfarbverlauf entlang der reflektierten Blickrichtung (hell am Horizont, sattes
-      // Blau nach oben) — die Farbe, die das Wasser per Fresnel spiegelt.
-      vec3 skyColor(vec3 dir, float day) {
-        float up = clamp(dir.y, 0.0, 1.0);
-        vec3 horizon = mix(vec3(0.30, 0.40, 0.52), vec3(0.74, 0.86, 0.98), day);
-        vec3 zenith  = mix(vec3(0.10, 0.18, 0.34), vec3(0.30, 0.55, 0.86), day);
-        return mix(horizon, zenith, pow(up, 0.55));
-      }
-
-      // Feines, bewegtes Wellenrelief: Summe gescrollter Sinus-Oktaven (eigene Koeffizienten).
-      // Gibt den GRADIENTEN der Wellenhöhe zurück → daraus entsteht die Pixel-Normale.
-      vec2 rippleGrad(vec2 p, float t, float chop) {
-        vec2 g = vec2(0.0);
-        float amp = 1.0, freq = 0.35;
-        vec2 dir = normalize(vec2(0.8, 0.35));
-        for (int i = 0; i < 4; i++) {
-          float ph = dot(p, dir) * freq + t * (0.9 + freq);
-          float s = sin(ph) * 0.5 + 0.5;
-          // d/dp von pow(s,1+chop): betont „spitze" Wellenkämme statt reiner Sinuskurve
-          float dw = (1.0 + chop) * pow(s, chop) * 0.5 * cos(ph) * freq;
-          g += dir * dw * amp;
-          amp *= 0.45; freq *= 1.9;
-          dir = vec2(dir.x * 0.36 - dir.y * 0.93, dir.x * 0.93 + dir.y * 0.36); // Richtung rotieren
-        }
-        return g;
-      }
-
-      void main() {
-        if (vWet <= 0.02) discard;
-        float depthF = clamp(vDepth, 0.0, 1.0);
-
-        // Pixel-Normale: geometrische Welle + IMMER präsentes, zweistufiges Ripple-Relief.
-        // Auch bei ruhigem/flachem Wasser bricht das die Low-Poly-Facetten des Meshs auf, statt
-        // platte Dreiecke zu zeigen — der Hauptgrund, warum es vorher „flach/blöd" aussah.
-        vec2 g1 = rippleGrad(vWorld.xz, uTime * 0.55, 0.85 + uStorm * 0.35);
-        vec2 g2 = rippleGrad(vWorld.xz * 1.15 + 17.0, uTime * 0.70, 0.45);
-        float relief = mix(0.16, 0.36, vSea)
-          + smoothstep(0.16, 0.52, length(vFlow)) * (1.0 - vSea) * 0.10
-          + uStorm * 0.22;
-        vec2 gg = g1 * 0.30 + g2 * 0.08;
-        vec3 N = normalize(vWNormal + vec3(-gg.x, 0.0, -gg.y) * relief);
-        vec3 V = normalize(cameraPosition - vWorld);
-
-        // Tiefenfarbe: flach klar-türkis → tief sattes Meerblau (nicht schwarz, sonst „murky")
-        vec3 shallow = vec3(0.19, 0.67, 0.71);
-        vec3 deep    = vec3(0.03, 0.27, 0.46);
-        vec3 col = mix(shallow, deep, depthF);
-        col = mix(col, vec3(0.025, 0.20, 0.36), vSea * smoothstep(0.25, 1.0, depthF) * 0.45);
-
-        // Echte Strömungsrichtung aus der Simulation: keine Punktdecke, sondern langgezogene
-        // Schlieren und Stromschnellen entlang des Gefälles.
-        float flowLen = length(vFlow);
-        vec2 flowDir = flowLen > 0.01 ? normalize(vFlow) : normalize(vec2(0.64, 0.31));
-        vec2 sideDir = vec2(-flowDir.y, flowDir.x);
-        float along = dot(vWorld.xz, flowDir);
-        float cross = dot(vWorld.xz, sideDir);
-        float riverMask = smoothstep(0.16, 0.50, flowLen) * (1.0 - vSea);
-        float sheet = smoothstep(0.32, 0.78,
-          0.5 + 0.5 * sin(along * 0.22 - uTime * (1.25 + flowLen * 2.1) + sin(cross * 0.45) * 0.35));
-        float streamLine = smoothstep(0.74, 0.98,
-          0.5 + 0.5 * sin(along * 0.58 - uTime * (2.8 + flowLen * 3.4) + sin(cross * 1.15) * 0.55));
-        float rapids = riverMask * smoothstep(0.78, 1.0, flowLen) * streamLine
-          * (1.0 - smoothstep(0.78, 1.0, depthF));
-        col = mix(col, vec3(0.25, 0.69, 0.88), riverMask * sheet * 0.08);
-        col = mix(col, vec3(0.82, 0.94, 0.98), rapids * 0.14);
-
-        // Sehr breite Meeresbänder: Bewegung der Oberfläche bleibt lesbar, ohne feines Rauschen.
-        float seaBand = smoothstep(0.40, 0.90,
-          0.5 + 0.5 * sin(vWorld.x * 0.055 + vWorld.z * 0.018 + uTime * (0.55 + uStorm * 0.35)));
-        col += vec3(0.035, 0.070, 0.085) * seaBand * vSea * (0.45 + uDay * 0.55);
-
-        // Fresnel-Himmelspiegelung (am streifenden Blick spiegelt das Wasser den Himmel)
-        vec3 R = reflect(-V, N);
-        float fres = 0.03 + 0.97 * pow(1.0 - max(dot(N, V), 0.0), 5.0);
-        vec3 sky = skyColor(R, uDay);
-        col = mix(col, sky, clamp(fres, 0.0, 0.85) * (0.40 + uDay * 0.6));
-        float clouds = texture2D(uClouds, vWorld.xz * 0.0045 + vec2(uTime * 0.004, -uTime * 0.002)).r;
-        float cloudRefl = smoothstep(0.52, 0.90, clouds) * (0.08 + uDay * 0.16) * (0.55 + vSea * 0.45);
-        cloudRefl *= 1.0 - uStorm * 0.45;
-        col = mix(col, vec3(0.62, 0.80, 0.94), cloudRefl);
-        // Konstanter Himmel-Ambient: hebt auch das senkrecht von oben betrachtete Wasser an,
-        // damit tiefes Wasser nicht flach-dunkel wirkt.
-        col += sky * (0.14 + 0.10 * (1.0 - depthF)) * uDay;
-
-        // Diffuse Aufhellung + scharfes Sonnen-Glitzern
-        float diff = max(dot(N, uSunDir), 0.0);
-        col += vec3(0.10, 0.15, 0.14) * diff * uDay;
-        vec3 H = normalize(uSunDir + V);
-        float spec = pow(max(dot(N, H), 0.0), 180.0) * uDay * (1.0 - uStorm * 0.55);
-        col += spec * vec3(1.0, 0.96, 0.85) * 0.55;
-
-        // Schaumkronen auf hohen Wellenspitzen (mehr bei Sturm)
-        float foam = smoothstep(0.70, 0.99, vCrest) * (0.04 + uStorm * 0.24);
-        foam = max(foam, rapids * 0.08);
-        col = mix(col, vec3(0.90, 0.95, 1.0), foam);
-
-        col = mix(col, vec3(0.05, 0.11, 0.19), uStorm * 0.30);
-        col *= mix(0.5, 1.0, uDay);
-        col = mix(col, vec3(0.2, 0.24, 0.26), uFog * 0.22);
-
-        // Fast geschlossene Oberfläche: flach nur leicht transparent, Meer/tiefes Wasser dicht.
-        float alpha = mix(0.78, 0.96, depthF);
-        alpha = mix(alpha, 0.94, vSea * 0.75);
-        alpha = max(alpha, fres * 0.48 + 0.50);
-        alpha += foam * 0.12 + rapids * 0.03;
-        alpha = clamp(alpha, 0.0, 0.98) * smoothstep(0.02, 0.14, vWet);
-        gl_FragColor = vec4(col, alpha);
-      }
-    `,
   });
+  mat.userData.flowTexture = flowTexture;
+  mat.userData.baseColor = new THREE.Color(0x55c8f2);
+  return mat;
 }
 
 function makeFloodWaterMaterial() {
-  return new THREE.ShaderMaterial({
+  const flowTexture = makeWaterFlowTexture(96);
+  if (flowTexture) flowTexture.repeat.set(0.9, 0.9);
+  const mat = new THREE.MeshBasicMaterial({
+    color: 0x3eb7e2,
+    map: flowTexture,
     transparent: true,
+    opacity: 0.62,
     depthWrite: false,
-    uniforms: {
-      uTime: { value: 0 },
-      uDay: { value: 1 },
-      uStorm: { value: 0 },
-      uZoomFade: { value: 1 },
-    },
-    vertexShader: `
-      uniform float uTime;
-      uniform float uStorm;
-      varying vec2 vUv;
-      varying vec3 vWorld;
-      varying float vWave;
-      void main() {
-        vUv = uv;
-        vec3 p = position;
-        float w1 = sin(p.x * 4.8 + uTime * (3.2 + uStorm * 1.7));
-        float w2 = sin((p.x + p.z) * 3.1 - uTime * (4.6 + uStorm * 2.0));
-        vWave = (w1 + w2 * 0.65) / 1.65;
-        p.y += vWave * (0.018 + uStorm * 0.026);
-        vec4 local = vec4(p, 1.0);
-        #ifdef USE_INSTANCING
-          local = instanceMatrix * local;
-        #endif
-        vec4 wp = modelMatrix * local;
-        vWorld = wp.xyz;
-        gl_Position = projectionMatrix * viewMatrix * wp;
-      }
-    `,
-    fragmentShader: `
-      uniform float uTime;
-      uniform float uDay;
-      uniform float uStorm;
-      uniform float uZoomFade;
-      varying vec2 vUv;
-      varying vec3 vWorld;
-      varying float vWave;
-      void main() {
-        float streakA = sin(vWorld.x * 1.45 + vWorld.z * 0.35 - uTime * (4.2 + uStorm * 1.2));
-        float streakB = sin(vWorld.x * 0.35 - vWorld.z * 1.25 + uTime * 2.6);
-        float streak = 0.5 + 0.5 * (streakA * 0.7 + streakB * 0.3);
-        float foam = smoothstep(0.82 - uStorm * 0.14, 0.99, vWave) * (0.06 + uStorm * 0.18);
-        vec3 col = vec3(0.11, 0.50, 0.78);
-        col = mix(col, vec3(0.17, 0.58, 0.84), streak * 0.16);
-        col += foam * vec3(0.34, 0.44, 0.50);
-        col *= mix(0.48, 1.0, uDay);
-        float alpha = (0.72 + streak * 0.05 + foam * 0.07 + uStorm * 0.05) * uZoomFade;
-        gl_FragColor = vec4(col, alpha);
-      }
-    `,
+    side: THREE.DoubleSide,
   });
+  mat.userData.flowTexture = flowTexture;
+  mat.userData.baseColor = new THREE.Color(0x3eb7e2);
+  return mat;
 }
 
 function makeFogOfWarMaterial() {
@@ -4297,6 +5237,7 @@ function makeFogOfWarMaterial() {
       uCircles: { value: circles },
       uNight: { value: 0 },
       uWeatherFog: { value: 0 },
+      uFogColor: { value: new THREE.Color(0.62, 0.72, 0.82) },
     },
     vertexShader: `
       varying vec3 vWorld;
@@ -4311,6 +5252,7 @@ function makeFogOfWarMaterial() {
       uniform vec3 uCircles[48];
       uniform float uNight;
       uniform float uWeatherFog;
+      uniform vec3 uFogColor;
       varying vec3 vWorld;
       void main() {
         float seen = 0.0;
@@ -4320,11 +5262,12 @@ function makeFogOfWarMaterial() {
           float d = distance(vWorld.xz, c.xy);
           seen = max(seen, 1.0 - smoothstep(c.z * 0.78, c.z, d));
         }
-        float baseAlpha = mix(0.58, 0.88, uNight);
-        baseAlpha = mix(baseAlpha, max(baseAlpha, 0.90), uWeatherFog);
-        float alpha = baseAlpha * (1.0 - seen);
+        // Kriegsnebel-Deckkraft hängt NUR an Tag/Nacht. Wetter-Nebel macht ihn NICHT dichter und
+        // NICHT dunkler (das ergab schwarze Flächen, wo sich Nebel und Kriegsnebel überlagerten),
+        // sondern färbt ihn zur Dunstfarbe der Szene → harmoniert mit scene.fog statt schwarz zu werden.
+        float alpha = mix(0.58, 0.88, uNight) * (1.0 - seen);
         vec3 col = mix(vec3(0.19, 0.21, 0.22), vec3(0.03, 0.04, 0.05), uNight);
-        col = mix(col, vec3(0.025, 0.030, 0.035), uWeatherFog * 0.72);
+        col = mix(col, uFogColor, uWeatherFog * 0.7);
         gl_FragColor = vec4(col, alpha);
       }
     `,

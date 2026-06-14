@@ -6,12 +6,22 @@ const MUSIC_GAIN = { calm: 0.16, combat: 0.24 };
 const MUSIC_CROSSFADE = 5.5;
 const COMBAT_HOLD = 12;
 
+// Persistente Ton-Einstellungen (überleben Reload). '1' = an, '0' = aus; fehlend = Standard (an).
+function loadAudioPref(key, def = true) {
+  try { const v = localStorage.getItem(key); return v == null ? def : v === '1'; } catch { return def; }
+}
+function saveAudioPref(key, on) {
+  try { localStorage.setItem(key, on ? '1' : '0'); } catch {}
+}
+
 export class Audio {
   constructor() {
     this.ctx = null;
     this.master = null;
     this.noise = null;       // wiederverwendeter Rauschpuffer
-    this.muted = false;
+    // Getrennt schaltbar: Musik und Soundeffekte (inkl. Regen-Ambiente). Per Menü umschaltbar.
+    this.musicMuted = !loadAudioPref('if_music_on', true);
+    this.sfxMuted = !loadAudioPref('if_sfx_on', true);
     this.frameBudget = {};   // pro Frame gedrosselte Soundzahl je Kategorie
     this.music = [];
     this.musicMode = null;
@@ -29,7 +39,7 @@ export class Audio {
       if (!AC) return;
       this.ctx = new AC();
       this.master = this.ctx.createGain();
-      this.master.gain.value = 0.5;
+      this.master.gain.value = this.sfxMuted ? 0 : 0.5;
       this.master.connect(this.ctx.destination);
       // 1 s weißes Rauschen als Quelle für Schüsse/Explosionen.
       const len = this.ctx.sampleRate;
@@ -42,11 +52,26 @@ export class Audio {
     this._ensureMusic();
   }
 
-  setMuted(m) {
-    this.muted = m;
-    if (this.master) this.master.gain.value = m ? 0 : 0.5;
-    for (const deck of this.music) if (deck.el) deck.el.volume = m ? 0 : deck.gain;
+  get musicEnabled() { return !this.musicMuted; }
+  get sfxEnabled() { return !this.sfxMuted; }
+
+  // Musik separat schalten (Hintergrundmusik-Decks).
+  setMusicEnabled(on) {
+    this.musicMuted = !on;
+    saveAudioPref('if_music_on', on);
+    for (const deck of this.music) if (deck.el) deck.el.volume = this.musicMuted ? 0 : deck.gain;
   }
+
+  // Soundeffekte separat schalten — Master-Gain deckt alle Synth-SFX UND das Regen-Ambiente ab,
+  // die per-Sample gespielten Clips greifen zusätzlich auf this.sfxMuted zurück.
+  setSfxEnabled(on) {
+    this.sfxMuted = !on;
+    saveAudioPref('if_sfx_on', on);
+    if (this.master) this.master.gain.value = this.sfxMuted ? 0 : 0.5;
+  }
+
+  // Kompatibilität: alles gemeinsam stummschalten.
+  setMuted(m) { this.setMusicEnabled(!m); this.setSfxEnabled(!m); }
   get ready() { return !!this.ctx && this.ctx.state === 'running'; }
 
   // Drossel: maximal n Sounds einer Kategorie pro Frame (Großschlachten überfluten den Mixer nicht).
@@ -138,7 +163,7 @@ export class Audio {
     for (const deck of this.music) {
       const alpha = Math.min(1, dt / Math.max(0.1, deck.fade || MUSIC_CROSSFADE));
       deck.gain += (deck.target - deck.gain) * alpha;
-      deck.el.volume = this.muted ? 0 : deck.gain;
+      deck.el.volume = this.musicMuted ? 0 : deck.gain;
       if (deck.target > 0 && deck.el.duration && Number.isFinite(deck.el.duration)
         && deck.el.duration - deck.el.currentTime < MUSIC_CROSSFADE + 0.5) {
         this._startMusic(deck.mode || desired, MUSIC_CROSSFADE);
@@ -156,7 +181,7 @@ export class Audio {
   musicBeat() { return this.beat || 0; }
 
   _sample(cat, vol = 1, rate = 1) {
-    if (!this.ready || this.muted || vol <= 0.02) return false;
+    if (!this.ready || this.sfxMuted || vol <= 0.02) return false;
     const list = SFX_SAMPLES[cat];
     if (!list || !list.length) return false;
     const src = list[(Math.random() * list.length) | 0];
@@ -175,7 +200,7 @@ export class Audio {
 
   // --- Spiel-Sounds ---
   fire(weapon, vol = 1) {
-    if (!this.ready || this.muted || vol <= 0.02) return;
+    if (!this.ready || this.sfxMuted || vol <= 0.02) return;
     if (!this._budget('fire', 6)) return;
     this.markCombat();
     const v = 0.35 * vol;
@@ -199,7 +224,7 @@ export class Audio {
   }
 
   explosion(scale = 1, vol = 1) {
-    if (!this.ready || this.muted || vol <= 0.02) return;
+    if (!this.ready || this.sfxMuted || vol <= 0.02) return;
     if (!this._budget('explosion', 8)) return;
     this.markCombat();
     const v = Math.min(0.9, 0.4 * vol * (0.7 + scale * 0.2));
@@ -210,7 +235,7 @@ export class Audio {
 
   // Donnerschlag: Knall (Hochpass-Crack) + langes tiefes Grollen.
   thunder(vol = 1) {
-    if (!this.ready || this.muted) return;
+    if (!this.ready || this.sfxMuted) return;
     if (!this._budget('thunder', 2)) return;
     this._burst(0.5 * vol, 2500, 0.08, 0.8, 'highpass');
     this._burst(0.6 * vol, 140, 1.6, 0.4);
@@ -219,15 +244,15 @@ export class Audio {
 
   // Infanterie-Marschbefehl: zwei kurze, weiche Schritt-Taps (kein Maschinensound für Menschen).
   steps(vol = 1) {
-    if (!this.ready || this.muted) return;
+    if (!this.ready || this.sfxMuted) return;
     if (!this._budget('steps', 2)) return;
     this._burst(0.10 * vol, 900, 0.05, 0.8);
-    setTimeout(() => { if (this.ready && !this.muted) this._burst(0.08 * vol, 750, 0.05, 0.8); }, 120);
+    setTimeout(() => { if (this.ready && !this.sfxMuted) this._burst(0.08 * vol, 750, 0.05, 0.8); }, 120);
   }
 
   // Steinschlag: kurzes, trockenes Poltern.
   rocks(vol = 1) {
-    if (!this.ready || this.muted) return;
+    if (!this.ready || this.sfxMuted) return;
     if (!this._budget('rocks', 2)) return;
     this._burst(0.25 * vol, 300, 0.18, 0.6);
     this._thump(0.15 * vol, 110, 50, 0.15);
@@ -235,25 +260,25 @@ export class Audio {
 
   // Erdbeben: langes, sehr tiefes Grollen.
   rumble() {
-    if (!this.ready || this.muted) return;
+    if (!this.ready || this.sfxMuted) return;
     this._burst(0.55, 70, 3.2, 0.3);
     this._thump(0.4, 50, 22, 2.8);
   }
 
   command(vol = 1) {
-    if (!this.ready || this.muted) return;
+    if (!this.ready || this.sfxMuted) return;
     if (!this._budget('command', 3)) return;
     if (!this._sample('yes', 0.18 * vol, 0.94 + Math.random() * 0.08)) this._tone(0.18 * vol, 520, 0.08);
   }
 
   motor(vol = 1) {
-    if (!this.ready || this.muted) return;
+    if (!this.ready || this.sfxMuted) return;
     if (!this._budget('motor', 2)) return;
     if (!this._sample('motor', 0.16 * vol, 0.9 + Math.random() * 0.12)) this._burst(0.08 * vol, 180, 0.16, 0.4);
   }
 
   excavate(vol = 1) {
-    if (!this.ready || this.muted) return;
+    if (!this.ready || this.sfxMuted) return;
     if (!this._budget('excavator', 2)) return;
     if (!this._sample('excavator', 0.22 * vol, 0.9 + Math.random() * 0.1)) this._burst(0.18 * vol, 380, 0.16, 0.6);
   }
@@ -271,22 +296,22 @@ export class Audio {
       src.start();
       this._rain = g;
     }
-    const target = this.muted ? 0 : w === 'storm' ? 0.10 : w === 'rain' ? 0.055 : 0;
+    const target = this.sfxMuted ? 0 : w === 'storm' ? 0.10 : w === 'rain' ? 0.055 : 0;
     const t = this.ctx.currentTime;
     this._rain.gain.cancelScheduledValues(t);
     this._rain.gain.linearRampToValueAtTime(target, t + 1.5);
   }
 
   build(vol = 1) {
-    if (!this.ready || this.muted) return;
+    if (!this.ready || this.sfxMuted) return;
     this._sample('construction', 0.18 * vol, 0.95 + Math.random() * 0.08);
     this._tone(0.25 * vol, 330, 0.12); this._tone(0.25 * vol, 495, 0.16, 'triangle', 0.1);
   }
   ready_(vol = 1) {
-    if (!this.ready || this.muted) return;
+    if (!this.ready || this.sfxMuted) return;
     if (!this._budget('ready', 3)) return;
     this._sample('yes', 0.16 * vol, 1);
     this._tone(0.22 * vol, 660, 0.1); this._tone(0.22 * vol, 880, 0.12, 'triangle', 0.08);
   }
-  defeat() { if (!this.ready || this.muted) return; this._tone(0.4, 330, 0.5, 'sawtooth'); this._tone(0.4, 220, 0.7, 'sawtooth', 0.25); }
+  defeat() { if (!this.ready || this.sfxMuted) return; this._tone(0.4, 330, 0.5, 'sawtooth'); this._tone(0.4, 220, 0.7, 'sawtooth', 0.25); }
 }

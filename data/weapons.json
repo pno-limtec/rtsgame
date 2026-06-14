@@ -15,5 +15,7 @@
   "turret_mg":    { "damage": 16,  "range": 8,  "cooldown": 0.35, "speed": 85, "vs": { "infantry": 1.4, "vehicle": 0.45, "building": 0.25, "air": 0.55, "naval": 0.35 }, "ammo": 1 },
   "turret_flak":  { "damage": 34,  "range": 11, "cooldown": 0.65, "speed": 75, "vs": { "infantry": 0.35, "vehicle": 0.3, "building": 0.2, "air": 1.55, "naval": 0.2 }, "ammo": 1 },
   "turret_cannon":{ "damage": 50,  "range": 11, "cooldown": 1.2, "speed": 55, "vs": { "infantry": 0.9, "vehicle": 1.1, "building": 0.6, "air": 0.0, "naval": 0.9 }, "ammo": 1 },
-  "sam_missile":  { "damage": 65,  "range": 14, "cooldown": 1.5, "speed": 90, "vs": { "infantry": 0.0, "vehicle": 0.0, "building": 0.0, "air": 1.8, "naval": 0.0 }, "ammo": 1 }
+  "sam_missile":  { "damage": 65,  "range": 14, "cooldown": 1.5, "speed": 90, "vs": { "infantry": 0.0, "vehicle": 0.0, "building": 0.0, "air": 1.8, "naval": 0.0 }, "ammo": 1 },
+  "cloud_seed":   { "damage": 0,   "range": 18, "cooldown": 14.0, "speed": 58, "vs": { "infantry": 0.0, "vehicle": 0.0, "building": 0.0, "air": 0.0, "naval": 0.0 }, "ammo": 2,
+    "weatherCloud": { "radius": 13, "duration": 22, "rain": 0.0032 } }
 }

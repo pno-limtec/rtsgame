@@ -56,6 +56,21 @@ wss.on('connection', (ws) => {
         broadcastLobby();
         break;
       }
+      case 'takeover': {
+        const seat = match.takeoverAi(msg.name || 'Spieler', msg.seat);
+        ws.seat = seat;
+        ws.send(JSON.stringify({ type: 'joined', seat, ok: seat != null }));
+        broadcastLobby();
+        break;
+      }
+      case 'release': {
+        const oldSeat = ws.seat;
+        const seat = oldSeat != null ? match.releaseHuman(oldSeat) : null;
+        if (seat != null) ws.seat = null;
+        ws.send(JSON.stringify({ type: 'spectator', seat: seat ?? oldSeat, ok: seat != null }));
+        broadcastLobby();
+        break;
+      }
       case 'reconnect': {
         const seat = match.reconnect(msg.seat, msg.name);
         ws.seat = seat;
@@ -99,7 +114,7 @@ wss.on('connection', (ws) => {
 
   ws.on('close', () => {
     clients.delete(ws);
-    if (ws.seat != null) match.markDisconnected(ws.seat); // KI übernimmt nach Timeout
+    if (ws.seat != null) match.releaseHuman(ws.seat); // KI spielt sofort weiter
     broadcastLobby();
   });
 });

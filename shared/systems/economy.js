@@ -263,7 +263,9 @@ function stepBuilderOre(world) {
       let l = byOwner.get(e.owner); if (!l) byOwner.set(e.owner, l = []);
       l.push(e);
     }
-    for (const list of byOwner.values()) {
+    for (const [owner, list] of byOwner) {
+      const player = world.players.find(p => p.id === owner);
+      if (player?.controller === 'human') continue;
       if (list.some(b => b.resourceRole === 'ore')) continue;
       const cand = list.find(b => b.order.type === 'idle' || b.order.type === 'guard') || list[0];
       if (cand) { cand.resourceRole = 'ore'; cand.harvestNode = null; }

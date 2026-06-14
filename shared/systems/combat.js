@@ -3,6 +3,7 @@ import { DT, SUB_EXPOSE_TIME } from '../constants.js';
 import { nearestEnemy, applyDamage, targetClass, dist, isDetectable } from '../world.js';
 import { inBounds, tIdx, worldToTile } from '../terrain.js';
 import { setMoveGoal } from './movement.js';
+import { addRainCloud } from './environment.js';
 
 const ENGAGE = new Set(['idle', 'attackmove', 'attack', 'hold', 'guard', 'patrol', 'harvest']);
 
@@ -22,6 +23,23 @@ export function stepCombat(world) {
     if (tgt && tgt.submerged && !isDetectable(world, e, tgt)) { tgt = null; e.target = null; }
     // Luftfahrzeuge ohne Bordmunition feuern nicht (stepAir schickt sie zur Basis)
     if (e.muniMax && e.muni <= 0) continue;
+
+    if (order === 'seedCloud' && e.weapon.weatherCloud) {
+      const tx = Number(e.order.x), ty = Number(e.order.y);
+      if (!Number.isFinite(tx) || !Number.isFinite(ty)) { e.order = { type: 'idle' }; continue; }
+      const d = Math.hypot(tx - e.x, ty - e.y);
+      if (d <= e.weapon.range && d >= (e.weapon.minRange || 0)) {
+        e.facing = Math.atan2(ty - e.y, tx - e.x);
+        if (e.cd <= 0 && fireAtPoint(world, e, tx, ty)) {
+          e.order = { type: 'idle' };
+          e.target = null;
+        }
+      } else if (e.etype === 'unit') {
+        e._chaseCd = (e._chaseCd || 0) - DT;
+        if (e._chaseCd <= 0) { setMoveGoal(world, e, tx, ty); e._chaseCd = 0.6; }
+      }
+      continue;
+    }
 
     // explizites Angriffsziel
     if (order === 'attack' && e.order.targetId != null) {
@@ -79,21 +97,38 @@ function acquireRange(world, e) {
 }
 
 function fire(world, e, tgt) {
+  if (!spendShot(world, e)) return false;
+  world.projectiles.push({
+    x: e.x, y: e.y, speed: e.weapon.speed, dmg: e.weapon.damage * (e.vetDmgMult || 1),
+    splash: e.weapon.splash || 0, vs: e.weapon.vs, owner: e.owner, attackerId: e.id,
+    targetId: tgt.id, gx: tgt.x, gy: tgt.y, weatherCloud: e.weapon.weatherCloud || null,
+  });
+  world.events.push({ type: 'fire', x: e.x, y: e.y, tx: tgt.x, ty: tgt.y, kind: e.weapon.name });
+  return true;
+}
+
+function fireAtPoint(world, e, x, y) {
+  if (!spendShot(world, e)) return false;
+  world.projectiles.push({
+    x: e.x, y: e.y, speed: e.weapon.speed, dmg: e.weapon.damage * (e.vetDmgMult || 1),
+    splash: e.weapon.splash || 0, vs: e.weapon.vs || {}, owner: e.owner, attackerId: e.id,
+    targetId: null, gx: x, gy: y, weatherCloud: e.weapon.weatherCloud || null,
+  });
+  world.events.push({ type: 'fire', x: e.x, y: e.y, tx: x, ty: y, kind: e.weapon.name });
+  return true;
+}
+
+function spendShot(world, e) {
   const p = world.players.find(pp => pp.id === e.owner);
   const ammoCost = e.weapon.ammo || 0;
   if (p && ammoCost) {
-    if ((p.resources.ammo || 0) < ammoCost) return; // kein Nachschub → kein Feuer
+    if ((p.resources.ammo || 0) < ammoCost) return false; // kein Nachschub → kein Feuer
     p.resources.ammo -= ammoCost;
   }
   e.cd = e.weapon.cooldown;
   if (e.muniMax) e.muni -= 1;                                  // Luft: Bordmunition verbrauchen
   if (e.submerged) e._exposeUntil = world.time + SUB_EXPOSE_TIME; // U-Boot taucht beim Feuern auf
-  world.projectiles.push({
-    x: e.x, y: e.y, speed: e.weapon.speed, dmg: e.weapon.damage * (e.vetDmgMult || 1),
-    splash: e.weapon.splash || 0, vs: e.weapon.vs, owner: e.owner, attackerId: e.id,
-    targetId: tgt.id, gx: tgt.x, gy: tgt.y,
-  });
-  world.events.push({ type: 'fire', x: e.x, y: e.y, tx: tgt.x, ty: tgt.y, kind: e.weapon.name });
+  return true;
 }
 
 function stepProjectiles(world) {
@@ -112,6 +147,10 @@ function stepProjectiles(world) {
 }
 
 function detonate(world, pr, tgt) {
+  if (pr.weatherCloud) {
+    addRainCloud(world, pr.gx, pr.gy, { ...pr.weatherCloud, owner: pr.owner });
+    return;
+  }
   world.events.push({ type: 'explosion', x: pr.gx, y: pr.gy, splash: pr.splash });
   const attacker = pr.attackerId != null ? world.entities.get(pr.attackerId) : null; // für Veteranen-XP
   if (pr.splash > 0) {

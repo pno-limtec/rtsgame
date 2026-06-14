@@ -16,6 +16,7 @@ import {
   QUAKE_INTERVAL, QUAKE_DURATION, QUAKE_RADIUS, QUAKE_SLOPE, QUAKE_SLIDE, QUAKE_BUILDING_DMG,
   RAIN_SLIDE_SLOPE, RAIN_SLIDE_CHANCE, RAIN_SLIDE_AMT,
   WAVE_DPS, STORM_AIR_DPS, SNOW_LINE, WATER_MAX_DEPTH, SEA_LEVEL,
+  CLOUD_SEED_RADIUS, CLOUD_SEED_DURATION, CLOUD_SEED_RAIN_DEPTH,
   AVAL_SNOW, AVAL_SLOPE, AVAL_CHANCE, AVAL_DMG, AVAL_LEN, AVAL_ERODE, AVAL_DEPOSIT,
 } from '../constants.js';
 import { tIdx, inBounds, worldToTile, tileToWorld, applyHeightDelta, wakeWaterAround } from '../terrain.js';
@@ -32,6 +33,17 @@ export function initEnv(world) {
     _lightningCd: 0,
   };
   refillForecast(world, world.env.weather);
+}
+
+export function addRainCloud(world, x, y, opts = {}) {
+  if (!world?.terrain || !Number.isFinite(x) || !Number.isFinite(y)) return false;
+  const radius = Math.max(4, Number(opts.radius) || CLOUD_SEED_RADIUS);
+  const duration = Math.max(2, Number(opts.duration) || CLOUD_SEED_DURATION);
+  const rain = Math.max(0.0002, Number(opts.rain) || CLOUD_SEED_RAIN_DEPTH);
+  const cloud = { x, y, r: radius, left: duration, rain, owner: opts.owner ?? null };
+  (world.weatherClouds || (world.weatherClouds = [])).push(cloud);
+  world.events.push({ type: 'rain_cloud', x, y, r: radius, duration, owner: cloud.owner });
+  return true;
 }
 
 export function stepEnvironment(world) {
@@ -63,6 +75,8 @@ export function stepEnvironment(world) {
   // Solarertrag: nachts 0; Nebel/Regen/Gewitter drosseln zunehmend.
   const wf = (env.weather === 'clear' || env.weather === 'drought') ? 1 : env.weather === 'fog' ? 0.45 : env.weather === 'rain' ? 0.2 : 0.08;
   env.solar = env.daylight * wf;
+
+  stepRainClouds(world);
 
   // Gewitter-Risiken je Domäne: Wellengang beschädigt Überwasserschiffe (getauchte U-Boote
   // sind sicher!), Sturmböen zerren an Luftfahrzeugen — Wetter bestimmt die Einheitenwahl.
@@ -105,6 +119,34 @@ export function stepEnvironment(world) {
       startQuake(world);
     }
   }
+}
+
+function stepRainClouds(world) {
+  const clouds = world.weatherClouds;
+  const t = world.terrain;
+  if (!clouds || !clouds.length || !t?.water) return;
+  const live = [];
+  for (const c of clouds) {
+    c.left -= DT;
+    const [cx, cy] = worldToTile(c.x, c.y);
+    const tileR = Math.ceil(c.r / TILE);
+    for (let dy = -tileR; dy <= tileR; dy++) for (let dx = -tileR; dx <= tileR; dx++) {
+      const tx = cx + dx, ty = cy + dy;
+      if (!inBounds(t, tx, ty)) continue;
+      const wx = (tx + 0.5) * TILE, wy = (ty + 0.5) * TILE;
+      const d = Math.hypot(wx - c.x, wy - c.y);
+      if (d > c.r) continue;
+      const i = tIdx(t, tx, ty);
+      if (t.waterBlock?.[i] > 0 || t.height[i] <= SEA_LEVEL) continue;
+      const falloff = 1 - d / c.r;
+      const amount = c.rain * (0.35 + falloff * 0.8);
+      t.water[i] = Math.min(WATER_MAX_DEPTH, t.water[i] + amount);
+      if (t.waterActive) t.waterActive.add(i);
+    }
+    wakeWaterAround(t, cx, cy, 1, Math.max(2, tileR + 1));
+    if (c.left > 0) live.push(c);
+  }
+  world.weatherClouds = live;
 }
 
 function nextWeather(world, from) {
@@ -201,14 +243,14 @@ function triggerAvalanche(world, start) {
   let cur = start;
   for (let s = 0; s < AVAL_LEN; s++) {
     const low = lowestNeighbor(t, cur, path);
-    if (low < 0 || t.height[cur] - t.height[low] < 0.012) break;
+    if (low < 0 || t.height[cur] - t.height[low] < 0.008) break;
     cur = low;
     path.push(cur);
     if (t.snow[cur] > 0) {
       mass += t.snow[cur] * 0.35;
       t.snow[cur] *= 0.35;                         // reißt Schnee unterwegs mit
     }
-    if (s < AVAL_LEN * 0.45) applyHeightDelta(t, cur, Math.min(AVAL_ERODE * mass * 0.35, 0.018), false);
+    if (s < AVAL_LEN * 0.58) applyHeightDelta(t, cur, Math.min(AVAL_ERODE * mass * 0.35, 0.018), false);
   }
   // Schaden an allem im Pfad + Schmelzwasser am Auslauf; Wasser-CA wecken.
   const coords = [];
@@ -221,7 +263,7 @@ function triggerAvalanche(world, start) {
       const [etx, ety] = worldToTile(e.x, e.y);
       if (etx === px && ety === py) applyDamage(world, e, AVAL_DMG * (e.etype === 'building' ? 0.7 : 1), null);
     }
-    if (p >= path.length - 3) {                    // Auslaufzone: Schnee/Schutt lagert an
+    if (p >= path.length - 5) {                    // Auslaufzone: Schnee/Schutt lagert an
       applyHeightDelta(t, i, Math.min(AVAL_DEPOSIT * mass, 0.035), true);
       t.water[i] = Math.min(WATER_MAX_DEPTH, t.water[i] + mass * 0.15);
       if (t.waterActive) t.waterActive.add(i);
@@ -233,26 +275,42 @@ function triggerAvalanche(world, start) {
 
 export function checkRainSlides(world, boost = 1) {
   const t = world.terrain;
-  const tries = 48;
+  const tries = 56;
   let slid = 0, ev = null;
   const candidates = [];
+  const seen = new Set();
+  const addCandidate = (i) => {
+    if (i < 0 || i >= t.w * t.h || seen.has(i)) return;
+    seen.add(i);
+    candidates.push(i);
+  };
   if (t.waterActive) {
     for (const i of t.waterActive) {
-      candidates.push(i);
-      if (candidates.length >= 24) break;
+      addCandidate(i);
+      const x = i % t.w, y = (i / t.w) | 0;
+      for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+        if (!dx && !dy) continue;
+        const nx = x + dx, ny = y + dy;
+        if (inBounds(t, nx, ny)) addCandidate(tIdx(t, nx, ny));
+      }
+      if (candidates.length >= 180) break;
     }
   }
-  for (let k = 0; k < tries; k++) candidates.push((world.rng() * t.w * t.h) | 0);
+  for (let k = 0; k < tries; k++) addCandidate((world.rng() * t.w * t.h) | 0);
   for (const i of candidates) {
     if (t.height[i] > SNOW_LINE) continue; // Schneehänge werden über Lawinen behandelt
     const low = lowestNeighbor(t, i, null);
     if (low < 0) continue;
+    const bias = waterSlideBias(t, i, low);
     const slope = t.height[i] - t.height[low];
-    if (slope <= RAIN_SLIDE_SLOPE) continue;
-    const wet = t.water[i] > 0.015 || t.water[low] > 0.015;
-    if (!wet && world.rng() > 0.35) continue;
-    if (world.rng() > RAIN_SLIDE_CHANCE * boost * Math.min(3, 1 + slope * 8)) continue;
-    if (slideCell(world, i, low, RAIN_SLIDE_SLOPE, RAIN_SLIDE_AMT, 0.04)) {
+    const threshold = RAIN_SLIDE_SLOPE * (bias.flowing ? 0.78 : 1);
+    if (slope <= threshold) continue;
+    if (!bias.wet && world.rng() > 0.30) continue;
+    const chance = RAIN_SLIDE_CHANCE * boost
+      * Math.min(6.0, (1 + slope * 8) * (bias.wet ? 1.35 : 0.45) + bias.flow * 30);
+    if (world.rng() > chance) continue;
+    const len = bias.wet ? 3 + Math.min(5, Math.floor(bias.flow * 34)) : 2;
+    if (slideCell(world, i, low, threshold, RAIN_SLIDE_AMT, 0.04, len)) {
       slid++;
       if (!ev) {
         const [wx, wy] = tileToWorld(i % t.w, (i / t.w) | 0);
@@ -261,6 +319,18 @@ export function checkRainSlides(world, boost = 1) {
     }
   }
   if (slid && ev) world.events.push(ev);
+}
+
+function waterSlideBias(t, high, low) {
+  const d0 = t.water?.[high] || 0;
+  const d1 = t.water?.[low] || 0;
+  const surfaceDrop = Math.max(0, (t.height[high] + d0) - (t.height[low] + d1));
+  const wet = d0 > 0.012 || d1 > 0.012 || !!(t.waterActive && (t.waterActive.has(high) || t.waterActive.has(low)));
+  return {
+    wet,
+    flowing: wet && surfaceDrop > 0.018,
+    flow: wet ? Math.min(0.18, surfaceDrop) : 0,
+  };
 }
 
 function lowestNeighbor(t, i, seen) {
@@ -277,45 +347,79 @@ function lowestNeighbor(t, i, seen) {
   return low;
 }
 
-function slideCell(world, high, low, threshold, mult, cap) {
+function slideCell(world, high, low, threshold, mult, cap, maxLen = 1) {
   const t = world.terrain;
-  const slope = t.height[high] - t.height[low];
-  if (low < 0 || slope <= threshold) return false;
-  const a = Math.min(cap, (slope - threshold) * mult);
-  if (a <= 0) return false;
-  applyHeightDelta(t, high, a, false);
-  applyHeightDelta(t, low, a * 0.82, true);
-  if (t.water[high] > 0) {
-    const wash = Math.min(t.water[high] * 0.35, WATER_MAX_DEPTH - t.water[low]);
-    if (wash > 0) { t.water[high] -= wash; t.water[low] += wash; }
-  }
-  if (t.waterActive) { t.waterActive.add(high); t.waterActive.add(low); }
-  const hx = high % t.w, hy = (high / t.w) | 0;
-  const lx = low % t.w, ly = (low / t.w) | 0;
-  for (const e of world.entities.values()) {
-    if (e.dead || e.domain === 'air') continue;
-    const [etx, ety] = worldToTile(e.x, e.y);
-    if ((etx === hx && ety === hy) || (etx === lx && ety === ly)
-      || (e.etype === 'building' && etx >= hx - 1 && etx <= hx + 1 && ety >= hy - 1 && ety <= hy + 1)) {
-      applyDamage(world, e, QUAKE_BUILDING_DMG * DT * (e.etype === 'building' ? 1 : 0.6), null);
+  const path = [high];
+  let moved = false;
+  let curHigh = high, curLow = low;
+  const steps = Math.max(1, maxLen | 0);
+  for (let step = 0; step < steps; step++) {
+    if (curLow < 0) break;
+    const localThreshold = threshold * (step === 0 ? 1 : 0.72);
+    const slope = t.height[curHigh] - t.height[curLow];
+    if (slope <= localThreshold) break;
+    const falloff = Math.max(0.35, 1 - step * 0.13);
+    const a = Math.min(cap * falloff, (slope - localThreshold) * mult * falloff);
+    if (a <= 0) break;
+    applyHeightDelta(t, curHigh, a, false);
+    applyHeightDelta(t, curLow, a * (step === steps - 1 ? 0.90 : 0.64), true);
+    if (t.water[curHigh] > 0) {
+      const wash = Math.min(t.water[curHigh] * (0.44 - Math.min(0.18, step * 0.04)), WATER_MAX_DEPTH - t.water[curLow]);
+      if (wash > 0) { t.water[curHigh] -= wash; t.water[curLow] += wash; }
     }
+    if (t.waterActive) { t.waterActive.add(curHigh); t.waterActive.add(curLow); }
+    path.push(curLow);
+    moved = true;
+    curHigh = curLow;
+    curLow = lowestNeighbor(t, curHigh, path);
   }
-  wakeWaterAround(t, Math.min(hx, lx), Math.min(hy, ly), 2, 2);
-  pushSlideEvent(world, high, low);
+  if (!moved) return false;
+  damageSlidePath(world, path);
+  let minX = t.w, minY = t.h, maxX = 0, maxY = 0;
+  for (const i of path) {
+    const x = i % t.w, y = (i / t.w) | 0;
+    minX = Math.min(minX, x); minY = Math.min(minY, y);
+    maxX = Math.max(maxX, x); maxY = Math.max(maxY, y);
+  }
+  wakeWaterAround(t, minX, minY, Math.max(1, maxX - minX + 1), Math.max(2, maxY - minY + 2));
+  pushSlideEvent(world, path);
   return true;
 }
 
-function pushSlideEvent(world, high, low) {
+function damageSlidePath(world, path) {
+  const t = world.terrain;
+  const impacted = new Set();
+  for (const e of world.entities.values()) {
+    if (e.dead || e.domain === 'air') continue;
+    const [etx, ety] = worldToTile(e.x, e.y);
+    for (const i of path) {
+      const x = i % t.w, y = (i / t.w) | 0;
+      if ((etx === x && ety === y)
+        || (e.etype === 'building' && etx >= x - 1 && etx <= x + 1 && ety >= y - 1 && ety <= y + 1)) {
+        if (!impacted.has(e.id)) {
+          impacted.add(e.id);
+          applyDamage(world, e, QUAKE_BUILDING_DMG * DT * (e.etype === 'building' ? 1 : 0.6), null);
+        }
+        break;
+      }
+    }
+  }
+}
+
+function pushSlideEvent(world, path) {
   if (world._slideFxTick !== world.tick) {
     world._slideFxTick = world.tick;
     world._slideFxCount = 0;
   }
   if (world._slideFxCount >= 6) return;
   const t = world.terrain;
-  const [hx, hy] = tileToWorld(high % t.w, (high / t.w) | 0);
-  const [lx, ly] = tileToWorld(low % t.w, (low / t.w) | 0);
+  const coords = [];
+  for (const i of path) {
+    const [wx, wy] = tileToWorld(i % t.w, (i / t.w) | 0);
+    coords.push(wx, wy);
+  }
   world._slideFxCount++;
-  world.events.push({ type: 'landslide', x: hx, y: hy, path: [hx, hy, lx, ly] });
+  world.events.push({ type: 'landslide', x: coords[0], y: coords[1], path: coords });
 }
 
 function startQuake(world) {
@@ -386,13 +490,14 @@ function triggerQuakeSlideBurst(world, q, wanted) {
 function carveQuakeFissure(world, q) {
   const t = world.terrain;
   const len = Math.max(6, Math.round(Math.max(t.w, t.h) * 0.10));
-  const angle = world.rng() * Math.PI * 2;
+  const angle = Math.atan2(q.ty + 0.5 - t.h / 2, q.tx + 0.5 - t.w / 2) + (world.rng() - 0.5) * 0.55;
   const ax = Math.cos(angle), ay = Math.sin(angle);
   const sx = -ay, sy = ax;
   const phase = world.rng() * Math.PI * 2;
   const coords = [];
   let touchedWater = false;
-  for (let s = -Math.floor(len / 2); s <= Math.ceil(len / 2); s++) {
+  const maxR = Math.hypot(t.w / 2, t.h / 2);
+  for (let s = 0; s <= len; s++) {
     const wobble = Math.sin(s * 0.55 + phase) * 1.2 + (world.rng() - 0.5) * 0.55;
     const cx = Math.round(q.tx + ax * s + sx * wobble);
     const cy = Math.round(q.ty + ay * s + sy * wobble);
@@ -401,7 +506,9 @@ function carveQuakeFissure(world, q) {
       const x = Math.round(cx + sx * side), y = Math.round(cy + sy * side);
       if (!inBounds(t, x, y)) continue;
       const i = tIdx(t, x, y);
-      const depth = side === 0 ? 0.105 : 0.045;
+      const rn = Math.min(1, Math.hypot(x + 0.5 - t.w / 2, y + 0.5 - t.h / 2) / maxR);
+      const floor = Math.max(SEA_LEVEL + 0.025, 0.82 - rn * 0.58 + Math.abs(side) * 0.025);
+      const depth = Math.max(side === 0 ? 0.105 : 0.045, t.height[i] - floor);
       applyHeightDelta(t, i, depth, false);
       if (t.water[i] > 0.01 || t.height[i] < SEA_LEVEL) touchedWater = true;
       if (t.waterActive) t.waterActive.add(i);

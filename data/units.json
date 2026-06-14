@@ -1,140 +1,486 @@
 {
   "engineer": {
-    "label": "Pionier", "category": "infantry", "domain": "land", "armor": "infantry",
-    "hp": 80, "speed": 3.2, "sight": 6, "cost": { "ore": 250 }, "buildTime": 6,
-    "abilities": ["repair", "capture"], "upkeep": { "fuel": 0.0 },
+    "label": "Pionier",
+    "category": "infantry",
+    "domain": "land",
+    "armor": "infantry",
+    "hp": 80,
+    "speed": 3.2,
+    "sight": 6,
+    "cost": {
+      "ore": 250
+    },
+    "buildTime": 6,
+    "abilities": [
+      "repair",
+      "capture"
+    ],
+    "upkeep": {
+      "fuel": 0
+    },
     "desc": "Infanterie-Spezialist: repariert und erobert. Gebäude errichtet ausschließlich der Bagger."
   },
   "builder": {
-    "label": "Bagger", "category": "vehicle", "domain": "land", "armor": "light",
-    "hp": 280, "speed": 3.6, "sight": 6, "cost": { "ore": 400, "fuel": 15 }, "buildTime": 8,
-    "abilities": ["construct", "repair", "excavate"], "upkeep": { "fuel": 0.3 },
-    "desc": "Zivile Baumaschine: errichtet Gebäude, hebt Gräben aus und schüttet Erde auf. Erde wird im Baumateriallager verbucht."
+    "label": "Bagger",
+    "category": "vehicle",
+    "domain": "land",
+    "armor": "light",
+    "hp": 280,
+    "speed": 3.6,
+    "sight": 6,
+    "cost": {
+      "ore": 400,
+      "fuel": 15
+    },
+    "buildTime": 8,
+    "abilities": [
+      "construct",
+      "repair",
+      "excavate"
+    ],
+    "upkeep": {
+      "fuel": 0.3
+    },
+    "desc": "Zivile Baumaschine: kann jederzeit zwischen Erzabbau, Erdarbeiten und Bauen wechseln."
   },
   "rifleman": {
-    "label": "Schütze", "category": "infantry", "domain": "land", "armor": "infantry",
-    "hp": 100, "speed": 3.0, "sight": 7, "cost": { "ore": 100 }, "buildTime": 3,
-    "weapon": "rifle", "upkeep": { "fuel": 0.0 },
+    "label": "Schütze",
+    "category": "infantry",
+    "domain": "land",
+    "armor": "infantry",
+    "hp": 100,
+    "speed": 3,
+    "sight": 7,
+    "cost": {
+      "ore": 100
+    },
+    "buildTime": 3,
+    "weapon": "rifle",
+    "upkeep": {
+      "fuel": 0
+    },
     "desc": "Standard-Infanterie. Billig, profitiert stark von Deckung."
   },
   "at_soldier": {
-    "label": "PzAbwehr-Trupp", "category": "infantry", "domain": "land", "armor": "infantry",
-    "hp": 110, "speed": 2.8, "sight": 7, "cost": { "ore": 200 }, "buildTime": 5,
-    "weapon": "at_launcher", "upkeep": { "fuel": 0.0 },
+    "label": "PzAbwehr-Trupp",
+    "category": "infantry",
+    "domain": "land",
+    "armor": "infantry",
+    "hp": 110,
+    "speed": 2.8,
+    "sight": 7,
+    "cost": {
+      "ore": 200
+    },
+    "buildTime": 5,
+    "weapon": "at_launcher",
+    "upkeep": {
+      "fuel": 0
+    },
     "desc": "Panzerabwehr-Infanterie. Schwach gegen Infanterie."
   },
   "aa_soldier": {
-    "label": "FlaRak-Trupp", "category": "infantry", "domain": "land", "armor": "infantry",
-    "hp": 95, "speed": 2.7, "sight": 8, "cost": { "ore": 240 }, "buildTime": 6,
-    "weapon": "aa_missile", "upkeep": { "fuel": 0.0 },
+    "label": "FlaRak-Trupp",
+    "category": "infantry",
+    "domain": "land",
+    "armor": "infantry",
+    "hp": 95,
+    "speed": 2.7,
+    "sight": 8,
+    "cost": {
+      "ore": 240
+    },
+    "buildTime": 6,
+    "weapon": "aa_missile",
+    "upkeep": {
+      "fuel": 0
+    },
     "desc": "Fußsoldaten mit tragbaren Flugabwehrraketen. Sehr stark gegen Luft, fast nutzlos gegen Bodenziele."
   },
   "scout": {
-    "label": "Späher", "category": "vehicle", "domain": "land", "armor": "light",
-    "hp": 140, "speed": 6.0, "sight": 12, "cost": { "ore": 300, "fuel": 20 }, "buildTime": 5,
-    "weapon": "chain_gun", "upkeep": { "fuel": 0.4 },
+    "label": "Späher",
+    "category": "vehicle",
+    "domain": "land",
+    "armor": "light",
+    "hp": 140,
+    "speed": 6,
+    "sight": 12,
+    "cost": {
+      "ore": 240,
+      "fuel": 20
+    },
+    "buildTime": 5,
+    "weapon": "chain_gun",
+    "upkeep": {
+      "fuel": 0.4
+    },
     "desc": "Schnelles leichtes Fahrzeug. Aufklärung & Flankieren."
   },
   "tank": {
-    "label": "Kampfpanzer", "category": "vehicle", "domain": "land", "armor": "heavy",
-    "hp": 420, "speed": 3.6, "sight": 8, "cost": { "ore": 700, "fuel": 40 }, "buildTime": 11,
-    "weapon": "tank_cannon", "upkeep": { "fuel": 0.6 }, "heavy": true,
+    "label": "Kampfpanzer",
+    "category": "vehicle",
+    "domain": "land",
+    "armor": "heavy",
+    "hp": 420,
+    "speed": 3.6,
+    "sight": 8,
+    "cost": {
+      "ore": 460,
+      "fuel": 40
+    },
+    "buildTime": 11,
+    "weapon": "tank_cannon",
+    "upkeep": {
+      "fuel": 0.6
+    },
+    "heavy": true,
     "desc": "Rückgrat der Landstreitmacht. Schwer: schnell auf Straßen, bleibt bei Regen im Gelände stecken, säuft im Wasser ab."
   },
   "artillery": {
-    "label": "Artillerie", "category": "vehicle", "domain": "land", "armor": "light",
-    "hp": 160, "speed": 2.4, "sight": 8, "cost": { "ore": 800, "fuel": 30 }, "buildTime": 13,
-    "weapon": "artillery", "upkeep": { "fuel": 0.5 }, "heavy": true,
+    "label": "Artillerie",
+    "category": "vehicle",
+    "domain": "land",
+    "armor": "light",
+    "hp": 160,
+    "speed": 2.4,
+    "sight": 8,
+    "cost": {
+      "ore": 520,
+      "fuel": 30
+    },
+    "buildTime": 13,
+    "weapon": "artillery",
+    "upkeep": {
+      "fuel": 0.5
+    },
+    "heavy": true,
     "desc": "Lange Reichweite, Flächenschaden. Schwer (Straßen nutzen!); verwundbar im Nahkampf."
   },
   "rocket_launcher": {
-    "label": "Raketenwerfer", "category": "vehicle", "domain": "land", "armor": "light",
-    "hp": 180, "speed": 3.0, "sight": 8, "cost": { "ore": 720, "fuel": 35 }, "buildTime": 12,
-    "weapon": "rocket_salvo", "upkeep": { "fuel": 0.55 }, "heavy": true,
+    "label": "Raketenwerfer",
+    "category": "vehicle",
+    "domain": "land",
+    "armor": "light",
+    "hp": 180,
+    "speed": 3,
+    "sight": 8,
+    "cost": {
+      "ore": 480,
+      "fuel": 35
+    },
+    "buildTime": 12,
+    "weapon": "rocket_salvo",
+    "upkeep": {
+      "fuel": 0.55
+    },
+    "heavy": true,
     "desc": "Mobiler Mehrfachraketenwerfer. Hohe Reichweite und Flächenschaden, aber Mindestreichweite und schwache Panzerung."
   },
   "flak_track": {
-    "label": "Mobile Flak", "category": "vehicle", "domain": "land", "armor": "light",
-    "hp": 200, "speed": 4.2, "sight": 9, "cost": { "ore": 550, "fuel": 30 }, "buildTime": 9,
-    "weapon": "flak_gun", "upkeep": { "fuel": 0.5 },
+    "label": "Mobile Flak",
+    "category": "vehicle",
+    "domain": "land",
+    "armor": "light",
+    "hp": 200,
+    "speed": 4.2,
+    "sight": 9,
+    "cost": {
+      "ore": 360,
+      "fuel": 30
+    },
+    "buildTime": 9,
+    "weapon": "flak_gun",
+    "upkeep": {
+      "fuel": 0.5
+    },
     "desc": "Mobile Flugabwehr. Begleitschutz gegen Luftangriffe."
   },
   "harvester": {
-    "label": "Erz-LKW", "category": "vehicle", "domain": "land", "armor": "heavy",
-    "hp": 380, "speed": 3.0, "sight": 5, "cost": { "ore": 600, "fuel": 20 }, "buildTime": 10,
-    "abilities": ["harvest"], "harvestRate": 25, "harvestCap": 200, "upkeep": { "fuel": 0.3 }, "heavy": true,
+    "label": "Erz-LKW",
+    "category": "vehicle",
+    "domain": "land",
+    "armor": "heavy",
+    "hp": 380,
+    "speed": 3,
+    "sight": 5,
+    "cost": {
+      "ore": 600,
+      "fuel": 20
+    },
+    "buildTime": 10,
+    "abilities": [
+      "harvest"
+    ],
+    "harvestRate": 25,
+    "harvestCap": 200,
+    "upkeep": {
+      "fuel": 0.3
+    },
+    "heavy": true,
     "desc": "Fährt zu Erzhaufen, wird dort beladen und liefert Erz zum Erzlager. Schwer: meidet Wasser, mag Straßen."
   },
   "truck": {
-    "label": "LKW", "category": "vehicle", "domain": "land", "armor": "light",
-    "hp": 220, "speed": 4.4, "sight": 5, "cost": { "ore": 300, "fuel": 10 }, "buildTime": 7,
-    "abilities": ["haul"], "upkeep": { "fuel": 0.2 },
+    "label": "LKW",
+    "category": "vehicle",
+    "domain": "land",
+    "armor": "light",
+    "hp": 220,
+    "speed": 4.4,
+    "sight": 5,
+    "cost": {
+      "ore": 300,
+      "fuel": 10
+    },
+    "buildTime": 7,
+    "abilities": [
+      "haul"
+    ],
+    "upkeep": {
+      "fuel": 0.2
+    },
     "desc": "Allgemeiner Lastwagen für Baustellen-, Erd- und Erzlogistik. Ergänzt Bagger und Erz-LKW in der Rohstoffkette."
   },
   "tractor": {
-    "label": "Traktor", "category": "vehicle", "domain": "land", "armor": "light",
-    "hp": 260, "speed": 3.2, "sight": 6, "cost": { "ore": 350, "fuel": 15 }, "buildTime": 8,
-    "abilities": ["tow"], "upkeep": { "fuel": 0.25 },
+    "label": "Traktor",
+    "category": "vehicle",
+    "domain": "land",
+    "armor": "light",
+    "hp": 260,
+    "speed": 3.2,
+    "sight": 6,
+    "cost": {
+      "ore": 350,
+      "fuel": 15
+    },
+    "buildTime": 8,
+    "abilities": [
+      "tow"
+    ],
+    "upkeep": {
+      "fuel": 0.25
+    },
     "desc": "Bergungsfahrzeug. Zieht verlassene Fahrzeuge aus Matsch, Wasser und Hangblockaden; danach gehören sie dem Besitzer des Traktors."
   },
   "recon_drone": {
-    "label": "Aufklärungsdrohne", "category": "air", "domain": "air", "armor": "air",
-    "hp": 90, "speed": 8.0, "sight": 16, "cost": { "ore": 150, "fuel": 20 }, "buildTime": 5,
-    "upkeep": { "fuel": 0.6 },
+    "label": "Aufklärungsdrohne",
+    "category": "air",
+    "domain": "air",
+    "armor": "air",
+    "hp": 90,
+    "speed": 8,
+    "sight": 16,
+    "cost": {
+      "ore": 450,
+      "fuel": 55
+    },
+    "buildTime": 9,
+    "upkeep": {
+      "fuel": 0.9
+    },
     "desc": "Schnelle, unbewaffnete Luftaufklärung."
   },
   "gunship": {
-    "label": "Kampfhubschrauber", "category": "air", "domain": "air", "armor": "air",
-    "hp": 240, "speed": 6.5, "sight": 11, "cost": { "ore": 450, "fuel": 40 }, "buildTime": 10,
-    "weapon": "autocannon", "muni": 14, "upkeep": { "fuel": 1.0 },
+    "label": "Kampfhubschrauber",
+    "category": "air",
+    "domain": "air",
+    "armor": "air",
+    "hp": 240,
+    "speed": 6.5,
+    "sight": 11,
+    "cost": {
+      "ore": 1250,
+      "fuel": 110
+    },
+    "buildTime": 18,
+    "weapon": "autocannon",
+    "muni": 14,
+    "upkeep": {
+      "fuel": 1.8
+    },
     "desc": "Vielseitiger Luftangriff gegen Land und See. Lädt Munition an der Luftbasis nach."
   },
   "bomber": {
-    "label": "Bomber", "category": "air", "domain": "air", "armor": "air",
-    "hp": 280, "speed": 7.5, "sight": 10, "cost": { "ore": 650, "fuel": 50 }, "buildTime": 13,
-    "weapon": "bomb", "muni": 5, "upkeep": { "fuel": 1.2 },
+    "label": "Bomber",
+    "category": "air",
+    "domain": "air",
+    "armor": "air",
+    "hp": 280,
+    "speed": 7.5,
+    "sight": 10,
+    "cost": {
+      "ore": 1750,
+      "fuel": 150
+    },
+    "buildTime": 24,
+    "weapon": "bomb",
+    "muni": 5,
+    "upkeep": {
+      "fuel": 2.4
+    },
     "desc": "Schwerer Flächenschaden gegen Gebäude und Cluster. Lädt Bomben an der Luftbasis nach."
   },
+  "cloud_seeder": {
+    "label": "Silberjodid-Flugzeug",
+    "category": "air",
+    "domain": "air",
+    "armor": "air",
+    "hp": 230,
+    "speed": 7,
+    "sight": 10,
+    "cost": {
+      "ore": 1600,
+      "fuel": 140
+    },
+    "buildTime": 22,
+    "weapon": "cloud_seed",
+    "muni": 4,
+    "upkeep": {
+      "fuel": 2.1
+    },
+    "desc": "Spezialflugzeug: platziert eine lokale Starkregenwolke am Zielpunkt. Nützlich zum Füllen von Senken, zum Erzwingen von Matsch und zum Unterstützen von Flut-Taktiken."
+  },
   "transport_air": {
-    "label": "Transportflugzeug", "category": "air", "domain": "air", "armor": "air",
-    "hp": 320, "speed": 6.0, "sight": 9, "cost": { "ore": 700, "fuel": 40 }, "buildTime": 10,
-    "abilities": ["transport"], "capacity": 6, "upkeep": { "fuel": 0.8 },
+    "label": "Transportflugzeug",
+    "category": "air",
+    "domain": "air",
+    "armor": "air",
+    "hp": 320,
+    "speed": 6,
+    "sight": 9,
+    "cost": {
+      "ore": 1500,
+      "fuel": 120
+    },
+    "buildTime": 20,
+    "abilities": [
+      "transport"
+    ],
+    "capacity": 6,
+    "upkeep": {
+      "fuel": 1.7
+    },
     "desc": "Verlegt Bodeneinheiten über Gelände hinweg."
   },
   "patrol_boat": {
-    "label": "Patrouillenboot", "category": "naval", "domain": "water", "armor": "light",
-    "hp": 260, "speed": 5.0, "sight": 10, "cost": { "ore": 180, "fuel": 18 }, "buildTime": 6,
-    "weapon": "autocannon", "upkeep": { "fuel": 0.5 },
+    "label": "Patrouillenboot",
+    "category": "naval",
+    "domain": "water",
+    "armor": "light",
+    "hp": 260,
+    "speed": 5,
+    "sight": 10,
+    "cost": {
+      "ore": 180,
+      "fuel": 18
+    },
+    "buildTime": 6,
+    "weapon": "autocannon",
+    "upkeep": {
+      "fuel": 0.5
+    },
     "desc": "Schnelle Küsten- und Seeaufklärung."
   },
   "destroyer": {
-    "label": "Zerstörer", "category": "naval", "domain": "water", "armor": "heavy",
-    "hp": 700, "speed": 3.8, "sight": 12, "cost": { "ore": 650, "fuel": 50 }, "buildTime": 14,
-    "weapon": "naval_gun", "upkeep": { "fuel": 1.0 },
+    "label": "Zerstörer",
+    "category": "naval",
+    "domain": "water",
+    "armor": "heavy",
+    "hp": 700,
+    "speed": 3.8,
+    "sight": 12,
+    "cost": {
+      "ore": 650,
+      "fuel": 50
+    },
+    "buildTime": 14,
+    "weapon": "naval_gun",
+    "upkeep": {
+      "fuel": 1
+    },
     "desc": "Schweres Überwasserschiff. Beschießt Land und See."
   },
   "submarine": {
-    "label": "U-Boot", "category": "naval", "domain": "water", "armor": "light",
-    "hp": 320, "speed": 3.4, "sight": 9, "cost": { "ore": 520, "fuel": 40 }, "buildTime": 13,
-    "weapon": "torpedo", "submerged": true, "upkeep": { "fuel": 0.8 },
+    "label": "U-Boot",
+    "category": "naval",
+    "domain": "water",
+    "armor": "light",
+    "hp": 320,
+    "speed": 3.4,
+    "sight": 9,
+    "cost": {
+      "ore": 520,
+      "fuel": 40
+    },
+    "buildTime": 13,
+    "weapon": "torpedo",
+    "submerged": true,
+    "upkeep": {
+      "fuel": 0.8
+    },
     "desc": "Getaucht schwer zu entdecken. Tödlich gegen Schiffe."
   },
   "underwater_drone": {
-    "label": "Unterwasserdrohne", "category": "naval", "domain": "water", "armor": "light",
-    "hp": 120, "speed": 4.4, "sight": 7, "cost": { "ore": 320, "fuel": 25 }, "buildTime": 8,
-    "weapon": "micro_missile", "submerged": true, "upkeep": { "fuel": 0.45 },
+    "label": "Unterwasserdrohne",
+    "category": "naval",
+    "domain": "water",
+    "armor": "light",
+    "hp": 120,
+    "speed": 4.4,
+    "sight": 7,
+    "cost": {
+      "ore": 320,
+      "fuel": 25
+    },
+    "buildTime": 8,
+    "weapon": "micro_missile",
+    "submerged": true,
+    "upkeep": {
+      "fuel": 0.45
+    },
     "desc": "Kleine getauchte Drohne. Für Gegner unsichtbar, bis sie sehr nah ist, von Sonar erfasst wird oder beim Feuern kurz aufgedeckt wird. Feuert kurze Mikroraketen."
   },
   "amphib_transport": {
-    "label": "Amphibientransport", "category": "naval", "domain": "amphibious", "armor": "light",
-    "hp": 340, "speed": 3.6, "sight": 7, "cost": { "ore": 600, "fuel": 30 }, "buildTime": 10,
-    "abilities": ["transport"], "capacity": 6, "upkeep": { "fuel": 0.5 },
+    "label": "Amphibientransport",
+    "category": "naval",
+    "domain": "amphibious",
+    "armor": "light",
+    "hp": 340,
+    "speed": 3.6,
+    "sight": 7,
+    "cost": {
+      "ore": 600,
+      "fuel": 30
+    },
+    "buildTime": 10,
+    "abilities": [
+      "transport"
+    ],
+    "capacity": 6,
+    "upkeep": {
+      "fuel": 0.5
+    },
     "desc": "Trägt Landeinheiten über Wasser."
   },
   "sea_builder": {
-    "label": "Wasserbau-Einheit", "category": "naval", "domain": "water", "armor": "light",
-    "hp": 300, "speed": 3.0, "sight": 6, "cost": { "ore": 500, "fuel": 20 }, "buildTime": 10,
-    "abilities": ["repair", "hydro"], "upkeep": { "fuel": 0.3 },
+    "label": "Wasserbau-Einheit",
+    "category": "naval",
+    "domain": "water",
+    "armor": "light",
+    "hp": 300,
+    "speed": 3,
+    "sight": 6,
+    "cost": {
+      "ore": 500,
+      "fuel": 20
+    },
+    "buildTime": 10,
+    "abilities": [
+      "repair",
+      "hydro"
+    ],
+    "upkeep": {
+      "fuel": 0.3
+    },
     "desc": "Hydro-Spezialschiff: repariert und unterstützt Wasserbau. Gebäude errichtet ausschließlich der Bagger."
   }
 }

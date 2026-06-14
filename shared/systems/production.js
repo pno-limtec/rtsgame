@@ -3,6 +3,7 @@ import { DT } from '../constants.js';
 import { spawnUnit, applyFortification, buildSpeedMult, grantEarthYield } from '../world.js';
 import { tileToWorld, worldToTile, isPassable } from '../terrain.js';
 import { setMoveGoal } from './movement.js';
+import { activateTunnelIfReady } from './tunnel.js';
 
 export function stepProduction(world) {
   for (const e of world.entities.values()) {
@@ -44,7 +45,8 @@ export function stepProduction(world) {
 
 function onBuildingComplete(world, e) {
   world.events.push({ type: 'build', x: e.x, y: e.y, kind: e.kind, owner: e.owner });
-  applyFortification(world, e); // Wall/Graben aktivieren Deckung & Sperre
+  applyFortification(world, e); // Wall/Graben/Tunnelmündung aktivieren Deckung & Sperre/Passierbarkeit
+  if (e._tunnelId != null) activateTunnelIfReady(world, e); // beide Mündungen fertig → Röhre öffnen
   // Erdaushub: Gräben/Tunnel liefern Erde als Baumaterial (Ressource „materials") —
   // wer Material für Wälle/Dämme braucht, gräbt dafür Löcher in die Landschaft.
   grantEarthYield(world, e);

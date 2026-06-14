@@ -3,10 +3,11 @@
 import { findPath } from '../pathfinding.js';
 import { worldToTile, tileToWorld, tileType, TT, inBounds, tIdx, isPassable, slopeOk, roadAtIdx, forestBlocks, waterBlocksLand } from '../terrain.js';
 import {
-  DT, FLOOD_DEPTH, WET_DEPTH, ROAD_SPEED, ROAD_SPEED_HEAVY, MUD_SPEED_HEAVY,
+  BUILDER_WADE_DEPTH, BUILDER_WADE_TIME, DT, FLOOD_DEPTH, WET_DEPTH, ROAD_SPEED, ROAD_SPEED_HEAVY, MUD_SPEED_HEAVY,
   TURN_RATE_VEHICLE, TURN_RATE_NAVAL, VEHICLE_ACCEL, SLOPE_ON_ROAD, CONSTRUCT_RANGE,
   RAIN_AIR_SLOW, STORM_NAVAL_SLOW, FOG_NAVAL_SLOW, FOG_NAVAL_DRIFT, FOG_NAVAL_CRASH_DMG,
   TRACK_GAIN_LIGHT, TRACK_GAIN_HEAVY, MUD_GAIN_HEAVY, MUD_IMPASSABLE, MUD_SPEED_MIN,
+  SLOPE_TERRAFORM_BUILDER,
 } from '../constants.js';
 import { applyDamage } from '../world.js';
 
@@ -16,14 +17,32 @@ const wrapAngle = (a) => { while (a > Math.PI) a -= Math.PI * 2; while (a < -Mat
 // (KI-Angriffswellen schicken sonst 30+ Einheiten im selben Tick auf 192²-Suche → 300ms-Spikes);
 // über dem Budget wird die Suche auf die Folgeticks verschoben (gestaffelt, deterministisch).
 const PATHS_PER_TICK = 6;  // Suchen sind mit 48k-Limit teurer
+function builderWadeOrder(e) {
+  return e?.kind === 'builder'
+    && e.domain === 'land'
+    && (e._fleeing || e.order?.type === 'construct' || e.order?.type === 'terra');
+}
+
+function canTraverseMuddyWet(t, e, i) {
+  if (e?.kind !== 'builder' || e.domain !== 'land') return false;
+  const depth = t.water?.[i] || 0;
+  const mudOk = t.mud && t.mud[i] > 0.02 && depth <= FLOOD_DEPTH;
+  const overWorkTime = (e._wadeTime || 0) > BUILDER_WADE_TIME && !e._fleeing;
+  const wadeOk = builderWadeOrder(e) && !overWorkTime && depth > WET_DEPTH && depth <= BUILDER_WADE_DEPTH;
+  return mudOk || wadeOk;
+}
+
 export function setMoveGoal(world, ent, wx, wy) {
   ent.moveTarget = { x: wx, y: wy };
   ent.repathCd = 0;
+  ent._waitingForPath = false;
+  ent._pathFailed = false;
   // Luft ignoriert Gelände → direkte Linie, keine A*-Suche (günstiger & sauberer).
   if (ent.domain === 'air') { ent.path = []; ent.pathGoal = null; return; }
   if (world._pbTick !== world.tick) { world._pbTick = world.tick; world._pathBudget = PATHS_PER_TICK; }
   if (world._pathBudget <= 0) {
     ent.path = []; ent.pathGoal = null;
+    ent._waitingForPath = true;
     ent.repathCd = 0.2 + (ent.id % 9) * 0.1;   // Suche nachholen, zeitversetzt
     return;
   }
@@ -31,12 +50,32 @@ export function setMoveGoal(world, ent, wx, wy) {
   const [sx, sy] = worldToTile(ent.x, ent.y);
   const [gx, gy] = worldToTile(wx, wy);
   const path = findPath(world.terrain, ent.domain, sx, sy, gx, gy, 48000, ent.maxSlope ?? Infinity,
-    { heavy: !!ent.heavy, category: ent.category }); // große Karte → mehr Iterationen
-  ent.pathGoal = [gx, gy];
+    { heavy: !!ent.heavy, category: ent.category, mudCrawler: ent.kind === 'builder', builderWade: builderWadeOrder(ent), terraCrawler: ent.kind === 'builder' }); // große Karte → mehr Iterationen
+  ent.pathGoal = path?.goal || [gx, gy];
+  if (path?.goal && (path.goal[0] !== gx || path.goal[1] !== gy)) {
+    const [tx, ty] = tileToWorld(path.goal[0], path.goal[1]);
+    ent.moveTarget = { x: tx, y: ty };
+  }
   ent.path = path || [];
+  ent._pathFailed = !path;
+  if (!path) ent.repathCd = 2.6 + (ent.id % 7) * 0.13;
 }
 
-export function stopMove(ent) { ent.path = []; ent.moveTarget = null; ent.pathGoal = null; }
+export function stopMove(ent) {
+  ent.path = []; ent.moveTarget = null; ent.pathGoal = null;
+  ent._waitingForPath = false; ent._pathFailed = false;
+}
+
+// Ein abgeschlossener reiner Move-Befehl gibt die Einheit wieder FREI (→ idle). Wird NUR bei
+// echter Ankunft aufgerufen (nicht bei Pfad-Fehlschlag/Blockade), damit Einheiten nicht mitten im
+// Weg den Befehl verlieren. Ohne dieses Reset blieb ein von der KI geparkter LKW nach der Ankunft
+// für immer im 'move'-Zustand, galt nirgends als frei (isFree = idle|guard), wurde NIE zum Erz-Pile
+// geschickt → KI-Wirtschaft verhungerte und jede KI-Partie fror ein. 'attackmove'/'guard'/'haul_pile'
+// etc. bleiben unberührt (anderer order.type).
+function finishMoveOrder(ent) {
+  stopMove(ent);
+  if (ent.order && ent.order.type === 'move') ent.order = { type: 'idle' };
+}
 
 export function stepMovement(world) {
   const { terrain } = world;
@@ -45,7 +84,28 @@ export function stepMovement(world) {
     if (e.abandoned) { stopMove(e); e._v = 0; continue; }
     const [ctx, cty] = worldToTile(e.x, e.y);
     if (updateStuckState(world, e, ctx, cty, false)) continue;
-    if (!e.moveTarget) continue;
+    trackBuilderWade(world, e, ctx, cty);
+    if (!e.moveTarget) {
+      // Ein reiner Move-Befehl ohne Ziel ist erledigt (angekommen ODER Pfad aufgegeben) → Einheit
+      // FREIGEBEN. stopMove löscht nur Pfad/Ziel, nicht den Befehl; ohne dieses Reset blieb ein von
+      // der KI geparkter (oder pfad-gestrandeter) LKW für immer im 'move'-Zustand, galt nirgends als
+      // frei (isFree = idle|guard), wurde NIE zum Erz-Pile geschickt → KI-Wirtschaft verhungerte und
+      // jede KI-Partie fror ein. 'attackmove'/'guard'/'haul_pile' etc. bleiben unberührt.
+      if (e.order.type === 'move') e.order = { type: 'idle' };
+      continue;
+    }
+    if (e._waitingForPath && (!e.path || !e.path.length)) {
+      e._v = 0;
+      e.repathCd -= DT;
+      if (e.repathCd <= 0) setMoveGoal(world, e, e.moveTarget.x, e.moveTarget.y);
+      continue;
+    }
+    if (e._pathFailed && (!e.path || !e.path.length)) {
+      e._v = 0;
+      e.repathCd -= DT;
+      if (e.repathCd <= 0) setMoveGoal(world, e, e.moveTarget.x, e.moveTarget.y);
+      continue;
+    }
 
     // Treibstoffmangel bremst Fahrzeuge/Luft.
     const player = world.players.find(p => p.id === e.owner);
@@ -75,7 +135,9 @@ export function stepMovement(world) {
       speed *= RAIN_AIR_SLOW;
     }
     // In Flutwasser gefangene Landeinheiten kommen nur kriechend voran.
-    if (e.domain === 'land' && inBounds(terrain, ctx, cty) && terrain.water[tIdx(terrain, ctx, cty)] > FLOOD_DEPTH) speed *= 0.35;
+    const curDepth = inBounds(terrain, ctx, cty) ? (terrain.water[tIdx(terrain, ctx, cty)] || 0) : 0;
+    if (e.domain === 'land' && curDepth > FLOOD_DEPTH) speed *= e.kind === 'builder' ? 0.52 : 0.35;
+    else if (e.kind === 'builder' && curDepth > WET_DEPTH) speed *= 0.72;
 
     // nächster Wegpunkt
     let tgt;
@@ -147,16 +209,18 @@ export function stepMovement(world) {
     const blockedByMud = e.heavy && e.domain === 'land' && inBounds(terrain, ntx, nty)
       && terrain.mud && terrain.mud[nxtI] >= MUD_IMPASSABLE;
     const blockedByWater = e.domain === 'land' && inBounds(terrain, ntx, nty)
-      && waterBlocksLand(terrain, nxtI) && !(terrain.bridge && terrain.bridge[nxtI] > 0);
+      && waterBlocksLand(terrain, nxtI) && !(terrain.bridge && terrain.bridge[nxtI] > 0)
+      && !canTraverseMuddyWet(terrain, e, nxtI);
     const blockedByForest = forestBlocks(terrain, e.domain, ntx, nty, { category: e.category });
     const tooSteep = (e.domain === 'land' || e.domain === 'amphibious') && nxtI !== curI
-      && inBounds(terrain, ntx, nty) && !slopeOk(terrain, curI, nxtI, e.maxSlope ?? Infinity, SLOPE_ON_ROAD);
+      && inBounds(terrain, ntx, nty)
+      && !slopeOk(terrain, curI, nxtI, e.maxSlope ?? Infinity, SLOPE_ON_ROAD, e.kind === 'builder' ? SLOPE_TERRAFORM_BUILDER : null);
     if (tooSteep || blockedByMud || blockedByWater || blockedByForest) {
       // Hang oder Matsch unpassierbar geworden → anhalten und neu planen.
       if (updateStuckState(world, e, ntx, nty, blockedByMud || blockedByWater || tooSteep)) continue;
       e.path = []; e._v = 0;
       if (e.repathCd <= 0) { setMoveGoal(world, e, e.moveTarget.x, e.moveTarget.y); e.repathCd = 1.2 + (e.id % 5) * 0.2; }
-    } else if (!followingPath && !isPassable(terrain, e.domain, ntx, nty)) {
+    } else if (!followingPath && !isPassable(terrain, e.domain, ntx, nty, e.category) && !canTraverseMuddyWet(terrain, e, nxtI)) {
       // Geradeausfahrt endet vor unpassierbarem Gelände. Das passiert vor allem, wenn das
       // Pfad-Budget die A*-Suche verschoben hat — das ZIEL NICHT verwerfen (sonst stranden
       // ganze Angriffswellen kommandolos), sondern stehen bleiben und nachplanen. Erst nach
@@ -171,7 +235,7 @@ export function stepMovement(world) {
         if (e.path && e.path.length) e.path.shift();
         if (!e.path || !e.path.length) {
           const fd = Math.hypot(e.moveTarget.x - e.x, e.moveTarget.y - e.y);
-          if (fd < 1.6) stopMove(e);   // großzügig: Fahrzeuge mit Wendekreis nicht ums Ziel kreisen lassen
+          if (fd < 1.6) finishMoveOrder(e);   // angekommen: Ziel erreicht → Einheit freigeben (Move→idle)
         }
       }
     }
@@ -188,11 +252,31 @@ export function stepMovement(world) {
         // deutlich längerer Cooldown, bevor dieselbe Einheit es erneut versucht.
         if (e.path && e.path.length) { e._pathFails = 0; if (e.repathCd <= 0) e.repathCd = 0.8 + (e.id % 7) * 0.13; }
         else if (e.repathCd <= 0) e.repathCd = 2.6 + (e.id % 7) * 0.13;
-      } else stopMove(e);
+      } else finishMoveOrder(e);   // nah genug am Ziel → als angekommen behandeln (Move→idle)
     }
   }
 
   separation(world);
+}
+
+function trackBuilderWade(world, e, tx, ty) {
+  if (e.kind !== 'builder' || e.domain !== 'land') return;
+  const t = world.terrain;
+  if (!inBounds(t, tx, ty)) { e._wadeTime = 0; e._fleeing = false; return; }
+  const i = tIdx(t, tx, ty);
+  const depth = t.water?.[i] || 0;
+  if (depth <= WET_DEPTH) {
+    e._wadeTime = 0;
+    if (!e.moveTarget) e._fleeing = false;
+    return;
+  }
+  if (!builderWadeOrder(e) || depth > BUILDER_WADE_DEPTH) return;
+  e._wadeTime = (e._wadeTime || 0) + DT;
+  if (e._wadeTime <= BUILDER_WADE_TIME || e._fleeing) return;
+  const dry = findDryEscape(t, tx, ty);
+  if (!dry) return;
+  e._fleeing = true;
+  setMoveGoal(world, e, dry[0] * 2 + 1, dry[1] * 2 + 1);
 }
 
 function updateStuckState(world, e, tx, ty, blocked) {
@@ -202,7 +286,7 @@ function updateStuckState(world, e, tx, ty, blocked) {
   let waterHazard = false, mudHazard = false;
   if (inBounds(t, tx, ty)) {
     const i = tIdx(t, tx, ty);
-    waterHazard = waterBlocksLand(t, i);
+    waterHazard = waterBlocksLand(t, i) && !canTraverseMuddyWet(t, e, i);
     mudHazard = e.heavy && t.mud && t.mud[i] >= MUD_IMPASSABLE * 0.8;
     const s = e.order?.type === 'construct' ? world.entities.get(e.order.site) : null;
     const nearSite = s && Math.hypot(s.x - e.x, s.y - e.y) <= (s.size || 1) + CONSTRUCT_RANGE;
@@ -332,12 +416,13 @@ function separation(world) {
   const { grid, cell } = spatial;
   for (const e of world.entities.values()) {
     if (e.etype !== 'unit' || e.dead || e.domain === 'air') continue;
+    if (e.inTunnel) continue; // in der Röhre teilen sich Einheiten den engen Gang — keine Separation
     const cx = Math.floor(e.x / cell), cy = Math.floor(e.y / cell);
     let px = 0, py = 0;
     for (let y = -1; y <= 1; y++) for (let x = -1; x <= 1; x++) {
       const b = grid.get((cx + x) + ',' + (cy + y)); if (!b) continue;
       for (const o of b) {
-        if (o === e || o.etype !== 'unit' || o.domain === 'air') continue;
+        if (o === e || o.etype !== 'unit' || o.domain === 'air' || o.inTunnel) continue;
         const ddx = e.x - o.x, ddy = e.y - o.y;
         const dd = ddx * ddx + ddy * ddy;
         const want = desiredSpacing(e, o);
@@ -363,7 +448,7 @@ function separation(world) {
       const step = Math.min(isVeh ? 0.1 : 0.28, mag * strength);
       const nx = e.x + (px / mag) * step, ny = e.y + (py / mag) * step;
       const [stx, sty] = worldToTile(nx, ny);
-      if (isPassable(world.terrain, e.domain, stx, sty) && !forestBlocks(world.terrain, e.domain, stx, sty, { category: e.category })) { e.x = nx; e.y = ny; }
+      if (isPassable(world.terrain, e.domain, stx, sty, e.category) && !forestBlocks(world.terrain, e.domain, stx, sty, { category: e.category })) { e.x = nx; e.y = ny; }
     }
   }
 }

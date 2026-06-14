@@ -85,7 +85,13 @@ Wasser nur bei Abweichung von `baseWater`, Öl nur bei geänderten Feldern, Stra
 
 `shared/terrain.js` erzeugt die Karte deterministisch aus einem Seed:
 
-- Grundrauschen und Ridged-Noise erzeugen Hügelland und Grate.
+- Die Höhen entstehen aus einem signierten 3D-Dichtefeld im Stil von
+  `EthanHermsey/nature`/Volumetric-terrain: Die bisherige 2D-Formel liefert nur noch die
+  Zieloberfläche, anschließend wird die sichtbare Höhe als Zero-Crossing der Dichtefunktion
+  extrahiert. Damit bleibt das serverautoritative Heightmap-Modell für Wasser, Pathfinding,
+  Terraforming und Snapshots kompatibel, aber die Topografie wird nicht mehr direkt als
+  hartes Zellraster aus Noise-Werten gesetzt.
+- Grundrauschen und Ridged-Noise speisen dieses Volumenfeld und erzeugen Hügelland und Grate.
 - Ein hohes Zentralmassiv entsteht aus Gipfel, Schulter, Fuß, Graten und Rinnen.
 - Zum Rand fällt das Gelände zuverlässig ins Meer ab.
 - Kleine Hochplateaus außerhalb der Mitte werden als abgeflachte erhöhte Ellipsen eingearbeitet.
@@ -106,11 +112,16 @@ Die Oberfläche ist `terrain.height[i] + terrain.water[i]`.
 Technische Eckpunkte:
 
 - 8-Nachbar-Zellularautomat: Wasser fließt entlang des stärksten Oberflächengefälles.
+- Senken werden über die Wasseroberfläche behandelt: Wasser bleibt in einer Mulde stehen und
+  nivelliert sich dort, bis der Spiegel die niedrigste Schwelle erreicht; erst dann läuft es in
+  die nächste tiefere Ebene.
 - `baseWater` beschreibt den Normalzustand von Meer, Flüssen und Seen.
 - `waterActive` enthält nur instabile Zellen plus Nachbarn; ruhige Zellen werden nicht jedes Mal
   gerechnet.
 - `waterBlock` sperrt Fluss an Dämmen, Deichen und Wasserbauwerken.
-- Regen, Sturm, Schnee, Schneeschmelze, Seen und Quellen speisen Wasser ein.
+- Regen, Sturm, Schnee, Schneeschmelze, Seen und Quellen speisen Wasser ein. Regentropfen werden
+  lokal einige Zellen talwärts zur niedrigsten erreichbaren Oberfläche geroutet; dadurch füllen
+  sich normale Senken auch ohne vordefiniertes See-/Tal-Maskenfeld.
 - Trockene Phasen senken Flüsse und lassen Pfützen/Spuren schneller austrocknen.
 - Das Meer und der Kartenrand wirken als Auslass.
 - Starkes Wasser erzeugt Strömungsvektoren, zieht Einheiten mit und verursacht Washout-Events.
@@ -134,7 +145,7 @@ Technische Eckpunkte:
   geglättet (`smoothBelow`), damit keine zerklüfteten Unterwasser-Rippen durch die flache
   Wasserfläche stoßen (sonst entsteht ein „Labyrinth"-Look statt einer homogenen Fläche).
 
-**Permanente Flüsse:** Jede Karte hat genau zwei Flüsse (`WATER_SOURCES`). Ihre Quellen speisen
+**Permanente Flüsse:** Jede Karte hat genau zwei breite Hauptflüsse (`WATER_SOURCES`). Ihre Quellen speisen
 in jedem Wasser-Schritt — auch bei Flut-Deckel und Trockenheit (gedrosselt, aber nie null) —,
 sodass die Flüsse nie versiegen und dauerhaft zum Meer entwässern. In der Trockenphase trägt
 `dryRiverBeds` nur den Überschuss über dem Grundpegel (`baseWater` entlang der Rinne) ab; die
@@ -173,6 +184,9 @@ Wasseroberfläche wird über einen 5×5-Bereich gaußartig geglättet (`_smoothe
 Fluss/See wird zu einer durchgehenden, schräg verlaufenden Fläche statt einer Zell-Treppe;
 (3) isolierte nasse Einzelzellen werden über `_neighborWetFactor` ausgeblendet, zusammenhängendes
 Wasser (auch ein 1 Zelle breiter Fluss) bleibt voll. Das offene Meer ist von (1)/(3) ausgenommen.
+Schmelzwasser-Runoff wird besonders zurückhaltend visualisiert: dünne Bergabflüsse erscheinen
+höchstens als dunklere Feuchte, während sichtbare Wasserflächen vor allem dort entstehen, wo sich
+Wasser in Senken staut oder aus einem Gewässer überläuft.
 
 **Kein Gras↔Wasser-Flimmern:** Wasser- und Geländemesh teilen dasselbe xz-Gitter UND dieselbe
 Triangulierung. Damit gilt: liegt jeder Wasservertex über seiner Geländespalte um mindestens
@@ -225,6 +239,27 @@ Pipe-Kette -> Depot.
   aus und wirken so als durchgehende — auch diagonale — Leitung statt als lose Einzelstücke.
 - Erdaushub aus Gräben/Abgrabungen sammelt sich an EINEM Erdhaufen je Arbeitsbereich; LKW
   fahren ihn zum Materiallager. Erdhaufen haben kein Licht/Fundament.
+
+### Tunnel (`shared/systems/tunnel.js`)
+
+Ein Tunnel ist EINE verknüpfte Struktur (nicht N Einzelgebäude): er wird wie eine Straße per Linie
+gezogen, ist aber deutlich teurer (Kosten je Tile, `TUNNEL_COST_ORE/MAT`). Der Client sendet einen
+einzigen Befehl `{type:'tunnel', sx,sy,ex,ey}`; `placeTunnel` validiert über `validateTunnel`:
+**beide Enden müssen an einem Hang liegen** (Land/Hügel, das orthogonal an eine Klippe grenzt), das
+Innere muss eine Klippe/einen Hügel durchqueren, Länge ≤ `TUNNEL_MAX_LEN`. Es entstehen zwei
+zerstörbare **Mündungsgebäude** (kind `tunnel`, je eigene HP), die wie Brücken von Baggern gebaut
+werden. Sind BEIDE fertig, stempelt `activateTunnelIfReady` die Innen-Tiles begehbar (`t.tunnel`),
+und die Röhre ist offen für **Land, Fahrzeuge UND Wasser** (`isPassable` lässt die water-Domäne durch
+Tunnel; die Wasser-Fluidsimulation fließt über `stepTunnelWater` zwischen den Mündungen entlang des
+Oberflächengefälles). Einheiten auf Innen-Tiles gelten als `inTunnel`: sie sind **verborgen** (Client
+zeichnet nur einen Umriss-Geist), nicht anvisierbar und ohne Separation — sie verschwinden in einer
+Mündung und tauchen an der anderen wieder auf. **Zerstörung:** eine zerstörte Mündung versiegelt nur
+dieses Ende (das angrenzende Innen-Tile wird entstempelt — Einheiten darin nutzen den intakten
+Ausgang); sind BEIDE Mündungen zerstört, **kollabiert** der Tunnel (Innen-Tiles wieder unpassierbar,
+alle Einheiten darin sterben). Der Zustand lebt in `world.tunnels` (+ `world.tunnelTiles`-Map) und ist
+Teil der deterministischen Simulation; der Renderer zeichnet die durchgehende Röhre als ein
+`_makeRibbonGeometry`-Mesh. Die KI baut Tunnel gezielt, wenn ihre Route an einem Klippen-Riegel
+scheitert (`planTunnelOverRidge`).
 
 ## Bewegung und Pfadfindung
 

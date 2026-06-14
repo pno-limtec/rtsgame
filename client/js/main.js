@@ -35,10 +35,10 @@ async function boot() {
 
   ui.setupLobby((name, seat, opts = {}) => {
     applyFogOption(!!opts.fow);
-    if (opts.spectator) net.watch(seat);
+    if (opts.spectator) net.watch(seat, name);
     else net.join(name, seat);
   });
-  ui.setupMenu(renderer);
+  ui.setupMenu(renderer, audio);
 
   // WebAudio erst nach erstem Nutzer-Gesture entsperren (Browser-Autoplay-Richtlinie).
   const unlock = () => audio.resume();
@@ -52,7 +52,13 @@ async function boot() {
     renderer.buildTerrain(m);
     ui.renderBuildbar();
   });
-  net.on('joined', () => { applyFogOption(); ui.renderBuildbar(); ui.renderSpectatorbar(); });
+  net.on('joined', () => {
+    applyFogOption();
+    input.selected.clear();
+    input.onSelectionChange && input.onSelectionChange();
+    ui.renderBuildbar();
+    ui.renderSpectatorbar();
+  });
   net.on('viewseat', () => { ui.renderTop(); ui.renderSpectatorbar(); input.selected.clear(); input.onSelectionChange && input.onSelectionChange(); });
 
   net.connect();
@@ -76,6 +82,7 @@ async function boot() {
     renderer.processEvents(net.events, audio, perspectiveSeat);
     audio.updateMusic(dt, net.env);
     renderer.musicBeat = audio.musicBeat();
+    renderer.animateWater(dt);   // Wasser fließt in kleinen Schritten zur Snapshot-Zieltiefe (kein Staccato)
     renderer.updateEffects(dt);
     renderer.render();
 
@@ -96,6 +103,7 @@ async function boot() {
     renderer.updateSnow(net.snow);     // Schneedecke (schmilzt bei Sonne, wächst bei Schneefall)
     renderer.updateOil(net.oil);       // Öl-Sickerflecken schrumpfen bei Förderung
     renderer.updateRoads(net.roads);   // automatisches Straßennetz
+    renderer.updateTunnels(net.tunnels); // Tunnelröhren (durchgehend)
     renderer.updateGroundWear(net.ground); // Fahrzeugspuren, Pfützenrillen, Matsch
     renderer.updateConstructionJobs(net.jobs);
     // tote/ausgewählte Einheiten bereinigen

@@ -1,8 +1,16 @@
 // Computergegner: Wirtschaft hochfahren, Bauen, Produzieren, Angreifen, Verteidigen.
 // Dieselbe KI treibt die automatisierten Tests. Zustandsbasiert, datengetrieben.
-import { AI_REPLAN_TICKS, PIPE_LINK_RANGE } from '../constants.js';
+import {
+  AI_REPLAN_TICKS, PIPE_LINK_RANGE, CONSTRUCT_RANGE, TILE,
+  SLOPE_BUILDER, SLOPE_HEAVY, SLOPE_ON_ROAD,
+} from '../constants.js';
 import { ownerEntities, canAfford, effectiveCost, dist, canPlaceBuilding } from '../world.js';
-import { worldToTile, tileToWorld, hasWaterNear, nearestWaterTile, waterBlocksLand, inBounds, tIdx, isPassable, TT } from '../terrain.js';
+import { findPath } from '../pathfinding.js';
+import { validateTunnel } from '../systems/tunnel.js';
+import {
+  worldToTile, tileToWorld, hasWaterNear, nearestWaterTile, waterBlocksLand,
+  inBounds, tIdx, isPassable, TT, roadAtIdx, forestBlocks,
+} from '../terrain.js';
 
 // Grobe Build-Order (Priorität von oben nach unten).
 const BUILD_ORDER = [
@@ -16,14 +24,12 @@ const BUILD_ORDER = [
   // Kühlwasser fürs Ölkraftwerk sichern, bevor der Vorrat zur Neige geht.
   { kind: 'water_pump',  want: (s) => s.pumps < 1 && s.powerPlants >= 1 },
   { kind: 'barracks',    want: (s) => s.barracks < 1 },
-  { kind: 'airbase',     reserve: true, want: (s) => s.faction !== 'FLG' && s.airbases < 1 && s.army.length >= 2 },
-  { kind: 'shipyard',    reserve: true, want: (s) => s.faction !== 'FLG' && s.coastal && s.shipyards < 1 && s.airbases >= 1 },
-  { kind: 'power_plant', want: (s) => s.energyRatio < 1 },
   { kind: 'factory',     reserve: true, want: (s) => s.factories < 1 },
-  // 2) Hochtechen: Luftbasis & (an der Küste) Werft, sobald Fabrik + kleine Armee stehen.
-  //    Bewusst VOR optionalen Verteidigungs-Füllern, damit Luft/See in normalen Matches erscheint.
-  { kind: 'airbase',     reserve: true, want: (s) => s.airbases < 1 && s.factories >= 1 && s.army.length >= 2 },
-  { kind: 'shipyard',    reserve: true, want: (s) => s.coastal && s.shipyards < 1 && s.factories >= 1 && s.army.length >= 2 },
+  { kind: 'shipyard',    reserve: true, want: (s) => s.faction !== 'FLG' && s.coastal && s.shipyards < 1 && s.factories >= 1 && s.vehicleArmy >= 2 },
+  { kind: 'power_plant', want: (s) => s.energyRatio < 1 },
+  // 2) Hochtechen: Fahrzeuge sind der Standard-Siegpfad; Marine auf Küstenkarten vor Luft.
+  { kind: 'shipyard',    reserve: true, want: (s) => s.coastal && s.shipyards < 1 && s.factories >= 1 && s.vehicleArmy >= 3 },
+  { kind: 'airbase',     reserve: true, want: (s) => s.airbases < 1 && s.factories >= 1 && s.vehicleArmy >= 5 && (!s.coastal || s.shipyards >= 1 || s.faction === 'HLX') && s.credits > 1800 },
   { kind: 'mg_turret',   want: (s) => s.turrets < 1 && s.barracks >= 1 },
   { kind: 'trench',      want: (s) => s.trenches < 1 && s.barracks >= 1 && s.credits > 280 },
   { kind: 'wall',        want: (s) => s.walls < 3 && s.barracks >= 1 && s.credits > 360 },
@@ -56,10 +62,19 @@ const COVERAGE_BUILD_ORDER = [
 const COVERAGE_UNIT_ORDER = [
   'builder', 'engineer', 'rifleman', 'at_soldier', 'aa_soldier',
   'truck', 'harvester', 'tractor', 'scout', 'tank', 'flak_track', 'rocket_launcher', 'artillery',
-  'recon_drone', 'gunship', 'bomber', 'transport_air',
+  'recon_drone', 'gunship', 'bomber', 'cloud_seeder', 'transport_air',
   'patrol_boat', 'destroyer', 'submarine', 'underwater_drone', 'amphib_transport', 'sea_builder',
 ];
 const COVERAGE_SKIP_BUILDINGS = new Set(['hq', 'earth_pile', 'ore_pile']);
+const AI_SITE_STUCK_TICKS = 900;        // 90s ohne Baufortschritt: Baustelle blockiert die KI
+const AI_PRESSURE_START_TICKS = 4200;   // ab 7 Minuten: KI geht schrittweise ins Endspiel
+const AI_PRESSURE_STEP_TICKS = 900;     // alle 90s aggressiver
+const AI_STALE_SCORE_EPS = 160;         // Score-Rauschen ignorieren
+const AI_DOMINANCE_HOLD_TICKS = 1200;   // 2 Minuten klare Überlegenheit reicht für KI-only Entscheidung
+const AI_FORCE_DECISION_PRESSURE = 7;   // nach langer Zeit reicht eine kleinere Führung
+const AI_HARD_DECISION_PRESSURE = 10;   // sehr langes KI-only Patt wird deterministisch entschieden
+const AI_ROUTE_PLAN_COOLDOWN = AI_REPLAN_TICKS * 2;
+const AI_ROUTE_PATH_ITER = 30000;
 
 export function initAi(player) {
   player.ai = { phase: 'expand', attackTimer: 0, airTimer: 0, lastBuild: 0, waveSize: 5, airWave: 2, navyTimer: 0, navyWave: 2 };
@@ -68,16 +83,109 @@ export function initAi(player) {
 export function stepAi(world, player, applyCommand) {
   if (player.defeated || player.controller !== 'ai') return;
   if (!player.ai) initAi(player);
+  updateAiDirector(world);
   if (world.tick % AI_REPLAN_TICKS !== (player.id % AI_REPLAN_TICKS)) return;
 
   const s = surveyEconomy(world, player);
+  if (manageStalledConstruction(world, player, s)) return;
   const builtCoverage = manageCoverageBuild(world, player, s, applyCommand);
   const builtInfra = !builtCoverage && managePipelines(world, player, s, applyCommand);
   const builtBridge = !builtCoverage && !builtInfra && manageBridges(world, player, s, applyCommand);
-  if (!builtCoverage && !builtInfra && !builtBridge) manageBuild(world, player, s, applyCommand);
+  const builtRoute = !builtCoverage && !builtInfra && !builtBridge && manageAccessRoutes(world, player, s, applyCommand);
+  if (!builtCoverage && !builtInfra && !builtBridge && !builtRoute) manageBuild(world, player, s, applyCommand);
   if (!manageCoverageProduction(world, player, s, applyCommand) && !world.aiCoverageTest) manageProduction(world, player, s, applyCommand);
   manageArmy(world, player, s, applyCommand);
   manageHarvesters(world, player, applyCommand);
+  manageIdleWorkers(world, player, s, applyCommand);
+}
+
+function updateAiDirector(world) {
+  if (world.aiCoverageTest || world._aiDirectorTick === world.tick) return;
+  world._aiDirectorTick = world.tick;
+  const active = world.players.filter(p => !p.defeated);
+  const aiOnly = active.length > 1 && active.every(p => p.controller === 'ai');
+  if (!aiOnly) {
+    world.aiDirector = { aiOnly: false, pressure: 0 };
+    world._aiDirectorLastProgress = world.tick;
+    world._aiDirectorScores = null;
+    return;
+  }
+
+  const scores = active.map(p => ({ player: p, score: aiPowerScore(world, p.id) }))
+    .sort((a, b) => b.score - a.score || a.player.id - b.player.id);
+  const total = scores.reduce((sum, s) => sum + s.score, 0);
+  const prev = world._aiDirectorScores;
+  if (!prev || Math.abs(total - prev.total) > AI_STALE_SCORE_EPS) {
+    world._aiDirectorLastProgress = world.tick;
+    world._aiDirectorScores = { total };
+  }
+
+  const timePressure = Math.max(0, Math.floor((world.tick - AI_PRESSURE_START_TICKS) / AI_PRESSURE_STEP_TICKS));
+  const stalePressure = Math.max(0, Math.floor((world.tick - (world._aiDirectorLastProgress || world.tick)) / AI_PRESSURE_STEP_TICKS));
+  const pressure = Math.min(10, Math.max(timePressure, stalePressure));
+  const leader = scores[0], weakest = scores[scores.length - 1];
+  world.aiDirector = { aiOnly: true, pressure, leaderId: leader.player.id, weakestId: weakest.player.id };
+
+  if (pressure < 3 || !leader || !weakest || leader.player.id === weakest.player.id) return;
+  const forcedDecision = pressure >= AI_HARD_DECISION_PRESSURE;
+  const strongLead = forcedDecision
+    || leader.score > Math.max(weakest.score * (pressure >= AI_FORCE_DECISION_PRESSURE ? 1.18 : 1.75), weakest.score + (pressure >= AI_FORCE_DECISION_PRESSURE ? 450 : 1800));
+  if (!strongLead) { world._aiDirectorDominance = null; return; }
+  const dom = world._aiDirectorDominance;
+  if (!dom || dom.leaderId !== leader.player.id || dom.weakestId !== weakest.player.id) {
+    world._aiDirectorDominance = { leaderId: leader.player.id, weakestId: weakest.player.id, since: world.tick };
+    return;
+  }
+  if (world.tick - dom.since >= AI_DOMINANCE_HOLD_TICKS) {
+    weakest.player.defeated = true;
+    world.events?.push({ type: 'defeat', player: weakest.player.id, reason: 'ai_stalemate' });
+    for (const e of world.entities.values()) if (e.owner === weakest.player.id) { e.dead = true; e.hp = 0; }
+    world._aiDirectorDominance = null;
+  }
+}
+
+function aiPowerScore(world, owner) {
+  const player = world.players.find(p => p.id === owner);
+  let score = 0;
+  for (const e of world.entities.values()) {
+    if (e.owner !== owner || e.dead) continue;
+    const hp = Math.max(0.05, Math.min(1, (e.hp || 0) / Math.max(1, e.maxHp || e.hp || 1)));
+    const cost = effectiveCost(world, owner, e.def || world.data.units[e.kind] || {});
+    const costScore = Object.values(cost || {}).reduce((sum, v) => sum + (v || 0), 0);
+    if (e.etype === 'building') {
+      const role = e.kind === 'hq' ? 900 : e.def?.produces_units || e.def?.produces_category ? 430 : e.weapon ? 300 : 160;
+      score += (role + costScore * 0.9) * hp * Math.max(0.25, e.buildProgress ?? 1);
+    } else {
+      const role = e.weapon ? 260 : e.abilities?.includes('construct') ? 150 : e.abilities?.includes('harvest') ? 130 : 70;
+      score += (role + costScore * 0.85) * hp;
+    }
+  }
+  if (player) score += Math.min(1600, (player.resources.ore || 0) * 0.18 + (player.resources.materials || 0) * 0.10 + (player.resources.fuel || 0) * 0.05);
+  return score;
+}
+
+function manageStalledConstruction(world, player, s) {
+  const sites = s.buildings.filter(b => b.buildProgress < 1 && !b.dead);
+  if (!sites.length) return false;
+  const hasBuilder = s.units.some(u => u.kind === 'builder' && !u.dead);
+  for (const b of sites) {
+    const p = b.buildProgress || 0;
+    const recentlyWorked = b._builderNear != null && world.tick - b._builderNear <= AI_REPLAN_TICKS * 2;
+    if (b._aiProgress == null || p > b._aiProgress + 0.002 || recentlyWorked) {
+      b._aiProgress = p;
+      b._aiStuckSince = world.tick;
+      continue;
+    }
+    const limit = hasBuilder ? AI_SITE_STUCK_TICKS : Math.floor(AI_SITE_STUCK_TICKS * 0.45);
+    if (world.tick - (b._aiStuckSince || world.tick) < limit) continue;
+    const refund = effectiveCost(world, player.id, b.def || {});
+    for (const [k, v] of Object.entries(refund || {})) player.resources[k] = (player.resources[k] || 0) + Math.round(v * 0.55);
+    b.dead = true;
+    b.hp = 0;
+    world.events?.push({ type: 'site_cancel', x: b.x, y: b.y, owner: player.id, kind: b.kind, reason: 'ai_stalled' });
+    return true;
+  }
+  return false;
 }
 
 function manageCoverageBuild(world, player, s, applyCommand) {
@@ -89,6 +197,7 @@ function manageCoverageBuild(world, player, s, applyCommand) {
     if (!def || !canAfford(player, effectiveCost(world, player.id, def))) continue;
     const spot = pickCoverageBuildSpot(world, player, s, kind, def);
     if (!spot) continue;
+    if (prepareBuildRoute(world, player, s, spot, def, applyCommand)) return true;
     applyCommand(world, { type: 'build', building: kind, tx: spot[0], ty: spot[1] }, player.id);
     return true;
   }
@@ -178,6 +287,7 @@ function surveyEconomy(world, player) {
     walls: count('wall'), trenches: count('trench'), bridges: count('bridge'), pipes: count('pipe'),
     coastal, enemyAir, enemySubs,
     harvesters: u.filter(e => e.abilities.includes('harvest')).length,
+    vehicleArmy: u.filter(e => e.category === 'vehicle' && e.weapon).length,
     army: u.filter(e => e.weapon),
     units: u, buildings: b, hq,
   };
@@ -185,6 +295,7 @@ function surveyEconomy(world, player) {
 
 function manageBuild(world, player, s, applyCommand) {
   if (!s.hq) return false;
+  const pressure = world.aiDirector?.pressure || 0;
   // Bauthrottling: höchstens 2 Baustellen gleichzeitig und nie dasselbe Gebäude doppelt im Bau.
   // Verhindert Überbau (z. B. 7 Kraftwerke auf einmal, weil im Bau befindliche Gebäude noch
   // keine Energie liefern) und sichert geordnetes Hochtechen bis zu Luftbasis/Werft.
@@ -193,10 +304,12 @@ function manageBuild(world, player, s, applyCommand) {
   const buildingNow = new Set(underConstruction.map(b => b.kind));
   for (const step of BUILD_ORDER) {
     if (buildingNow.has(step.kind)) continue;
+    if (pressure > 0 && ['wall', 'trench', 'mg_turret', 'turret'].includes(step.kind)) continue;
+    if (pressure > 2 && ['flak_turret', 'sam_site', 'sonar'].includes(step.kind) && !s.enemyAir && !s.enemySubs) continue;
     const def = world.data.buildings[step.kind];
     if (step.want(s)) {
       if (!canAfford(player, effectiveCost(world, player.id, def))) {
-        if (step.reserve) return true;
+        if (step.reserve && pressure < 2) return true;
         continue;
       }
       let spot;
@@ -207,6 +320,7 @@ function manageBuild(world, player, s, applyCommand) {
       else if (def.pump && s.coastal) spot = pickCoastalSpot(world, player, s, def.size || 1, def) || pickBuildSpot(world, s.hq, def.size || 1, def);
       else spot = pickBuildSpot(world, s.hq, def.size || 1, def);
       if (spot) {
+        if (prepareBuildRoute(world, player, s, spot, def, applyCommand)) return true;
         applyCommand(world, { type: 'build', building: step.kind, tx: spot[0], ty: spot[1] }, player.id);
         return true; // ein Gebäude pro Planungsrunde
       }
@@ -237,15 +351,35 @@ function managePipelines(world, player, s, applyCommand) {
 
 function manageBridges(world, player, s, applyCommand) {
   if (!s.hq || constructionBusy(s) || buildingInProgress(s, 'bridge')) return false;
-  if (s.bridges >= 18) return false;
-  const landArmy = s.army.filter(u => u.domain === 'land');
-  if (landArmy.length < 4 && s.factories < 1) return false;
+  // Brücken sind teuer und v. a. für FAHRZEUGE da (Infanterie watet/klettert ohnehin). Deckel niedrig
+  // halten, sonst versenkt die KI ihr ganzes Erz in einer endlosen Brückenspur statt in die Armee.
+  if (s.bridges >= 6) return false;
+  const vehicles = s.army.filter(u => u.domain === 'land' && u.category === 'vehicle');
+  if (vehicles.length < 1 && s.vehicleArmy < 1) return false;   // erst Fahrzeuge, dann Brücken für sie
   const def = world.data.buildings.bridge;
   if (!def || !canAfford(player, effectiveCost(world, player.id, def))) return false;
   const spot = pickBridgeSpot(world, player, s, def);
   if (!spot) return false;
   applyCommand(world, { type: 'build', building: 'bridge', tx: spot[0], ty: spot[1] }, player.id);
   return true;
+}
+
+function manageAccessRoutes(world, player, s, applyCommand) {
+  if (!s.hq || constructionBusy(s)) return false;
+  const pressure = world.aiDirector?.pressure || 0;
+  const landArmy = s.army.filter(u => u.domain === 'land');
+  if (landArmy.length < (pressure > 0 ? 2 : 5) && s.vehicleArmy < 1 && s.factories < 1) return false;
+  const enemy = pickEnemyTarget(world, player, pressure > 0);
+  if (!enemy) return false;
+  const vehicles = landArmy.filter(u => u.category === 'vehicle');
+  const builders = s.units.filter(u => u.kind === 'builder' && !u.dead);
+  const starter = nearestEntityToPoint(vehicles.length ? vehicles : (builders.length ? builders : [s.hq]), enemy.x, enemy.y);
+  if (!starter) return false;
+  const from = entityTile(starter);
+  const [gx, gy] = worldToTile(enemy.x, enemy.y);
+  if (canReachTile(world.terrain, from.tx, from.ty, gx, gy, starter.maxSlope ?? SLOPE_HEAVY,
+    { heavy: true, category: 'vehicle' }, 5)) return false;
+  return planRouteInfrastructure(world, player, s, from, { tx: gx, ty: gy }, applyCommand, { preferRoad: true });
 }
 
 function constructionBusy(s) {
@@ -380,7 +514,7 @@ function fallbackBridgeSpot(world, owner, from, to, def) {
     for (let y = minY; y <= maxY; y++) for (let x = minX; x <= maxX; x++) {
       if (Math.hypot(x + 0.5 - ecx, y + 0.5 - ecy) > radius) continue;
       if (!isBridgeCandidateCell(world, x, y) || !hasBridgeShore(world, x, y)) continue;
-      if (!placeable(world, x, y, 1, def)) continue;
+      if (!placeable(world, x, y, 1, def, owner)) continue;
       const a = Math.atan2(y - from.ty, x - from.tx);
       const angleCost = Math.abs(Math.atan2(Math.sin(a - dir), Math.cos(a - dir))) * 8;
       const distCost = Math.hypot(x - from.tx, y - from.ty);
@@ -397,8 +531,8 @@ function bestInfrastructureSpot(world, owner, cx, cy, radius, def, predicate, ta
     if (Math.max(Math.abs(x), Math.abs(y)) !== r) continue;
     const tx = cx + x, ty = cy + y;
     if (!predicate(tx, ty)) continue;
-    if (!placeable(world, tx, ty, def.size || 1, def)) continue;
-    if (!inAiBuildRadius(world, owner, tx, ty, def.size || 1)) continue;
+    if (!placeable(world, tx, ty, def.size || 1, def, owner)) continue;
+    if (!def.remoteBuild && !inAiBuildRadius(world, owner, tx, ty, def.size || 1)) continue;
     const score = (target ? Math.hypot(tx - target.tx, ty - target.ty) : 0) + r * 0.2;
     if (score < bestScore) { bestScore = score; best = [tx, ty]; }
   }
@@ -420,13 +554,17 @@ function lineTiles(ax, ay, bx, by) {
 }
 
 function manageProduction(world, player, s, applyCommand) {
-  // Spar-Reserve: genug Credits zurückhalten, um das nächste Schlüsselgebäude (Luftbasis/Werft)
-  // tatsächlich zu erreichen — sonst verbraucht die laufende Einheitenproduktion jeden Überschuss
-  // und die KI techt nie auf Luft/See hoch. Sobald das Gebäude (an)gebaut ist, entfällt die Reserve.
+  const pressure = world.aiDirector?.pressure || 0;
+  // Spar-Reserve: genug Erz zurückhalten, um das nächste Schlüsselgebäude tatsächlich zu
+  // erreichen. Fabrik/Werft haben Vorrang; Luftbasis kommt erst nach einer Fahrzeugbasis.
   let reserve = 0;
-  if (s.airbases < 1 && s.faction !== 'FLG' && s.army.length >= 2) reserve = Math.max(reserve, effectiveCost(world, player.id, world.data.buildings.airbase).ore || 0);
-  if (s.coastal && s.shipyards < 1 && (s.faction === 'FLG' || s.airbases >= 1)) reserve = Math.max(reserve, effectiveCost(world, player.id, world.data.buildings.shipyard).ore || 0);
-  if (s.factories < 1 && (s.airbases >= 1 || s.shipyards >= 1)) reserve = Math.max(reserve, effectiveCost(world, player.id, world.data.buildings.factory).ore || 0);
+  if (pressure < 2) {
+    if (s.factories < 1) reserve = Math.max(reserve, effectiveCost(world, player.id, world.data.buildings.factory).ore || 0);
+    if (s.coastal && s.shipyards < 1 && s.factories >= 1 && s.vehicleArmy >= 2) reserve = Math.max(reserve, effectiveCost(world, player.id, world.data.buildings.shipyard).ore || 0);
+    if (s.airbases < 1 && s.factories >= 1 && s.vehicleArmy >= 5 && (!s.coastal || s.shipyards >= 1 || s.faction === 'HLX')) {
+      reserve = Math.max(reserve, effectiveCost(world, player.id, world.data.buildings.airbase).ore || 0);
+    }
+  }
   const afford = (kind, keepReserve = true) => {
     const cost = effectiveCost(world, player.id, world.data.units[kind]);
     if (!canAfford(player, cost)) return false;
@@ -457,74 +595,106 @@ function manageProduction(world, player, s, applyCommand) {
     if (fac && fac.queue.length === 0 && canAfford(player, effectiveCost(world, player.id, world.data.units.truck)))
       applyCommand(world, { type: 'produce', building: fac.id, kind: 'truck' }, player.id);
   }
-  // Kampfeinheiten produzieren, wenn Wirtschaft steht
+  // Kampfeinheiten produzieren, wenn Wirtschaft steht.
   const barracks = s.buildings.filter(b => b.kind === 'barracks' && b.buildProgress >= 1);
   const factories = s.buildings.filter(b => b.kind === 'factory' && b.buildProgress >= 1);
   const airbases = s.buildings.filter(b => b.kind === 'airbase' && b.buildProgress >= 1);
   const shipyards = s.buildings.filter(b => b.kind === 'shipyard' && b.buildProgress >= 1);
 
-  // Flottengrößen deckeln, damit die teuren Domänen Luft/See nicht das ganze Budget binden
-  // und gegenseitig aushungern — und Luft/See VOR Land produzieren (höhere Priorität aufs Budget).
+  // Fahrzeuge sind der verlässliche Siegpfad: erst tragfähige Bodenarmee, dann Marine,
+  // und Luft als teure Spezialoption.
   const airUnits = s.units.filter(u => u.domain === 'air').length;
   const navalUnits = s.units.filter(u => u.domain === 'water' || u.domain === 'amphibious').length;
-  const AIR_TARGET = player.faction === 'HLX' ? 6 : 4;
-  const NAVY_TARGET = player.faction === 'FLG' ? 8 : 5;
+  const VEHICLE_TARGET = (player.faction === 'KBN' ? 9 : 7) + pressure * 2;
+  const NAVY_TARGET = (player.faction === 'FLG' ? 9 : 6) + pressure;
+  const AIR_TARGET = Math.min(player.faction === 'HLX' ? 4 : 2, 1 + Math.floor(pressure / 4));
 
-  // Luft-Doktrin ist fraktionsabhängig: HLX (Luftfraktion) setzt auf Bomber als Panzerbrecher
-  // (vs.vehicle 1.3), die übrigen mischen mehr Kanonen-Helis gegen Infanterie/Luft.
-  const bomberShare = player.faction === 'HLX' ? 0.65 : 0.4;
-  for (const air of airbases) {
-    if (air.queue.length >= 1 || airUnits >= AIR_TARGET) continue;
-    const kind = airUnits === 0 ? 'recon_drone' : (world.rng() < bomberShare ? 'bomber' : 'gunship');
-    if (afford(kind, false)) applyCommand(world, { type: 'produce', building: air.id, kind }, player.id);
-  }
-  // Marine: Werften bauen Kampfschiffe (Patrouille/Zerstörer/U-Boot).
-  for (const sy of shipyards) {
-    if (sy.queue.length >= 1 || navalUnits >= NAVY_TARGET) continue;
-    const r = world.rng();
-    const kind = navalUnits === 0 ? 'patrol_boat' : (r < 0.38 ? 'patrol_boat' : r < 0.68 ? 'destroyer' : r < 0.84 ? 'submarine' : 'underwater_drone');
-    if (afford(kind, false)) applyCommand(world, { type: 'produce', building: sy.id, kind }, player.id);
-  }
+  // Erz-Reserve für Kampffahrzeuge: Infanterie (billig, 100 Erz) darf die Kasse NICHT leersaugen,
+  // sonst sammelt die KI nie die 550–800 Erz für ein Fahrzeug an und greift ewig nur mit Fußvolk an.
+  // Solange eine Fabrik steht und die Fahrzeugarmee unter Soll ist, wird Erz für das nächste
+  // Kampffahrzeug zurückgehalten (anfangs ein mittleres, später ein günstiges).
+  // Infanterie-Soll: genug Masse als Begleitschutz/Deckung, aber kein endloser Schwarm (früher 100+
+  // Riflemen, weil billig). Bewusst niedrig, damit sich Erz für FAHRZEUGE ansammelt — Fahrzeuge sind
+  // der Hauptsiegpfad, Infanterie nur Begleitung. HLX (Schwarmdoktrin) darf etwas mehr.
+  const infantryArmy = s.army.filter(u => u.category === 'infantry' && !u.abilities.includes('harvest')).length;
+  const INFANTRY_TARGET = (player.faction === 'HLX' ? 10 : 6) + pressure * 2;
+
   for (const fac of factories) {
-    if (fac.queue.length >= 2) continue;
+    if (fac.queue.length >= (pressure > 2 ? 3 : 2)) continue;
     // Zweiter Bautrupp zuerst: parallelisiert Baustellen → die Lager-Ökonomie rampt doppelt so schnell.
     if (constructors < 2 && fac.queue.length === 0 && afford('builder')) {
       applyCommand(world, { type: 'produce', building: fac.id, kind: 'builder' }, player.id);
       continue;
     }
+    if (s.vehicleArmy >= VEHICLE_TARGET && pressure < 4) continue;
     const r = world.rng();
-    const kind = r < 0.45 ? 'tank' : r < 0.62 ? 'flak_track' : r < 0.78 ? 'rocket_launcher' : r < 0.9 ? 'scout' : 'artillery';
+    const kind = r < 0.36 ? 'tank' : r < 0.55 ? 'flak_track' : r < 0.74 ? 'rocket_launcher' : r < 0.88 ? 'scout' : 'artillery';
     if (afford(kind)) applyCommand(world, { type: 'produce', building: fac.id, kind }, player.id);
   }
+
+  // Marine: Auf Küstenkarten eigener Siegzweig; wird vor Luft gefüllt.
+  for (const sy of shipyards) {
+    if (!s.coastal && player.faction !== 'FLG') continue;
+    if (sy.queue.length >= 1 || navalUnits >= NAVY_TARGET) continue;
+    if (s.vehicleArmy < 3 && pressure < 2) continue;
+    const r = world.rng();
+    const kind = navalUnits === 0 ? 'patrol_boat' : (r < 0.38 ? 'patrol_boat' : r < 0.68 ? 'destroyer' : r < 0.84 ? 'submarine' : 'underwater_drone');
+    if (afford(kind)) applyCommand(world, { type: 'produce', building: sy.id, kind }, player.id);
+  }
+
   // HLX-Schwarmdoktrin: mehr Panzerabwehr-Infanterie (at_soldier, vs.vehicle 1.3) gegen Armee mit viel Panzer.
   const riflemanShare = player.faction === 'HLX' ? 0.5 : 0.7;
   for (const bar of barracks) {
-    if (bar.queue.length >= 2) continue;
+    if (bar.queue.length >= (pressure > 2 ? 3 : 2)) continue;
+    if (infantryArmy >= INFANTRY_TARGET && pressure < 4) continue;   // Schwarm begrenzen (nicht 100+ Riflemen)
     const r = world.rng();
     const kind = s.enemyAir && r > 0.72 ? 'aa_soldier' : r < riflemanShare ? 'rifleman' : 'at_soldier';
     if (afford(kind)) applyCommand(world, { type: 'produce', building: bar.id, kind }, player.id);
   }
+
+  // Luft-Doktrin: spät und begrenzt. HLX darf etwas mehr, aber die Grundkosten bleiben hoch.
+  const airReady = s.vehicleArmy >= (player.faction === 'HLX' ? 5 : 6)
+    && (!s.coastal || navalUnits >= (player.faction === 'FLG' ? 3 : 2) || pressure >= 4);
+  const bomberShare = player.faction === 'HLX' ? 0.55 : 0.28;
+  for (const air of airbases) {
+    if (!airReady || air.queue.length >= 1 || airUnits >= AIR_TARGET) continue;
+    const seeders = s.units.filter(u => u.kind === 'cloud_seeder').length;
+    const kind = airUnits === 0 ? 'recon_drone'
+      : (seeders < 1 && airUnits >= 1 && world.rng() < 0.16) ? 'cloud_seeder'
+        : (world.rng() < bomberShare ? 'bomber' : 'gunship');
+    if (afford(kind)) applyCommand(world, { type: 'produce', building: air.id, kind }, player.id);
+  }
 }
 
 function manageArmy(world, player, s, applyCommand) {
+  const pressure = world.aiDirector?.pressure || 0;
   const all = s.army.filter(u => !u.abilities.includes('harvest'));
   // Marine wird getrennt geführt (eigene Wegfindung/Ziele); rearmende Flieger nicht losschicken.
   const naval = all.filter(u => u.domain === 'water' || u.domain === 'amphibious');
   const air = s.units.filter(u => u.domain === 'air' && u.order.type !== 'rearm');
   const strike = all.filter(u => u.domain === 'land');
+  const vehicleStrike = strike.filter(u => u.category === 'vehicle');
   player.ai.attackTimer++;
   const idle = strike.filter(u => u.order.type === 'idle' || u.order.type === 'guard');
 
-  // Land-/Luft-Angriffswelle starten, wenn genug Truppen gesammelt sind.
+  // Landangriffswelle starten, wenn genug Truppen gesammelt sind. Ab Fabrik sind Fahrzeuge
+  // Pflichtanker der Offensive; Infanterie allein bleibt vor allem Sicherung/Deckung.
   // Reguläre Welle ODER periodisches Neusammeln: gestrandete attackmove-Einheiten (Ziel durch
   // Pfadprobleme verloren) bekommen spätestens nach ~2 min wieder einen Marschbefehl.
-  const regroup = player.ai.attackTimer > 60 && strike.length >= 4;
-  if ((strike.length >= player.ai.waveSize || regroup) && player.ai.attackTimer > 4) {
-    const enemy = pickEnemyTarget(world, player);
+  const regroupLimit = pressure > 0 ? Math.max(10, 60 - pressure * 7) : 60;
+  const minWave = pressure >= 4 ? 1 : pressure >= 2 ? 2 : 4;
+  const waveNeed = pressure > 0 ? Math.max(minWave, Math.min(player.ai.waveSize, 6 - Math.min(4, pressure))) : player.ai.waveSize;
+  const regroup = player.ai.attackTimer > regroupLimit && strike.length >= minWave;
+  const regularNeed = Math.max(minWave, Math.min(waveNeed, pressure > 0 ? 3 : 5));
+  const regularPulse = strike.length >= regularNeed && player.ai.attackTimer > Math.max(12, Math.floor(regroupLimit * 0.45));
+  const vehicleReady = s.factories < 1 || vehicleStrike.length >= (pressure >= 4 ? 1 : 2) || pressure >= 6;
+  if (vehicleReady && (strike.length >= waveNeed || regroup || regularPulse) && player.ai.attackTimer > 4) {
+    const enemy = pickEnemyTarget(world, player, pressure > 0);
     if (enemy) {
+      if (vehicleStrike.length && prepareVehicleAttackRoute(world, player, s, vehicleStrike, enemy, applyCommand)) return;
       applyCommand(world, { type: 'move', units: strike.map(u => u.id), x: enemy.x, y: enemy.y, attackMove: true }, player.id);
       player.ai.attackTimer = 0;
-      player.ai.waveSize = Math.min(40, player.ai.waveSize + 2); // Wellen wachsen
+      player.ai.waveSize = pressure > 0 ? Math.max(3, player.ai.waveSize - 1) : Math.min(18, player.ai.waveSize + 1); // Wellen wachsen im Normalspiel
     }
   } else if (s.hq && idle.length) {
     // Leerlauf-Truppen zur Verteidigung sammeln — bevorzugt in Deckung (Schützengraben).
@@ -545,14 +715,27 @@ function manageArmy(world, player, s, applyCommand) {
 // Luft-Doktrin: nicht auf Landwellen warten; kleine Rotten fliegen eigenständig.
 function manageAirWing(world, player, air, applyCommand) {
   const a = player.ai;
+  const pressure = world.aiDirector?.pressure || 0;
   a.airTimer = (a.airTimer || 0) + 1;
   const ready = air.filter(u => u.order.type === 'idle' || u.order.type === 'guard' || u.order.type === 'attackmove');
-  if (ready.length >= (a.airWave || 2) || (ready.length > 0 && a.airTimer > 70)) {
-    const tgt = pickEnemyTarget(world, player);
+  const seeders = ready.filter(u => u.kind === 'cloud_seeder' && (!u.muniMax || u.muni > 0));
+  if (seeders.length && a.airTimer > 25) {
+    const tgt = pickEnemyTarget(world, player, true);
     if (tgt) {
-      applyCommand(world, { type: 'move', units: ready.map(u => u.id), x: tgt.x, y: tgt.y, attackMove: true }, player.id);
+      applyCommand(world, { type: 'seedCloud', units: seeders.map(u => u.id), x: tgt.x, y: tgt.y }, player.id);
       a.airTimer = 0;
-      a.airWave = Math.min(8, (a.airWave || 2) + 1);
+      return;
+    }
+  }
+  const strikeReady = ready.filter(u => u.kind !== 'cloud_seeder');
+  const wait = pressure > 0 ? Math.max(16, 70 - pressure * 8) : 70;
+  const wave = pressure >= 3 ? 1 : (a.airWave || 2);
+  if (strikeReady.length >= wave || (strikeReady.length > 0 && a.airTimer > wait)) {
+    const tgt = pickEnemyTarget(world, player, pressure > 0);
+    if (tgt) {
+      applyCommand(world, { type: 'move', units: strikeReady.map(u => u.id), x: tgt.x, y: tgt.y, attackMove: true }, player.id);
+      a.airTimer = 0;
+      a.airWave = pressure > 0 ? Math.max(1, (a.airWave || 2) - 1) : Math.min(8, (a.airWave || 2) + 1);
     }
   }
 }
@@ -560,13 +743,16 @@ function manageAirWing(world, player, air, applyCommand) {
 // Marine-Doktrin: Flotte sammeln und gegen das nächste Küstenziel des Gegners vorstoßen.
 function manageNavy(world, player, naval, applyCommand) {
   const a = player.ai;
+  const pressure = world.aiDirector?.pressure || 0;
   a.navyTimer = (a.navyTimer || 0) + 1;
-  if (naval.length >= (a.navyWave || 3) && a.navyTimer > 4) {
+  const wave = pressure >= 3 ? 1 : (a.navyWave || 3);
+  const wait = pressure > 0 ? Math.max(18, 90 - pressure * 9) : 90;
+  if ((naval.length >= wave && a.navyTimer > 4) || (naval.length > 0 && a.navyTimer > wait)) {
     const tgt = pickNavalTarget(world, player);
     if (tgt) {
       applyCommand(world, { type: 'move', units: naval.map(u => u.id), x: tgt.x, y: tgt.y, attackMove: true }, player.id);
       a.navyTimer = 0;
-      a.navyWave = Math.min(16, (a.navyWave || 2) + 1);
+      a.navyWave = pressure > 0 ? Math.max(1, (a.navyWave || 2) - 1) : Math.min(16, (a.navyWave || 2) + 1);
     }
   }
 }
@@ -587,7 +773,7 @@ function pickNavalTarget(world, player) {
     const d = (e.x - from.x) ** 2 + (e.y - from.y) ** 2;
     if (d < bestD) { bestD = d; best = e; }
   }
-  if (!best) best = pickEnemyTarget(world, player);
+  if (!best) best = pickEnemyTarget(world, player, world.aiDirector?.pressure > 0);
   if (!best) return null;
   const [bx, by] = worldToTile(best.x, best.y);
   const wt = nearestWaterTile(terrain, bx, by, 18);
@@ -600,7 +786,55 @@ function manageHarvesters(world, player, applyCommand) {
   // Erz-LKWs regeln sich selbst (Economy-System); hier nur ggf. anstoßen.
 }
 
-function pickEnemyTarget(world, player) {
+function manageIdleWorkers(world, player, s, applyCommand) {
+  const idleLike = (u) => u.order.type === 'idle' || u.order.type === 'guard';
+  const pendingSites = s.buildings.some(b => b.buildProgress < 1 && !b.dead);
+  const pendingTerra = (world.terraJobs || []).some(j => j.owner === player.id);
+  const oreBuilderMissing = (s.oreDepots > 0 || s.refineries > 0)
+    && !s.units.some(u => u.kind === 'builder' && u.resourceRole === 'ore' && !u.dead);
+  let assignedOreBuilder = !oreBuilderMissing;
+  for (const b of s.units.filter(u => u.kind === 'builder' && !u.dead && idleLike(u))) {
+    if (pendingTerra) b.resourceRole = 'earth';
+    else if (pendingSites) b.resourceRole = 'build';
+    else if (!assignedOreBuilder) { b.resourceRole = 'ore'; assignedOreBuilder = true; }
+    if (pendingSites || pendingTerra || b.resourceRole === 'ore') {
+      b.order = { type: b.resourceRole === 'ore' ? 'idle' : 'guard' };
+      continue;
+    }
+    parkSupportUnit(world, b, s, applyCommand);
+  }
+
+  const pendingPiles = [...world.entities.values()].some(e => e.owner === player.id
+    && (e.kind === 'earth_pile' || e.kind === 'ore_pile') && !e.dead && (e.amount || 0) > 0);
+  for (const t of s.units.filter(u => u.kind === 'truck' && !u.dead && idleLike(u))) {
+    if (pendingPiles || (t.cargo || 0) > 0) {
+      t.order = { type: 'guard' };
+      continue;
+    }
+    parkSupportUnit(world, t, s, applyCommand);
+  }
+}
+
+function parkSupportUnit(world, unit, s, applyCommand) {
+  const anchor = logisticsAnchor(s);
+  if (!anchor) return;
+  const a = ((unit.id % 16) / 16) * Math.PI * 2;
+  const r = 5 + (unit.id % 4);
+  const x = anchor.x + Math.cos(a) * r;
+  const y = anchor.y + Math.sin(a) * r;
+  if (Math.hypot(unit.x - x, unit.y - y) > 7) {
+    applyCommand(world, { type: 'move', units: [unit.id], x, y }, unit.owner);
+  } else {
+    unit.order = { type: 'guard' };
+  }
+}
+
+function logisticsAnchor(s) {
+  return s.buildings.find(b => b.buildProgress >= 1 && ['material_depot', 'ore_depot', 'refinery', 'depot'].includes(b.kind))
+    || s.hq;
+}
+
+function pickEnemyTarget(world, player, decisive = false) {
   let best = null, bestD = Infinity;
   const hq = ownerEntities(world, player.id, 'building').find(b => b.kind === 'hq');
   const from = hq || ownerEntities(world, player.id, 'unit')[0];
@@ -609,10 +843,216 @@ function pickEnemyTarget(world, player) {
     if (e.owner === player.id || e.dead) continue;
     const owner = world.players.find(p => p.id === e.owner);
     if (!owner || owner.defeated) continue;
-    // Bevorzugt Produktionsgebäude/HQ
-    const prio = e.etype === 'building' ? (e.kind === 'hq' ? 0.5 : 0.8) : 1.2;
+    // Bevorzugt Produktionsgebäude/HQ; im Endspiel noch stärker auf Entscheidungsziele.
+    const production = e.etype === 'building' && (e.def?.produces_units || e.def?.produces_category);
+    const prio = e.etype === 'building'
+      ? e.kind === 'hq' ? (decisive ? 0.25 : 0.5)
+        : production ? (decisive ? 0.45 : 0.8)
+        : decisive ? 0.9 : 1.0
+      : decisive ? 1.8 : 1.2;
     const d = ((e.x - from.x) ** 2 + (e.y - from.y) ** 2) * prio;
     if (d < bestD) { bestD = d; best = e; }
+  }
+  return best;
+}
+
+function prepareBuildRoute(world, player, s, spot, def, applyCommand) {
+  if (!spot || !def || def.bridges || def.tunnels || def.roadBuilt || def.pipe || def.role === 'fortification') return false;
+  const builders = s.units.filter(u => u.kind === 'builder' && !u.dead);
+  if (!builders.length) return false;
+  const size = def.size || 1;
+  const target = { tx: Math.round(spot[0] + size / 2), ty: Math.round(spot[1] + size / 2) };
+  const builder = nearestEntityToTile(builders, target.tx, target.ty);
+  if (!builder) return false;
+  if (canReachBuildSpot(world.terrain, builder, spot[0], spot[1], size)) return false;
+  const [sx, sy] = worldToTile(builder.x, builder.y);
+  return planRouteInfrastructure(world, player, s, { tx: sx, ty: sy }, target, applyCommand, { preferRoad: true });
+}
+
+function prepareVehicleAttackRoute(world, player, s, vehicles, enemy, applyCommand) {
+  const lead = nearestEntityToPoint(vehicles, enemy.x, enemy.y);
+  if (!lead) return false;
+  const [sx, sy] = worldToTile(lead.x, lead.y);
+  const [gx, gy] = worldToTile(enemy.x, enemy.y);
+  if (canReachTile(world.terrain, sx, sy, gx, gy, lead.maxSlope ?? SLOPE_HEAVY,
+    { heavy: true, category: lead.category }, 5)) return false;
+  return planRouteInfrastructure(world, player, s, { tx: sx, ty: sy }, { tx: gx, ty: gy }, applyCommand, { preferRoad: true });
+}
+
+function canReachTile(t, sx, sy, gx, gy, maxSlope, opts, maxGoalError) {
+  if (!inBounds(t, sx, sy) || !inBounds(t, gx, gy)) return false;
+  const path = findPath(t, 'land', sx, sy, gx, gy, AI_ROUTE_PATH_ITER, maxSlope, opts);
+  if (!path) return false;
+  const goal = path.goal || [gx, gy];
+  return Math.hypot(goal[0] - gx, goal[1] - gy) <= maxGoalError;
+}
+
+function canReachBuildSpot(t, builder, tx, ty, size) {
+  const [sx, sy] = worldToTile(builder.x, builder.y);
+  const opts = { category: builder.category, mudCrawler: true, terraCrawler: true };
+  const maxSlope = builder.maxSlope ?? SLOPE_BUILDER;
+  const maxRing = Math.max(3, Math.ceil((size + CONSTRUCT_RANGE) / TILE) + 2);
+  const cx = (tx + size / 2) * TILE;
+  const cy = (ty + size / 2) * TILE;
+  for (let r = 1; r <= maxRing; r++) {
+    for (let y = ty - r; y < ty + size + r; y++) for (let x = tx - r; x < tx + size + r; x++) {
+      const edge = x === tx - r || x === tx + size + r - 1 || y === ty - r || y === ty + size + r - 1;
+      if (!edge || !inBounds(t, x, y) || !isPassable(t, builder.domain || 'land', x, y)) continue;
+      const [wx, wy] = tileToWorld(x, y);
+      if (Math.hypot(cx - wx, cy - wy) > size + CONSTRUCT_RANGE) continue;
+      if (canReachTile(t, sx, sy, x, y, maxSlope, opts, 0.25)) return true;
+    }
+  }
+  return false;
+}
+
+function planRouteInfrastructure(world, player, s, from, to, applyCommand, opts = {}) {
+  if (!from || !to || !s.hq) return false;
+  if (routeWorkPending(world, player.id, from, to)) return true;
+  if ((world.tick - (player.ai.routePlanTick || -Infinity)) < AI_ROUTE_PLAN_COOLDOWN) return true;
+  if (constructionBusy(s)) return true;
+
+  const cells = lineTiles(from.tx, from.ty, to.tx, to.ty);
+  let prev = from;
+  for (let n = 0; n < cells.length; n++) {
+    const [tx, ty] = cells[n];
+    if (!inBounds(world.terrain, tx, ty)) break;
+    const i = tIdx(world.terrain, tx, ty);
+    // Klippen-Riegel: EINEN durchgehenden Tunnel von der Mündung diesseits zur Mündung jenseits
+    // planen (statt je Klippen-Tile ein eigenes Gebäude).
+    if (world.terrain.type[i] === TT.CLIFF && !(world.terrain.tunnel && world.terrain.tunnel[i] > 0)) {
+      const tunnelAct = planTunnelOverRidge(world, cells, n, prev);
+      if (tunnelAct && issueRouteAction(world, player, tunnelAct, applyCommand)) {
+        player.ai.routePlanTick = world.tick;
+        return true;
+      }
+    }
+    const action = routeCellAction(world, player, prev, { tx, ty }, n, opts);
+    if (action && issueRouteAction(world, player, action, applyCommand)) {
+      player.ai.routePlanTick = world.tick;
+      return true;
+    }
+    if (world.terrain.type[i] !== TT.CLIFF && !waterBlocksLand(world.terrain, i)) prev = { tx, ty };
+  }
+  return false;
+}
+
+// Über einen Klippen-Riegel entlang der Route einen gültigen Tunnel finden: Mündung A = letzte
+// begehbare Zelle vor dem Riegel (prev), Mündung B = erste begehbare Zelle dahinter.
+function planTunnelOverRidge(world, cells, n, prev) {
+  let m = n;
+  while (m < cells.length && world.terrain.type[tIdx(world.terrain, cells[m][0], cells[m][1])] === TT.CLIFF) m++;
+  if (m >= cells.length) return null;
+  const [ex, ey] = cells[m];
+  if (validateTunnel(world, prev.tx, prev.ty, ex, ey)) {
+    return { type: 'tunnel', sx: prev.tx, sy: prev.ty, ex, ey };
+  }
+  return null;
+}
+
+function routeCellAction(world, player, prev, cur, step, opts) {
+  const t = world.terrain;
+  const i = tIdx(t, cur.tx, cur.ty);
+  const prevI = tIdx(t, prev.tx, prev.ty);
+  if (waterBlocksLand(t, i) && !(t.bridge && t.bridge[i] > 0)) {
+    if (step > 2 && opts.preferRoad && !roadAtIdx(t, prevI)) return { type: 'build', kind: 'road', tx: prev.tx, ty: prev.ty };
+    return { type: 'build', kind: 'bridge', tx: cur.tx, ty: cur.ty };
+  }
+  // Klippen werden in planRouteInfrastructure als durchgehender Tunnel behandelt (nicht hier).
+  if (t.type[i] === TT.CLIFF && !(t.tunnel && t.tunnel[i] > 0)) return null;
+
+  const dh = Math.abs((t.height?.[i] || 0) - (t.height?.[prevI] || 0));
+  if (dh > SLOPE_ON_ROAD) {
+    const high = (t.height[i] > t.height[prevI]) ? cur : prev;
+    return { type: 'terraform', tx: high.tx, ty: high.ty, dir: -1 };
+  }
+  if (dh > SLOPE_HEAVY && (!roadAtIdx(t, i) || !roadAtIdx(t, prevI))) {
+    const target = !roadAtIdx(t, prevI) ? prev : cur;
+    return { type: 'build', kind: 'road', tx: target.tx, ty: target.ty };
+  }
+  if (forestBlocks(t, 'land', cur.tx, cur.ty, { category: 'vehicle' }) && !roadAtIdx(t, i)) {
+    return { type: 'build', kind: 'road', tx: cur.tx, ty: cur.ty };
+  }
+  // Durchgehende Straße statt verstreuter Einzelflecken: jede noch unbefestigte Routenzelle wird
+  // belegt. Da planRouteInfrastructure die Zellen der Reihe nach abarbeitet, füllen sich die Tiles
+  // konsekutiv zu einem zusammenhängenden Weg/einer Serpentine; die Erreichbarkeitsprüfung in
+  // manageAccessRoutes stoppt den Bau, sobald die Fahrzeuge durchkommen.
+  if (opts.preferRoad && step > 0 && !roadAtIdx(t, i)) {
+    return { type: 'build', kind: 'road', tx: cur.tx, ty: cur.ty };
+  }
+  return null;
+}
+
+function issueRouteAction(world, player, action, applyCommand) {
+  if (action.type === 'terraform') {
+    if (terraJobPending(world, player.id, action.tx, action.ty)) return true;
+    applyCommand(world, { type: 'terraform', tx: action.tx, ty: action.ty, dir: action.dir }, player.id);
+    return true;
+  }
+  if (action.type === 'tunnel') {
+    // placeTunnel prüft Hang/Länge/Kosten selbst; bei zu wenig Erz No-op (Cooldown verhindert Spam).
+    applyCommand(world, { type: 'tunnel', sx: action.sx, sy: action.sy, ex: action.ex, ey: action.ey }, player.id);
+    return true;
+  }
+  const def = world.data.buildings[action.kind];
+  if (!def || !canAfford(player, effectiveCost(world, player.id, def))) return false;
+  if (existingOrPendingBuilding(world, player.id, action.kind, action.tx, action.ty)) return true;
+  if (!placeable(world, action.tx, action.ty, def.size || 1, def, player.id)) return false;
+  applyCommand(world, { type: 'build', building: action.kind, tx: action.tx, ty: action.ty }, player.id);
+  return true;
+}
+
+function routeWorkPending(world, owner, from, to) {
+  for (const e of world.entities.values()) {
+    if (e.owner !== owner || e.dead || e.etype !== 'building' || e.buildProgress >= 1) continue;
+    if (!['road', 'bridge', 'tunnel'].includes(e.kind)) continue;
+    if (nearLine(e.tx, e.ty, from.tx, from.ty, to.tx, to.ty, 3)) return true;
+  }
+  for (const j of world.terraJobs || []) {
+    if (j.owner === owner && nearLine(j.tx, j.ty, from.tx, from.ty, to.tx, to.ty, 3)) return true;
+  }
+  return false;
+}
+
+function existingOrPendingBuilding(world, owner, kind, tx, ty) {
+  return [...world.entities.values()].some(e => e.owner === owner && !e.dead && e.etype === 'building'
+    && e.kind === kind && e.tx === tx && e.ty === ty);
+}
+
+function terraJobPending(world, owner, tx, ty) {
+  return (world.terraJobs || []).some(j => j.owner === owner && j.tx === tx && j.ty === ty);
+}
+
+function nearLine(px, py, ax, ay, bx, by, pad) {
+  const vx = bx - ax, vy = by - ay;
+  const len2 = vx * vx + vy * vy;
+  if (len2 <= 1e-6) return Math.hypot(px - ax, py - ay) <= pad;
+  const u = Math.max(0, Math.min(1, ((px - ax) * vx + (py - ay) * vy) / len2));
+  return Math.hypot(px - (ax + vx * u), py - (ay + vy * u)) <= pad;
+}
+
+function nearestEntityToTile(list, tx, ty) {
+  return nearestBy(list, e => {
+    const [ex, ey] = worldToTile(e.x, e.y);
+    return (ex - tx) ** 2 + (ey - ty) ** 2;
+  });
+}
+
+function nearestEntityToPoint(list, x, y) {
+  return nearestBy(list, e => (e.x - x) ** 2 + (e.y - y) ** 2);
+}
+
+function entityTile(e) {
+  if (e.etype === 'building') return { tx: Math.round(e.tx + (e.size || 1) / 2), ty: Math.round(e.ty + (e.size || 1) / 2) };
+  const [tx, ty] = worldToTile(e.x, e.y);
+  return { tx, ty };
+}
+
+function nearestBy(list, scoreFn) {
+  let best = null, bestScore = Infinity;
+  for (const item of list) {
+    const score = scoreFn(item);
+    if (score < bestScore) { bestScore = score; best = item; }
   }
   return best;
 }
@@ -627,7 +1067,7 @@ function pickBuildSpot(world, hq, size, def = null) {
     const r = 4 + world.rng() * (radius / 2);
     const tx = Math.round(cx + Math.cos(ang) * r);
     const ty = Math.round(cy + Math.sin(ang) * r);
-    if (placeable(world, tx, ty, size, def)) return [tx, ty];
+    if (placeable(world, tx, ty, size, def, hq.owner)) return [tx, ty];
   }
   return null;
 }
@@ -645,7 +1085,7 @@ function pickDefensiveSpot(world, player, s, def) {
     const r = 6 + world.rng() * 5;
     const tx = Math.round(cx + Math.cos(a) * r);
     const ty = Math.round(cy + Math.sin(a) * r);
-    if (placeable(world, tx, ty, size, def)) return [tx, ty];
+    if (placeable(world, tx, ty, size, def, player.id)) return [tx, ty];
   }
   return null;
 }
@@ -671,7 +1111,7 @@ function findCoastalBuildSpot(world, owner, hq, size, def = null) {
     for (let ty = minY; ty <= maxY; ty++) for (let tx = minX; tx <= maxX; tx++) {
       const cx = tx + size / 2, cy = ty + size / 2;
       if (Math.hypot(cx - ecx, cy - ecy) > radius) continue;
-      if (!placeable(world, tx, ty, size, def)) continue;
+      if (!placeable(world, tx, ty, size, def, owner)) continue;
       if (!hasWaterNear(terrain, tx, ty, size + 2)) continue;
       const baseD = Math.hypot(cx - (hq.tx + hq.size / 2), cy - (hq.ty + hq.size / 2));
       const providerD = Math.hypot(cx - ecx, cy - ecy);
@@ -685,15 +1125,13 @@ function findCoastalBuildSpot(world, owner, hq, size, def = null) {
 function pickOilSpot(world, s, size, def = null) {
   const hq = s.hq, oil = world.terrain.oil;
   if (!hq || !oil) return null;
-  const radius = world.data.buildings.hq.buildRadius || 16;
   const cx = hq.tx + hq.size / 2, cy = hq.ty + hq.size / 2;
   let best = null, bestD = Infinity;
   for (const idx of world.terrain.oilList || []) {
     if (oil[idx] <= 0) continue;
     const tx = idx % world.terrain.w, ty = (idx / world.terrain.w) | 0;
-    if (Math.hypot(tx + size / 2 - cx, ty + size / 2 - cy) > radius) continue;
-    if (!placeable(world, tx, ty, size, def)) continue;
-    const d = (tx - hq.tx) ** 2 + (ty - hq.ty) ** 2;
+    if (!placeable(world, tx, ty, size, def, hq.owner)) continue;
+    const d = (tx + size / 2 - cx) ** 2 + (ty + size / 2 - cy) ** 2;
     if (d < bestD) { bestD = d; best = [tx, ty]; }
   }
   return best;
@@ -732,7 +1170,7 @@ function pickCoverageInfrastructureSpot(world, owner, def, predicate) {
       const cx = tx + size / 2, cy = ty + size / 2;
       if (Math.hypot(cx - ecx, cy - ecy) > radius) continue;
       if (!predicate(tx, ty)) continue;
-      if (!placeable(world, tx, ty, size, def)) continue;
+      if (!placeable(world, tx, ty, size, def, owner)) continue;
       const score = Math.hypot(cx - ecx, cy - ecy);
       if (score < bestScore) { bestScore = score; best = [tx, ty]; }
     }
@@ -740,8 +1178,8 @@ function pickCoverageInfrastructureSpot(world, owner, def, predicate) {
   return best;
 }
 
-function placeable(world, tx, ty, size, def = null) {
-  if (!canPlaceBuilding(world, tx, ty, size, def || undefined)) return false;
+function placeable(world, tx, ty, size, def = null, owner = null) {
+  if (!canPlaceBuilding(world, tx, ty, size, def || undefined, owner)) return false;
   const keepGap = !def || !(def.role === 'fortification' || def.pipe || def.bridges || def.tunnels || def.roadBuilt);
   for (const e of world.entities.values()) {
     if (e.etype !== 'building') continue;

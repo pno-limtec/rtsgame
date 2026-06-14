@@ -1,15 +1,17 @@
 // Weltzustand + gemeinsame Hilfsfunktionen (Spawning, Abfragen, Spatial-Hash, Schaden).
-import { generateTerrain, worldToTile, tileToWorld, TT, tIdx, inBounds, stampOre, coverAt, stampFortification, unstampFortification, hasWaterNear, isNavigableWater, isPassable, softenRiverBanks } from './terrain.js';
+import { generateTerrain, worldToTile, tileToWorld, TT, tIdx, inBounds, stampOre, coverAt, stampFortification, unstampFortification, hasWaterNear, isNavigableWater, isPassable, softenRiverBanks, stabilizeWaterTerrain, enforceDrainageToSea } from './terrain.js';
 import { makeRng } from './rng.js';
 import {
   TILE, DEFAULT_MAP, SUB_DETECT_RANGE, GARRISON_DAMAGE_MULT,
-  SLOPE_INFANTRY, SLOPE_VEHICLE, SLOPE_HEAVY, FOG_SIGHT_MULT, WET_DEPTH, SEA_LEVEL, SNOW_LINE,
+  SLOPE_INFANTRY, SLOPE_VEHICLE, SLOPE_HEAVY, SLOPE_BUILDER, FOG_SIGHT_MULT, WET_DEPTH, SEA_LEVEL, SNOW_LINE,
 } from './constants.js';
 import { initVet, awardXp, killValue, DEFAULT_VET } from './systems/veterancy.js';
 
 let _gid = 1;
 const START_RIVER_CLEARANCE = 18;
 const START_SUPPORT_RIVER_CLEARANCE = 10;
+const BUILD_ANCHOR_RANGE = 7;
+const ANCHORED_BUILD_ROLES = new Set(['logistics', 'defense', 'production']);
 
 export function setNextEntityId(id) {
   const n = Math.max(1, Math.floor(Number(id) || 1));
@@ -24,6 +26,8 @@ export function createWorld({ data, seed = 1, map = DEFAULT_MAP, players = [] })
     rng: makeRng(seed ^ 0x9e3779b9),
     entities: new Map(),
     players: [],
+    tunnels: [],          // verknüpfte Tunnel-Strukturen (zwei Mündungen + Röhre)
+    tunnelTiles: new Map(),// Tile-Index → Tunnel-Record (nur Innen-Tiles, für verdeckte Durchquerung)
     projectiles: [],
     events: [],          // flüchtige Effekt-Events für Clients (pro Snapshot geleert)
     spatial: null,
@@ -48,6 +52,8 @@ export function createWorld({ data, seed = 1, map = DEFAULT_MAP, players = [] })
   placeStartBases(world);
   softenRiverBanks(terrain);
   ensureInterbaseBarriers(world); // Zwischen Basen liegen natürliche Sperren statt neutraler Abkürzungen.
+  stabilizeWaterTerrain(terrain.height, terrain.w, terrain.h, terrain.water, terrain.baseWater, terrain.height0, terrain.terra);
+  enforceDrainageToSea(terrain);
   return world;
 }
 
@@ -60,12 +66,16 @@ function ensureInterbaseBarriers(world) {
   for (const e of world.entities.values()) if (e.kind === 'hq') hqs.push(e);
   hqs.sort((a, b) => a.owner - b.owner);
   const pairs = hqs.length === 2 ? 1 : hqs.length;
+  const stamped = new Set();
   for (let i = 0; i < pairs; i++) {
     const a = hqs[i], b = hqs[(i + 1) % hqs.length];
     if (a === b) continue;
-    stampInterbaseCanyon(t, hqs, a, b, i);
-    if ((i % 2) === 0) stampInterbaseRiver(t, hqs, a, b, i);
+    stampInterbaseCanyon(t, hqs, a, b, i, stamped);
+    if ((i % 2) === 0) stampInterbaseRiver(t, hqs, a, b, i, stamped);
   }
+  // Die gestanzten Canyon-/Fluss-Korridore abrunden: ihre harten, terrassierten Wände sind sonst
+  // scharfkantig. stabilizeWaterTerrain (gleich danach in createWorld) gleicht die Flusstiefe wieder an.
+  smoothBarrierCorridors(t, stamped);
   t.oreList = [];
   for (let i = 0; i < t.ore.length; i++) if (t.ore[i] > 0) t.oreList.push(i);
   if (t.oil) {
@@ -74,7 +84,7 @@ function ensureInterbaseBarriers(world) {
   }
 }
 
-function stampInterbaseCanyon(t, hqs, a, b, pairIndex) {
+function stampInterbaseCanyon(t, hqs, a, b, pairIndex, stamped = null) {
   const ax = a.tx + a.size / 2, ay = a.ty + a.size / 2;
   const bx = b.tx + b.size / 2, by = b.ty + b.size / 2;
   const dx = bx - ax, dy = by - ay;
@@ -84,6 +94,7 @@ function stampInterbaseCanyon(t, hqs, a, b, pairIndex) {
   const start = Math.max(15, dist * 0.22), end = dist - start;
   const phase = pairIndex * 1.9 + dist * 0.03;
   const valleys = t.valleys || (t.valleys = []);
+  const maxR = Math.hypot(t.w / 2, t.h / 2);
   for (let s = start; s <= end; s += 1) {
     const wiggle = Math.sin(s * 0.13 + phase) * 1.4;
     const cx = ax + ux * s + px * wiggle;
@@ -94,9 +105,12 @@ function stampInterbaseCanyon(t, hqs, a, b, pairIndex) {
       if (barrierProtected(t, hqs, x, y)) continue;
       const i = tIdx(t, x, y);
       const abs = Math.abs(side);
+      if (stamped) stamped.add(i);
       clearBarrierResources(t, i);
       if (abs <= 1) {
-        const target = Math.max(SEA_LEVEL + 0.055, Math.min(t.height[i] - 0.075, SEA_LEVEL + 0.30));
+        const rn = Math.min(1, Math.hypot(x + 0.5 - t.w / 2, y + 0.5 - t.h / 2) / maxR);
+        const seaSlope = Math.max(SEA_LEVEL + 0.055, SEA_LEVEL + 0.34 - rn * 0.30);
+        const target = Math.max(SEA_LEVEL + 0.055, Math.min(t.height[i] - 0.075, seaSlope));
         setBaseHeight(t, i, target);
         t.type[i] = target > 0.56 ? TT.HILL : TT.LAND;
         t.water[i] = Math.min(t.water[i], WET_DEPTH * 0.35);
@@ -120,7 +134,7 @@ function stampInterbaseCanyon(t, hqs, a, b, pairIndex) {
   }
 }
 
-function stampInterbaseRiver(t, hqs, a, b, pairIndex) {
+function stampInterbaseRiver(t, hqs, a, b, pairIndex, stamped = null) {
   const ax = a.tx + a.size / 2, ay = a.ty + a.size / 2;
   const bx = b.tx + b.size / 2, by = b.ty + b.size / 2;
   const dx = bx - ax, dy = by - ay;
@@ -139,6 +153,7 @@ function stampInterbaseRiver(t, hqs, a, b, pairIndex) {
       const y = Math.round(cy + uy * side);
       if (barrierProtected(t, hqs, x, y)) continue;
       const i = tIdx(t, x, y);
+      if (stamped) stamped.add(i);
       clearBarrierResources(t, i);
       const abs = Math.abs(side);
       if (abs <= 1) {
@@ -158,6 +173,54 @@ function stampInterbaseRiver(t, hqs, a, b, pairIndex) {
       }
       if (t.lakeMask) t.lakeMask[i] = 0;
     }
+  }
+}
+
+// Gestanzte Barriere-Korridore (Canyon/Fluss) abrunden: scharfe, terrassierte Wände wegglätten.
+// Glättet die Korridorzellen PLUS einen 2-Zellen-Saum (damit die Bank weich ins Umland übergeht)
+// per gewichtetem 3×3-Gauß; danach Geländetyp aus Höhe+Hang neu ableiten. Wasser bleibt erhalten —
+// die Flusstiefe richtet das anschließende stabilizeWaterTerrain wieder ein.
+function smoothBarrierCorridors(t, stamped) {
+  if (!stamped || !stamped.size) return;
+  const { w, h } = t;
+  const region = new Set();
+  for (const i of stamped) {
+    const x = i % w, y = (i / w) | 0;
+    for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) {
+      const nx = x + dx, ny = y + dy;
+      if (nx < 1 || ny < 1 || nx >= w - 1 || ny >= h - 1) continue;
+      region.add(ny * w + nx);
+    }
+  }
+  const list = [...region];
+  for (let pass = 0; pass < 4; pass++) {
+    const updates = [];
+    for (const i of list) {
+      const x = i % w, y = (i / w) | 0;
+      let sum = 0, wsum = 0;
+      for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+        const nx = x + dx, ny = y + dy;
+        if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
+        const wt = (dx === 0 && dy === 0) ? 4 : (dx === 0 || dy === 0) ? 2 : 1;
+        sum += t.height[ny * w + nx] * wt; wsum += wt;
+      }
+      updates.push([i, sum / wsum]);
+    }
+    for (const [i, v] of updates) setBaseHeight(t, i, v);
+  }
+  // Geländetyp neu ableiten (gleiche Schwellen wie generateTerrain); Wasserzellen bleiben Wasser.
+  for (const i of list) {
+    if ((t.water[i] || 0) > WET_DEPTH) { t.type[i] = TT.WATER; continue; }
+    const e = t.height[i];
+    const x = i % w;
+    let slope = 0;
+    if (x > 0) slope = Math.max(slope, Math.abs(e - t.height[i - 1]));
+    if (x < w - 1) slope = Math.max(slope, Math.abs(e - t.height[i + 1]));
+    if (i >= w) slope = Math.max(slope, Math.abs(e - t.height[i - w]));
+    if (i < w * (h - 1)) slope = Math.max(slope, Math.abs(e - t.height[i + w]));
+    t.type[i] = e < SEA_LEVEL ? TT.WATER
+      : (e > 0.86 || (e > 0.66 && slope > 0.044) || slope > 0.105) ? TT.CLIFF
+        : (e > 0.50 || slope > 0.036) ? TT.HILL : TT.LAND;
   }
 }
 
@@ -238,7 +301,7 @@ function placeStartBases(world) {
     const oreBuilder = spawnStartUnit(world, p.id, 'builder', tx + 1, ty + 3, used);  // Bagger: errichtet Gebäude und übernimmt Terraforming
     oreBuilder.resourceRole = 'ore';
     const buildBuilder = spawnStartUnit(world, p.id, 'builder', tx + 3, ty + 5, used);
-    buildBuilder.resourceRole = 'materials';
+    buildBuilder.resourceRole = 'build';
   });
 }
 
@@ -398,27 +461,63 @@ function clearOreAround(t, cx, cy, radius) {
   }
 }
 
-function overlapsBuilding(world, tx, ty, size) {
+function infrastructureCanOverlap(newDef, oldDef) {
+  if (!newDef || !oldDef) return false;
+  const newPass = !!(newDef.roadBuilt || newDef.bridges || newDef.tunnels);
+  const oldPass = !!(oldDef.roadBuilt || oldDef.bridges || oldDef.tunnels);
+  return (!!newDef.pipe && oldPass) || (!!oldDef.pipe && newPass);
+}
+
+function overlapsBuilding(world, tx, ty, size, def = null) {
   for (const e of world.entities.values()) {
     if (e.etype !== 'building') continue;
-    if (tx < e.tx + e.size && tx + size > e.tx && ty < e.ty + e.size && ty + size > e.ty) return true;
+    if (!(tx < e.tx + e.size && tx + size > e.tx && ty < e.ty + e.size && ty + size > e.ty)) continue;
+    if (infrastructureCanOverlap(def, e.def || world.data.buildings[e.kind])) continue;
+    return true;
   }
   return false;
 }
 
-export function canPlaceBuilding(world, tx, ty, size, def) {
+export function requiresBuildingAnchor(def) {
+  return !!def && (ANCHORED_BUILD_ROLES.has(def.role) || !!def.resourceDepot);
+}
+
+function isBuildAnchor(e) {
+  if (!e || e.etype !== 'building' || e.dead || e.buildProgress < 1) return false;
+  const def = e.def || {};
+  if (def.pipe || def.bridges || def.tunnels || def.roadBuilt) return false;
+  return !['terrain', 'infrastructure', 'fortification', 'hydro'].includes(def.role);
+}
+
+export function hasNearbyBuildingAnchor(world, owner, tx, ty, size) {
+  const cx = tx + size / 2, cy = ty + size / 2;
+  for (const e of world.entities.values()) {
+    if (e.owner !== owner || !isBuildAnchor(e)) continue;
+    const ecx = e.tx + e.size / 2, ecy = e.ty + e.size / 2;
+    if (Math.hypot(cx - ecx, cy - ecy) <= BUILD_ANCHOR_RANGE) return true;
+  }
+  return false;
+}
+
+export function canPlaceBuilding(world, tx, ty, size, def, owner = null) {
   const { terrain } = world;
-  const onWater = def && def.buildOnWater; // echte Wasserbau-Ausnahmen, z.B. Brücken und Werften
+  const onWater = def && def.buildOnWater; // echte Wasserbau-Ausnahmen, z.B. Pumpwerk und Werften
+  const waterOptional = def && def.waterOptional; // darf auf Land ODER Wasser (Pipeline, Straße)
+  const bridges = def && def.bridges; // Brücke überspannt JEDES Wasser (auch flache Furten)
   for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) {
     const nx = tx + x, ny = ty + y;
     if (!inBounds(terrain, nx, ny)) return false;
     const i = tIdx(terrain, nx, ny);
     const tt = terrain.type[i];
     const realWater = isNavigableWater(terrain, nx, ny);
+    const wetCell = tt === TT.WATER || terrain.water[i] > WET_DEPTH;
+    const pipeOnBridge = !!(def && def.pipe && terrain.bridge && terrain.bridge[i] > 0);
     if (tt === TT.CLIFF && !(def && def.buildOnCliff)) return false; // Tunnel dürfen in den Berg
-    if (tt === TT.WATER && !onWater) return false;
-    if (!onWater && terrain.water[i] > WET_DEPTH) return false;
-    if (onWater && !realWater) return false;
+    if (tt === TT.WATER && !onWater && !waterOptional && !pipeOnBridge) return false;
+    if (!onWater && !waterOptional && !pipeOnBridge && terrain.water[i] > WET_DEPTH) return false;
+    // Reine Wasserbauten (Pumpe/Werft) brauchen schiffbares Wasser; Brücken überspannen jedes Wasser.
+    if (onWater && !waterOptional && !bridges && !realWater) return false;
+    if (bridges && !wetCell) return false; // Brücke nur übers Wasser, nicht auf Trockenland
     if (def && def.mustStandInWater && !realWater) return false;
     if (terrain.ore[i] > 0) return false;
     if (terrain.oil && terrain.oil[i] > 0 && !(def && def.requiresOil)) return false;
@@ -432,9 +531,10 @@ export function canPlaceBuilding(world, tx, ty, size, def) {
     if (oil <= 0) return false;
   }
   // keine Überlappung mit bestehenden Gebäuden
-  if (overlapsBuilding(world, tx, ty, size)) return false;
+  if (overlapsBuilding(world, tx, ty, size, def)) return false;
   // Werften & andere Wasser-Gebäude müssen an segelbares Wasser grenzen.
   if (def && def.requiresWater && !hasWaterNear(terrain, tx, ty, size + 2)) return false;
+  if (owner != null && requiresBuildingAnchor(def) && !hasNearbyBuildingAnchor(world, owner, tx, ty, size)) return false;
   return true;
 }
 
@@ -456,7 +556,7 @@ export function spawnUnit(world, owner, kind, x, y) {
     speed: def.speed, sight: def.sight, weapon: w, cd: 0,
     order: { type: 'idle' }, path: [], pathGoal: null, target: null, repathCd: 0,
     abilities: def.abilities || [],
-    resourceRole: kind === 'builder' ? 'materials' : null,
+    resourceRole: kind === 'builder' ? 'build' : null,
     cargo: 0, harvestRate: def.harvestRate || 0, harvestCap: def.harvestCap || 0, harvestState: 'seek',
     facing: 0,
     // Luft: Bordmunition (Phase 4). 0/undefiniert = unbegrenzt (z. B. Bodeneinheiten).
@@ -469,7 +569,8 @@ export function spawnUnit(world, owner, kind, x, y) {
     // Steigungslimit je Klasse: Infanterie klettert fast überall, schwere Fahrzeuge brauchen
     // flaches Gelände oder Straßen (Serpentinen). Luft/Marine: kein Limit (Wasser regelt).
     maxSlope: def.domain !== 'land' ? Infinity
-      : def.category === 'infantry' ? SLOPE_INFANTRY
+      : def.category === 'infantry' ? Infinity   // Fußsoldaten klettern über unwegsames Gelände (Klippen/Berge/Schnee)
+      : kind === 'builder' ? SLOPE_BUILDER
       : def.heavy ? SLOPE_HEAVY : SLOPE_VEHICLE,
     // Schadensaufnahme-Faktor: <1 Rüstung der Fraktion → nimmt mehr Schaden (1/armorMult).
     dmgTakenMult: armorMult === 1 ? 1 : 1 / armorMult,
@@ -661,6 +762,7 @@ export function nearestEnemy(world, ent, range, opts = {}) {
       if (o.owner === ent.owner || o.dead) continue;
       if (o.abandoned) continue;
       if (o.hp <= 0) continue;
+      if (o.inTunnel) continue; // Einheiten in der Tunnelröhre sind verborgen → nicht anvisierbar
       if (o.submerged && !isDetectable(world, ent, o)) continue; // getauchtes U-Boot unsichtbar
       if (opts.groundOnly && o.domain === 'air') continue;
       const d = dist2(ent, o);

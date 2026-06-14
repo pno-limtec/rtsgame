@@ -20,14 +20,15 @@ const BUILD_ICONS = {
 const UNIT_ICONS = {
   engineer: 'tools', builder: 'builder', rifleman: 'infantry', at_soldier: 'rocket', aa_soldier: 'missile', scout: 'scout', tank: 'tank',
   artillery: 'artillery', rocket_launcher: 'missile', flak_track: 'missile', harvester: 'ore', truck: 'truck', recon_drone: 'drone',
-  gunship: 'gunship', bomber: 'bomber', transport_air: 'air', patrol_boat: 'boat', destroyer: 'ship',
+  gunship: 'gunship', bomber: 'bomber', cloud_seeder: 'rain', transport_air: 'air', patrol_boat: 'boat', destroyer: 'ship',
   submarine: 'submarine', underwater_drone: 'submarine', amphib_transport: 'amphib', sea_builder: 'ship', tractor: 'tractor',
 };
 const BUILDER_ROLES = [
   ['ore', 'ore', 'Erz', 'Erzabtransport: Bagger legt Erz am Abbauort auf Haufen; LKWs bringen es ins Erzlager.'],
-  ['materials', 'materials', 'Material', 'Baumaterialzulieferer: Bagger bevorzugt Baustellen und Gebäudeaufbau.'],
-  ['earth', 'down', 'Erde', 'Erde abtransportieren: Bagger bevorzugt Abgrabungen, Gräben und Aufschütt-Arbeit.'],
+  ['earth', 'down', 'Erde', 'Erdarbeiten: Bagger bevorzugt Abgrabungen, Gräben und Aufschütt-Arbeit.'],
+  ['build', 'builder', 'Bauen', 'Bauarbeiter: Bagger bevorzugt Baustellen und Gebäudeaufbau.'],
 ];
+const BUILDER_ROLE_LABEL = { ore: 'Erz', earth: 'Erde', build: 'Bauen', materials: 'Bauen' };
 const WEATHER_ICON = { clear: 'sun', rain: 'rain', storm: 'storm', fog: 'fog', drought: 'sun', night: 'moon' };
 const WEATHER_LABEL = { clear: 'klar', rain: 'Regen', storm: 'Gewitter', fog: 'Nebel', drought: 'Trockenheit' };
 const SPECTATOR_SPEEDS = [1, 2, 4, 8];
@@ -53,7 +54,7 @@ const TECH_TREE_GROUPS = [
   ['Einheiten', [
     ['Infanterie', ['engineer', 'rifleman', 'at_soldier', 'aa_soldier']],
     ['Fahrzeuge', ['builder', 'harvester', 'truck', 'tractor', 'scout', 'tank', 'flak_track', 'rocket_launcher', 'artillery']],
-    ['Luft', ['recon_drone', 'gunship', 'bomber', 'transport_air']],
+    ['Luft', ['recon_drone', 'gunship', 'bomber', 'cloud_seeder', 'transport_air']],
     ['Marine', ['patrol_boat', 'destroyer', 'submarine', 'underwater_drone', 'amphib_transport', 'sea_builder']],
   ]],
 ];
@@ -134,6 +135,7 @@ function iconSvg(name, cls = '') {
     case 'drone': return p(`<circle cx="12" cy="12" r="3" ${stroke}/><path d="M6 6l4 4M18 6l-4 4M6 18l4-4M18 18l-4-4" ${stroke}/><circle cx="5" cy="5" r="2" ${stroke}/><circle cx="19" cy="5" r="2" ${stroke}/><circle cx="5" cy="19" r="2" ${stroke}/><circle cx="19" cy="19" r="2" ${stroke}/>`);
     case 'gunship': return p(`<path d="M4 13h14l3-3M7 13l3 5h5l-2-5M9 10h7" ${stroke}/>`);
     case 'bomber': return p(`<path d="M12 3 15 21 12 18 9 21Z" ${stroke}/><path d="M3 13h18L12 8Z" ${stroke}/>`);
+    case 'rain': return p(`<path d="M7 10a5 5 0 0 1 9-3 4 4 0 0 1 1 8H7a4 4 0 0 1 0-8" ${stroke}/><path d="M8 18v3M12 17v3M16 18v3" ${stroke}/>`);
     case 'boat': return p(`<path d="M4 15h16l-3 5H7Z" ${stroke}/><path d="M12 4v11M8 9h8" ${stroke}/>`);
     case 'submarine': return p(`<path d="M4 15c3-5 13-5 16 0-3 5-13 5-16 0Z" ${stroke}/><path d="M11 10V6h4v4" ${stroke}/>`);
     case 'amphib': return p(`<path d="M4 14h16l-3 5H7Z" ${stroke}/><path d="M8 14V8h8v6M6 20c2-1 4-1 6 0s4 1 6 0" ${stroke}/>`);
@@ -276,7 +278,10 @@ export class UI {
     this.net = net; this.input = input; this.data = data;
     this.techSelected = { type: 'building', kind: 'hq' };
     this.techTreeOpen = false;
+    try { this.helpOpen = localStorage.getItem('if_help_open') === '1'; } catch { this.helpOpen = false; }
+    this.previewRenderer = null;
     this.warnEl = document.getElementById('warn');
+    this.helpPanel = document.getElementById('helppanel');
     this.lastWarn = {};
     this.selPanel = document.getElementById('selpanel');
     this.minimap = document.getElementById('minimap');
@@ -320,7 +325,18 @@ export class UI {
     this.net.on('joined', (m) => { if (m.ok) lobby.style.display = 'none'; });
   }
 
-  setupMenu(renderer) {
+  setupMenu(renderer, audio = null) {
+    this.previewRenderer = renderer || null;
+    this.audio = audio || this.audio || null;
+    if (renderer) {
+      const previousReady = renderer.onModelPreviewsReady;
+      renderer.onModelPreviewsReady = (kinds) => {
+        previousReady?.(kinds);
+        this._bbHtml = null;
+        this.renderBuildbar();
+        if (this.techTreeOpen) this.renderTechTree();
+      };
+    }
     const btn = document.getElementById('menubtn');
     const menu = document.getElementById('gamemenu');
     const status = document.getElementById('menustatus');
@@ -398,6 +414,21 @@ export class UI {
     shadowBox?.addEventListener('change', applyGfx);
     lightBox?.addEventListener('change', applyGfx);
 
+    // Ton: Musik und Soundeffekte getrennt schaltbar (Einstellung wird im Audio-Modul gespeichert).
+    const musicBox = document.getElementById('audiomusic');
+    const sfxBox = document.getElementById('audiosfx');
+    const audioMod = this.audio;
+    if (musicBox) musicBox.checked = audioMod ? audioMod.musicEnabled : true;
+    if (sfxBox) sfxBox.checked = audioMod ? audioMod.sfxEnabled : true;
+    musicBox?.addEventListener('change', () => {
+      audioMod?.setMusicEnabled(!!musicBox.checked);
+      setStatus(musicBox.checked ? 'Musik eingeschaltet.' : 'Musik ausgeschaltet.');
+    });
+    sfxBox?.addEventListener('change', () => {
+      audioMod?.setSfxEnabled(!!sfxBox.checked);
+      setStatus(sfxBox.checked ? 'Soundeffekte eingeschaltet.' : 'Soundeffekte ausgeschaltet.');
+    });
+
     this.net.on('saveGame', (m) => {
       this.downloadSave(m.save, m.filename);
       setStatus('Spielstand wurde als Download angeboten.');
@@ -448,6 +479,7 @@ export class UI {
     const map = document.getElementById('techmap');
     if (!map) return;
     map.innerHTML = this.techTreeHtml();
+    this.renderModelPreviews(map);
     this.renderTechDetail();
     map.querySelectorAll('[data-tech-type][data-tech-kind]').forEach(btn => {
       btn.onclick = () => {
@@ -477,7 +509,7 @@ export class UI {
       ? [CATEGORY_LABEL[def.category] || def.category, DOMAIN_LABEL[def.domain] || def.domain].filter(Boolean).join(' · ')
       : (ROLE_LABEL[def.role] || def.role || 'Gebäude');
     return `<button class="technode ${selected ? 'selected' : ''}" type="button" data-tech-type="${type}" data-tech-kind="${escAttr(kind)}" aria-pressed="${selected ? 'true' : 'false'}" title="${escAttr(def.desc || def.label || kind)}">`
-      + `<span class="techicon" aria-hidden="true">${iconSvg(icon)}</span>`
+      + `<span class="techthumb" aria-hidden="true">${this.modelPreviewHtml(type, kind, 'nodemodel')}<span class="techicon mini">${iconSvg(icon)}</span></span>`
       + `<span><span class="techlabel">${escAttr(def.label || kind)}</span><span class="techmeta">${escAttr(meta)}</span></span>`
       + `</button>`;
   }
@@ -508,7 +540,7 @@ export class UI {
     const strengths = techStrengths(sel.type, def, weapon, this.data).map(v => `<li>${escAttr(v)}</li>`).join('');
     const weaknesses = techWeaknesses(sel.type, def, weapon).map(v => `<li>${escAttr(v)}</li>`).join('');
     detail.innerHTML = `<div class="detailtop">`
-      + `<div class="detailicon" aria-hidden="true">${iconSvg(icon)}</div>`
+      + `<div class="detailpreview" aria-hidden="true">${this.modelPreviewHtml(sel.type, sel.kind, 'detailmodel')}<span class="detailicon mini">${iconSvg(icon)}</span></div>`
       + `<div><div class="title">${escAttr(def.label || sel.kind)}</div><div class="kind">${kindLabel} · ${escAttr(sel.kind)}</div></div>`
       + `</div>`
       + `<div class="techchips">${chips.map(c => `<span class="techchip">${escAttr(c)}</span>`).join('')}</div>`
@@ -517,6 +549,34 @@ export class UI {
       + `<h3>Vorteile</h3><ul class="techlist">${strengths}</ul>`
       + `<h3>Nachteile</h3><ul class="techlist">${weaknesses}</ul>`
       + `<h3>Kosten</h3><div class="techchips">${techCostHtml(def.cost)}</div>`;
+    this.renderModelPreviews(detail);
+  }
+
+  modelPreviewHtml(type, kind, cls = '') {
+    return `<img class="modelpreview ${escAttr(cls)}" data-preview-type="${escAttr(type)}" data-preview-kind="${escAttr(kind)}" alt="" width="96" height="76">`;
+  }
+
+  previewColor() {
+    const seat = this.net.spectator ? this.net.viewSeat : this.net.seat;
+    const player = this.net.players.find(p => p.id === seat) || this.net.players[0];
+    return player?.color || '#36c5f0';
+  }
+
+  renderModelPreviews(root = document) {
+    if (!this.previewRenderer?.modelPreviewDataUrl) return;
+    const color = this.previewColor();
+    for (const img of root.querySelectorAll('img[data-preview-type][data-preview-kind]')) {
+      const type = img.dataset.previewType;
+      const kind = img.dataset.previewKind;
+      const def = type === 'unit' ? this.data.units?.[kind] : this.data.buildings?.[kind];
+      if (!def) continue;
+      const key = `${type}:${kind}:${color}`;
+      if (img.dataset.previewKey === key && img.src) continue;
+      const url = this.previewRenderer.modelPreviewDataUrl(type, kind, def, color);
+      if (!url) continue;
+      img.src = url;
+      img.dataset.previewKey = key;
+    }
   }
 
   readGraphicsOptions() {
@@ -569,6 +629,20 @@ export class UI {
     const canControl = !!controls.aiOnly;
     const speedBtn = document.getElementById('spectatorspeed');
     const timeBtn = document.getElementById('spectatortime');
+    const takeBtn = document.getElementById('spectatortakeover');
+    const viewed = this.net.players.find(p => p.id === cur);
+    if (takeBtn) {
+      const canTake = !!viewed && !viewed.defeated && viewed.controller === 'ai';
+      takeBtn.hidden = !canTake;
+      takeBtn.textContent = 'Übernehmen';
+      takeBtn.title = canTake
+        ? `${this.data.factions[viewed.faction]?.label || 'KI-Spieler'} übernehmen`
+        : 'Nur freie KI-Sitze können übernommen werden';
+      takeBtn.onclick = () => {
+        const name = document.getElementById('pname')?.value || this.net.name || 'Spieler';
+        this.net.takeoverSeat(cur, name);
+      };
+    }
     if (speedBtn) {
       const speed = SPECTATOR_SPEEDS.includes(controls.speed) ? controls.speed : 1;
       speedBtn.hidden = !canControl;
@@ -613,9 +687,11 @@ export class UI {
       const nextIcon = next ? iconSvg(WEATHER_ICON[next[0]] || 'sun', 'tinyicon') : '';
       envHtml = `<span class="sep"></span><span class="res weather" title="${escAttr(tip)}">${iconSvg(wIcon, 'topicon')} <b>${hh}:${mm}</b><span class="forecast">${nextIcon}<span class="wtime">${nextIn}</span></span></span>`;
     }
-    if (!me || !me.res) { bar.innerHTML = `<span class="res">Zuschauer</span>${envHtml}`; return; }
+    const helpHtml = `<span class="sep"></span>${this.helpButtonHtml()}`;
+    if (!me || !me.res) { bar.innerHTML = `<span class="res">Zuschauer</span>${envHtml}${helpHtml}`; this.bindTopActions(); return; }
     if (this.net.spectator) {
-      bar.innerHTML = `<span class="res">Zuschauer</span><span class="sep"></span><span class="res"><span class="dot" style="background:${me.color}"></span><b>Sicht: ${this.data.factions[me.faction].label}</b></span>${envHtml}`;
+      bar.innerHTML = `<span class="res">Zuschauer</span><span class="sep"></span><span class="res"><span class="dot" style="background:${me.color}"></span><b>Sicht: ${this.data.factions[me.faction].label}</b></span>${envHtml}${helpHtml}`;
+      this.bindTopActions();
       return;
     }
     let html = `<span class="res"><span class="dot" style="background:${me.color}"></span><b>${this.data.factions[me.faction].label}</b></span><span class="sep"></span>`;
@@ -632,7 +708,194 @@ export class UI {
       html += `<span class="res" title="Energie: Erzeugung/Verbrauch (nachts höher — Beleuchtung)">${resIcon('energy')} <b class="${def ? 'low' : ''}">${me.energy.p}/${me.energy.c}</b></span>`;
     }
     html += envHtml;
+    html += `<span class="sep"></span>${this.helpButtonHtml()}<button id="releasecontrol" class="topaction" type="button" title="Sitz an die KI zurückgeben und weiter zuschauen">Ausklinken</button>`;
     bar.innerHTML = html;
+    this.bindTopActions();
+  }
+
+  bindTopActions() {
+    const help = document.getElementById('helpbtn');
+    if (help) help.onclick = () => {
+      this.helpOpen = !this.helpOpen;
+      try { localStorage.setItem('if_help_open', this.helpOpen ? '1' : '0'); } catch {}
+      this.renderTop();
+      this.renderAdvisor();
+    };
+    const release = document.getElementById('releasecontrol');
+    if (release) release.onclick = () => this.net.releaseSeat();
+    this.renderAdvisor();
+  }
+
+  helpButtonHtml() {
+    return `<button id="helpbtn" class="topaction ${this.helpOpen ? 'active' : ''}" type="button" aria-pressed="${this.helpOpen ? 'true' : 'false'}" title="Bauvorschlag anzeigen">Hilfe</button>`;
+  }
+
+  renderAdvisor() {
+    const panel = this.helpPanel || (this.helpPanel = document.getElementById('helppanel'));
+    if (!panel) return;
+    panel.hidden = !this.helpOpen;
+    if (!this.helpOpen) return;
+    const rec = this.nextAdvisorRecommendation();
+    const def = rec.type === 'unit' ? this.data.units?.[rec.kind] : this.data.buildings?.[rec.kind];
+    const icon = rec.type === 'unit' ? (UNIT_ICONS[rec.kind] || 'box') : (BUILD_ICONS[rec.kind] || 'box');
+    const cost = def ? this.advisorCostHtml(def.cost || {}) : '';
+    const note = def ? this.advisorCostNote(def.cost || {}) : '';
+    panel.innerHTML = `<div class="advisorhead"><b>Nächster Schritt</b><span class="advisortype">${escAttr(rec.verb || 'Empfehlung')} · ${rec.type === 'unit' ? 'Einheit' : 'Gebäude'}</span></div>`
+      + `<div class="advisoritem"><span class="advisoricon">${iconSvg(icon)}</span><span><span class="advisorlabel">${escAttr(rec.label)}</span><span class="advisorcost">${cost}</span></span></div>`
+      + `<p class="advisorwhy"><b>Warum:</b> ${escAttr(rec.why)}</p>`
+      + `<div class="advisornote">${escAttr([rec.note, note].filter(Boolean).join(' '))}</div>`;
+  }
+
+  advisorCostHtml(cost) {
+    const entries = Object.entries(cost || {}).filter(([, v]) => v);
+    if (!entries.length) return 'Kostenlos';
+    const me = this.advisorPlayer();
+    return entries.map(([k, v]) => {
+      const have = me?.res?.[k] ?? 0;
+      const cls = have < v ? 'low' : '';
+      return `<span class="costitem ${cls}">${resIcon(k, 'costicon')}${escAttr(v)}</span>`;
+    }).join(' ');
+  }
+
+  advisorCostNote(cost) {
+    const me = this.advisorPlayer();
+    if (!me?.res) return '';
+    const missing = Object.entries(cost || {})
+      .filter(([, v]) => v)
+      .map(([k, v]) => [k, Math.max(0, v - (me.res[k] || 0))])
+      .filter(([, v]) => v > 0);
+    if (!missing.length) return 'Ressourcen sind vorhanden.';
+    return `Noch sparen: ${missing.map(([k, v]) => `${Math.ceil(v)} ${RESOURCE_LABEL[k] || k}`).join(', ')}.`;
+  }
+
+  advisorPlayer() {
+    const seat = this.net.spectator ? this.net.viewSeat : this.net.seat;
+    return this.net.players.find(p => p.id === seat);
+  }
+
+  nextAdvisorRecommendation() {
+    const me = this.advisorPlayer();
+    if (!me) return { type: 'building', kind: 'hq', label: 'Bauhof', verb: 'Beitreten', why: 'Wähle zuerst einen Sitz, damit die Hilfe deine Fraktion bewerten kann.' };
+    const seat = me.id;
+    const ents = this.net.entities(1);
+    const own = ents.filter(e => e.owner === seat && !e.dead);
+    const ownBuildings = own.filter(e => e.etype === 'building');
+    const readyBuildings = ownBuildings.filter(e => (e.buildProgress ?? 1) >= 1);
+    const ownUnits = own.filter(e => e.etype === 'unit' && !e.abandoned);
+    const enemyUnits = ents.filter(e => e.owner !== seat && e.owner >= 0 && e.etype === 'unit');
+    const res = me.res || {};
+    const cap = me.cap || {};
+    const countB = (kind) => readyBuildings.filter(e => e.kind === kind).length;
+    const anyB = (kind) => ownBuildings.some(e => e.kind === kind);
+    const pendingB = (kind) => ownBuildings.some(e => e.kind === kind && (e.buildProgress ?? 1) < 1);
+    const countU = (kind) => ownUnits.filter(e => e.kind === kind).length;
+    const unitsBy = (pred) => ownUnits.filter(e => pred(this.data.units[e.kind] || {}, e)).length;
+    const hasWaterMap = !!(this.net.init?.terrain?.waterDepth?.length);
+    const hasReadyProducer = (kind) => !!this.readyProducerForUnit(kind, readyBuildings);
+    const recBuilding = (kind, why, note = '') => {
+      const def = this.data.buildings[kind] || {};
+      return { type: 'building', kind, label: def.label || kind, verb: pendingB(kind) ? 'Fertigstellen' : 'Baue', why, note };
+    };
+    const recUnit = (kind, why, note = '') => {
+      const def = this.data.units[kind] || {};
+      const prod = this.readyProducerForUnit(kind, readyBuildings);
+      if (prod) return { type: 'unit', kind, label: def.label || kind, verb: 'Produziere', why, note: note || `Produktion: ${this.data.buildings[prod.kind]?.label || prod.kind}.` };
+      const unlock = this.firstProducerKindForUnit(kind);
+      return unlock ? recBuilding(unlock, `${this.data.units[kind]?.label || kind} wird gebraucht, aber die passende Produktion fehlt noch.`, `Schaltet diese Einheit frei.`) : null;
+    };
+    const first = (...items) => items.find(Boolean);
+    const military = ownUnits.filter(e => this.data.units[e.kind]?.weapon).length;
+    const vehicles = unitsBy(d => d.category === 'vehicle' && d.weapon);
+    const infantry = unitsBy(d => d.category === 'infantry' && d.weapon);
+    const naval = unitsBy(d => d.category === 'naval');
+    const air = unitsBy(d => d.category === 'air');
+    const enemyAir = enemyUnits.some(e => this.data.units[e.kind]?.domain === 'air');
+    const enemyVehicle = enemyUnits.some(e => this.data.units[e.kind]?.category === 'vehicle');
+    const enemyNaval = enemyUnits.some(e => ['water', 'amphibious'].includes(this.data.units[e.kind]?.domain));
+    const enemySub = enemyUnits.some(e => this.data.units[e.kind]?.submerged);
+    const antiAir = own.filter(e => this.entityHitsTarget(e, 'air')).length;
+    const defenses = readyBuildings.filter(e => this.data.buildings[e.kind]?.role === 'defense').length;
+
+    if (me.defeated) return recBuilding('hq', 'Deine Fraktion ist besiegt; in einem neuen Spiel ist der Bauhof wieder der Startpunkt.');
+    if (!countB('hq')) return recBuilding('hq', 'Ohne Bauhof fehlen Bauradius, integrierte Lager und Ersatz-Bagger.');
+    if (countU('builder') < 1) return recUnit('builder', 'Ohne Bagger werden Gebäude, Gräben, Wälle und Erdarbeiten nicht fertig.');
+    if (me.energy && me.energy.p < me.energy.c) {
+      const kind = countB('oil_depot') && countB('oil_derrick') ? 'power_plant' : 'solar_plant';
+      return recBuilding(kind, `Energiedefizit (${me.energy.p}/${me.energy.c}) drosselt Produktion und schaltet Gebäude ab.`);
+    }
+    if ((res.water || 0) < 30 || (cap.water && (res.water || 0) > cap.water * 0.82)) {
+      return first(
+        !countB('water_tower') && recBuilding('water_tower', 'Wasser ist knapp oder das kleine Bauhoflager läuft voll; ein Wasserturm schafft Kapazität.'),
+        !countB('water_pump') && recBuilding('water_pump', 'Ohne Pumpwerk kommt kein neues Wasser in das Pipeline-Netz.'),
+        !anyB('pipe') && recBuilding('pipe', 'Pumpwerk und Wasserturm brauchen eine durchgehende Pipeline, sonst fördert das Pumpwerk nicht.'),
+      ) || recBuilding('pipe', 'Prüfe die Leitung zwischen Pumpwerk und Wasserturm; Leitungsbrüche stoppen Wasserförderung.');
+    }
+    if (cap.ore && (res.ore || 0) > cap.ore * 0.82 && !countB('ore_depot')) {
+      return recBuilding('ore_depot', 'Das Erz nähert sich der Lagergrenze; ein Erzlager verhindert Stillstand beim Abtransport.');
+    }
+    if (cap.materials && (res.materials || 0) > cap.materials * 0.75 && !countB('material_depot')) {
+      return recBuilding('material_depot', 'Aushub und Erde brauchen Lagerplatz, sonst verpufft wertvolles Baumaterial.');
+    }
+    if (countU('builder') < 2) return recUnit('builder', 'Ein zweiter Bagger verhindert Bau-Deadlocks und kann getrennt Erz, Erde oder Gebäude übernehmen.');
+    if (countU('truck') < 2) return recUnit('truck', 'LKWs holen Erz- und Erdhaufen ab; ohne sie stauen sich Rohstoffe vor Ort.');
+    if (!countB('ore_depot')) return recBuilding('ore_depot', 'Erzhaufen brauchen eine Annahmestelle, damit LKWs Erz zuverlässig einlagern.');
+    if (!countB('refinery')) return recBuilding('refinery', 'Mehr Erzkapazität und Verarbeitung stabilisieren den Hauptrohstofffluss.');
+    if (!countB('barracks') && military < 6) return recBuilding('barracks', 'Du brauchst frühe Infanterie für Sicht, Deckung und günstige Verteidigung.');
+    if (countB('barracks') && infantry < 4) return recUnit('rifleman', 'Günstige Schützen halten Gräben, decken Bagger und sichern die Basis.');
+    if (!countB('factory')) return recBuilding('factory', 'Fahrzeuge sind nötig, um Angriffe, Erzlogistik und Frontbewegung zu tragen.');
+    if (enemyAir && antiAir < 2) {
+      return first(
+        hasReadyProducer('flak_track') && recUnit('flak_track', 'Der Gegner hat Luftziele; mobile Flak schützt Fahrzeuge und Bagger.'),
+        hasReadyProducer('aa_soldier') && recUnit('aa_soldier', 'Der Gegner hat Luftziele; FlaRak-Trupps sind die schnellste Antwort.'),
+        recBuilding('flak_turret', 'Der Gegner hat Luftziele; eine stationäre Flak schützt die Basis.'),
+      );
+    }
+    if (enemySub && !countB('sonar')) return recBuilding('sonar', 'Getauchte Einheiten werden ohne Sonar erst sehr spät sichtbar.');
+    if (enemyVehicle && countB('barracks') && !countU('at_soldier')) return recUnit('at_soldier', 'Gegen Fahrzeuge fehlt günstige Panzerabwehr-Infanterie.');
+    if (countB('factory') && vehicles < 3) return recUnit(vehicles ? 'tank' : 'scout', vehicles ? 'Mehr Panzer geben deiner Armee Halt gegen Fahrzeuge und Gebäude.' : 'Ein Späher liefert Sicht und reagiert schnell auf Lücken.');
+    if (((res.ammo || 0) < 90 || (res.fuel || 0) < 90) && !countB('depot')) {
+      return recBuilding('depot', 'Munition oder Treibstoff werden knapp; ein Nachschubdepot erzeugt und puffert beides.');
+    }
+    if ((res.fuel || 0) < 160 || countB('power_plant')) {
+      const oilRec = first(
+        !countB('oil_depot') && recBuilding('oil_depot', 'Öl braucht ein Depot, bevor Bohrtürme den Treibstofffluss sinnvoll stützen.'),
+        !countB('oil_derrick') && recBuilding('oil_derrick', 'Bohrtürme liefern Öl, das automatisch zu Treibstoff wird.'),
+        !anyB('pipe') && recBuilding('pipe', 'Bohrtürme fördern erst mit Pipeline zum Öldepot zuverlässig.'),
+      );
+      if (oilRec) return oilRec;
+    }
+    if (hasWaterMap && enemyNaval && !countB('shipyard')) return recBuilding('shipyard', 'Der Gegner nutzt Wasser; ohne Werft fehlen eigene Schiffe und Flusskontrolle.');
+    if (hasWaterMap && countB('shipyard') && naval < 2) return recUnit(naval ? 'destroyer' : 'patrol_boat', 'Schiffe sichern Flüsse, Küsten und Brücken gegen Umgehungen.');
+    if (defenses < 2 && military >= 6) return recBuilding(defenses ? 'turret' : 'mg_turret', 'Ein paar Türme fangen Gegenangriffe ab und schützen Wirtschaft und Bauhof.');
+    if (!countB('airbase') && vehicles >= 5 && (res.ore || 0) > 1200) return recBuilding('airbase', 'Luft ist teuer, aber im späteren Spiel gut für Aufklärung, Druck und Spezialwaffen.');
+    if (countB('airbase') && air < 1) return recUnit('recon_drone', 'Eine Drohne erweitert Sicht und findet Angriffe, bevor sie in die Basis rollen.');
+    if (countB('factory')) return recUnit(enemyAir ? 'flak_track' : 'rocket_launcher', enemyAir ? 'Zusätzliche mobile Flak bleibt nützlich gegen Luftdruck.' : 'Raketenwerfer brechen Stellungen und bestrafen langsame Fahrzeuggruppen.');
+    if (countB('barracks')) return recUnit('aa_soldier', 'Mehr spezialisierte Infanterie gibt günstige Antworten auf Luft und gemischte Angriffe.');
+    return recBuilding('road', 'Straßen sind günstig, beschleunigen Fahrzeuge und helfen über steilere Hänge.');
+  }
+
+  readyProducerForUnit(kind, readyBuildings) {
+    const udef = this.data.units?.[kind];
+    if (!udef) return null;
+    return readyBuildings.find(b => {
+      const bdef = this.data.buildings?.[b.kind];
+      return (bdef?.produces_units || []).includes(kind) || (!!bdef?.produces_category && bdef.produces_category === udef.category);
+    }) || null;
+  }
+
+  firstProducerKindForUnit(kind) {
+    const udef = this.data.units?.[kind];
+    if (!udef) return null;
+    for (const [bkind, bdef] of Object.entries(this.data.buildings || {})) {
+      if ((bdef.produces_units || []).includes(kind) || (!!bdef.produces_category && bdef.produces_category === udef.category)) return bkind;
+    }
+    return null;
+  }
+
+  entityHitsTarget(e, target) {
+    const def = e.etype === 'unit' ? this.data.units?.[e.kind] : this.data.buildings?.[e.kind];
+    const weapon = def?.weapon ? this.data.weapons?.[def.weapon] : null;
+    return (weapon?.vs?.[target] || 0) >= 1;
   }
 
   // --- Bauleiste / Produktion ---
@@ -662,9 +925,12 @@ export class UI {
       extra,
     ].filter(Boolean).join('\n');
     const esc = (s) => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-    const buttonHtml = ({ cls = '', attrs = '', icon, label, cost, title }) =>
+    const buttonHtml = ({ cls = '', attrs = '', icon, label, cost, title, previewType = '', previewKind = '' }) =>
       `<button class="bbtn ${cls}" ${attrs} title="${esc(title)}" aria-label="${esc(label)}">`
-      + `<span class="bicon" aria-hidden="true">${iconSvg(icon || 'box')}</span><span class="bmeta"><span class="blabel">${esc(label)}</span><span class="cost">${cost}</span></span></button>`;
+      + (previewType && previewKind
+        ? `<span class="bthumb" aria-hidden="true">${this.modelPreviewHtml(previewType, previewKind, 'buttonmodel')}<span class="bicon mini">${iconSvg(icon || 'box')}</span></span>`
+        : `<span class="bicon" aria-hidden="true">${iconSvg(icon || 'box')}</span>`)
+      + `<span class="bmeta"><span class="blabel">${esc(label)}</span><span class="cost">${cost}</span></span></button>`;
     const canPay = (cost) => (me.res?.ore ?? 0) >= (cost.ore || 0)
       && (me.res?.materials ?? 0) >= (cost.materials || 0)
       && (me.res?.ore ?? 0) >= (cost.ore || 0)
@@ -685,6 +951,8 @@ export class UI {
           label: def.label,
           cost: costHtml(def.cost),
           title: tooltip(def.label, def),
+          previewType: 'building',
+          previewKind: kind,
         });
       }
       html += '</div></details>';
@@ -713,6 +981,8 @@ export class UI {
           label: def.label,
           cost: costHtml(def.cost),
           title: tooltip(def.label, def, def.upkeep ? `Unterhalt: ${costText(def.upkeep)}` : ''),
+          previewType: 'unit',
+          previewKind: kind,
         });
       }
       html += '</div></details>';
@@ -724,6 +994,7 @@ export class UI {
     this._bbHtml = html;
     const openGroups = new Set([...bar.querySelectorAll('details[open] > summary')].map(s => s.textContent));
     bar.innerHTML = html;
+    this.renderModelPreviews(bar);
     if (openGroups.size) for (const d of bar.querySelectorAll('details')) {
       const s = d.querySelector('summary');
       if (s && openGroups.has(s.textContent)) d.open = true;
@@ -758,11 +1029,13 @@ export class UI {
       if (e.etype === 'building' && e.queue) html += `<span class="chip" title="Produktionswarteschlange">Queue ${e.queue}</span>`;
       if (e.etype === 'building' && e.powered === false) html += '<span class="chip" title="Lastabwurf">ohne Strom</span>';
       if (e.etype === 'unit' && e.cargo) html += `<span class="chip" title="Ladung">Ladung ${e.cargo}</span>`;
-      if (e.etype === 'unit' && e.role) html += `<span class="chip" title="Bagger/LKW-Rolle">${escAttr(e.role)}</span>`;
+      if (e.etype === 'unit' && e.role) html += `<span class="chip" title="Bagger/LKW-Rolle">${escAttr(BUILDER_ROLE_LABEL[e.role] || e.role)}</span>`;
     }
     const builders = ents.filter(e => e.kind === 'builder' && e.owner === this.net.seat);
     if (builders.length) {
-      const active = builders.every(b => b.role === builders[0].role) ? builders[0].role : null;
+      const roleOf = (b) => b.role === 'materials' ? 'build' : b.role;
+      const firstRole = roleOf(builders[0]);
+      const active = builders.every(b => roleOf(b) === firstRole) ? firstRole : null;
       html += '<div class="rolebar">';
       for (const [role, icon, label, tip] of BUILDER_ROLES) {
         html += `<button class="rolebtn ${active === role ? 'active' : ''}" data-role="${role}" title="${tip}">${iconSvg(icon, 'roleicon')} ${label}</button>`;

@@ -9,7 +9,8 @@ const TRANSPORT_CAP = 6;
 const PILE_KINDS = new Set(['earth_pile', 'ore_pile']);
 const TERRA_STROKE_RADIUS = 1.12;
 // Linien-Bau: diese Gebäude (und Terraform-Aufträge) zieht man per Start→Endpunkt auf.
-const LINE_KINDS = new Set(['wall', 'trench', 'road', 'pipe', 'dam', 'tunnel']);
+const LINE_KINDS = new Set(['wall', 'trench', 'road', 'pipe', 'dam', 'tunnel', 'bridge']);
+const DOUBLE_CLICK_MS = 320;     // Doppelklick-Fenster: alle sichtbaren Einheiten desselben Typs wählen
 
 export class Input {
   constructor(net, renderer, data = null) {
@@ -73,7 +74,7 @@ export class Input {
       } else if (e.button === 2) {
         // Rechte Taste: gedrückt-ziehen = Karte verschieben (Pan); kurzer Klick = Befehl/Bau abbrechen.
         // Entscheidung erst beim Loslassen (movedThreshold), damit Befehle weiter funktionieren.
-        this.rpan = { sx: e.clientX, sy: e.clientY, lx: e.clientX, ly: e.clientY, moved: false, shift: e.shiftKey };
+        this.rpan = { sx: e.clientX, sy: e.clientY, lx: e.clientX, ly: e.clientY, moved: false, shift: e.shiftKey, special: e.ctrlKey || e.metaKey };
       }
     });
     addEventListener('mousemove', (e) => {
@@ -105,10 +106,15 @@ export class Input {
         if (!this.rpan.moved) {  // reiner Klick → Befehl bzw. Bau-Abbruch
           if (!this.canControl()) { /* Zuschauer: Rechtsklick ohne Befehl. */ }
           else if (this.buildMode) { this.cancelBuild(); }
-          else this.issueCommand(this.rpan.sx, this.rpan.sy, this.rpan.shift);
+          else this.issueCommand(this.rpan.sx, this.rpan.sy, this.rpan.shift, this.rpan.special || e.ctrlKey || e.metaKey);
         }
         this.rpan = null;
       }
+    });
+    // Doppelklick auf eine Einheit: alle sichtbaren Einheiten desselben Typs (gleicher Besitzer) wählen.
+    el.addEventListener('dblclick', (e) => {
+      if (e.button !== 0 || this.buildMode || !this.canSelect()) return;
+      this.selectSameType(e.clientX, e.clientY, e.shiftKey);
     });
     el.addEventListener('wheel', (e) => {
       e.preventDefault();
@@ -179,7 +185,30 @@ export class Input {
     this.onSelectionChange && this.onSelectionChange();
   }
 
-  issueCommand(cx, cy, shift) {
+  // Doppelklick: die angeklickte Einheit bestimmen und ALLE aktuell sichtbaren Einheiten desselben
+  // Typs (kind) und Besitzers in die Auswahl aufnehmen (Standard-RTS-Verhalten).
+  selectSameType(cx, cy, additive = false) {
+    const candidates = this.selectableEntities();
+    const onScreen = (s) => !s.behind && s.x >= 0 && s.y >= 0 && s.x <= innerWidth && s.y <= innerHeight;
+    let best = null, bestD = Infinity;
+    for (const e of candidates) {
+      if (e.etype !== 'unit') continue;
+      const s = this.entityScreen(e);
+      if (!onScreen(s)) continue;
+      const dd = (s.x - cx) ** 2 + (s.y - cy) ** 2;
+      if (dd <= this.pickRadiusSq(e, 32) && dd < bestD) { bestD = dd; best = e; }
+    }
+    if (!best) return;
+    if (!additive) this.selected.clear();
+    for (const e of candidates) {
+      if (e.etype !== 'unit' || e.kind !== best.kind || e.owner !== best.owner) continue;
+      const s = this.entityScreen(e);
+      if (onScreen(s)) this.selected.add(e.id);
+    }
+    this.onSelectionChange && this.onSelectionChange();
+  }
+
+  issueCommand(cx, cy, shift, special = false) {
     if (!this.canControl()) return;
     if (!this.selected.size) return;
     const byId = new Map(this.allEntities().map(e => [e.id, e]));
@@ -209,6 +238,11 @@ export class Input {
       return e && e.etype === 'unit';
     });
     if (!sel.length) return;
+    const g = this.renderer.groundPoint(cx, cy);
+    if (special && g) {
+      const seeders = sel.filter(id => byId.get(id)?.kind === 'cloud_seeder');
+      if (seeders.length) { this.net.cmd({ type: 'seedCloud', units: seeders, x: g.x, y: g.z }); return; }
+    }
     if (towTarget) {
       const tractors = sel.filter(id => byId.get(id)?.kind === 'tractor');
       if (tractors.length) { this.net.cmd({ type: 'tow', units: tractors, targetId: towTarget.id }); return; }
@@ -228,7 +262,6 @@ export class Input {
       });
       if (helpers.length) { this.net.cmd({ type: 'assist', units: helpers, target: assistTarget.id }); return; }
     }
-    const g = this.renderer.groundPoint(cx, cy);
     if (!g) return;
     // Klick nahe einem geplanten Terraform-Auftrag (blaue Markierung) → Bagger übernimmt ihn.
     const tx = Math.floor(g.x / TILE), ty = Math.floor(g.z / TILE);
@@ -287,9 +320,11 @@ export class Input {
       const depth = r.waterDepth?.[i] || 0;
       const wet = r.terrainType?.[i] === 3 || depth > CLIENT_WET_DEPTH;
       const realWater = depth >= CLIENT_NAVIGABLE_DEPTH;
+      const waterOptional = def?.waterOptional;     // Pipeline/Straße: Land ODER Wasser
+      if (def?.bridges) { if (!wet) return true; continue; } // Brücke nur übers Wasser (jede Tiefe)
       if (def?.buildOnWater && !realWater) return true;
       if (def?.mustStandInWater && !realWater) return true;
-      if (!def?.buildOnWater && wet) return true;
+      if (!def?.buildOnWater && !waterOptional && wet) return true;
     }
     return false;
   }

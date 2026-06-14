@@ -178,7 +178,8 @@ function hydrateUnit(e, world, data) {
   e.pathGoal = e.pathGoal || null;
   e.target = Number.isFinite(Number(e.target)) ? e.target : null;
   e.abilities = Array.isArray(e.abilities) ? e.abilities : (def.abilities || []);
-  e.resourceRole = e.resourceRole ?? (e.kind === 'builder' ? 'materials' : null);
+  if (e.resourceRole === 'materials') e.resourceRole = 'build';
+  e.resourceRole = e.resourceRole ?? (e.kind === 'builder' ? 'build' : null);
   e.harvestRate = e.harvestRate || def.harvestRate || 0;
   e.harvestCap = e.harvestCap || def.harvestCap || 0;
   e.facing = e.facing || 0;

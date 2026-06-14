@@ -3,13 +3,13 @@ const KIND_TABLE = [
   'hq', 'power_plant', 'refinery', 'oil_derrick', 'barracks', 'factory', 'airbase', 'shipyard',
   'depot', 'turret', 'sam_site', 'wall', 'trench', 'builder', 'dam',
   'engineer', 'rifleman', 'at_soldier', 'scout', 'tank', 'artillery', 'flak_track', 'harvester',
-  'recon_drone', 'gunship', 'bomber', 'transport_air', 'patrol_boat', 'destroyer', 'submarine',
+  'recon_drone', 'gunship', 'bomber', 'cloud_seeder', 'transport_air', 'patrol_boat', 'destroyer', 'submarine',
   'amphib_transport', 'sea_builder', 'sonar',
   'solar_plant', 'water_pump', 'pipe', 'bridge', 'tunnel', 'road',
   'ore_depot', 'material_depot', 'water_tower', 'oil_depot', 'truck', 'earth_pile', 'tractor', 'ore_pile',
   'aa_soldier', 'rocket_launcher', 'underwater_drone', 'mg_turret', 'flak_turret',
 ];
-const ROLE_TABLE = [null, 'ore', 'materials', 'earth'];
+const ROLE_TABLE = [null, 'ore', 'build', 'earth'];
 
 export class Net {
   constructor() {
@@ -26,6 +26,7 @@ export class Net {
     this.jobs = [];             // offene Terraform-Aufträge + Erdhügel-Marker
     this.waterBase = [];        // initial sichtbare Hochseen/Flüsse; Snapshots liefern nur Abweichungen
     this.controls = { speed: 1, timeMode: 'auto', aiOnly: false };
+    this.name = 'Spieler';
     this.handlers = {};
   }
 
@@ -51,6 +52,7 @@ export class Net {
         this.waterBase = m.terrain.waterDepth || [];
         this.snow = m.terrain.snow || [];
         this.roads = m.terrain.roads || [];
+        this.tunnels = m.terrain.tunnels || [];
         this.ground = m.terrain.ground || [];
         if (m.controls) this.controls = m.controls;
         this.applySnap(m.snapshot);
@@ -60,10 +62,19 @@ export class Net {
         this.applySnap(m);
         break;
       case 'joined':
+        if (!m.ok) { this.emit('joined', m); break; }
         this.seat = m.seat;
         this.spectator = false;
         this.viewSeat = m.seat;
         this.emit('joined', m);
+        break;
+      case 'spectator':
+        this.seat = null;
+        this.spectator = true;
+        if (m.seat != null && this.players.some(p => p.id === m.seat)) this.viewSeat = m.seat;
+        else if (this.viewSeat == null) this.viewSeat = this.players[0]?.id ?? 0;
+        this.emit('joined', { ...m, spectator: true, seat: null });
+        this.emit('viewseat', { seat: this.viewSeat });
         break;
       case 'lobby':
         this.players = m.players;
@@ -100,6 +111,7 @@ export class Net {
     if (snap.controls) { this.controls = snap.controls; this.emit('controls', snap.controls); }
     if (snap.snow) this.snow = snap.snow;      // Schneedecke des Zentralbergs (schmilzt/wächst)
     if (snap.roads) this.roads = snap.roads;   // automatisches Straßennetz (nur bei Änderung gesendet)
+    if (snap.tunnels) this.tunnels = snap.tunnels; // Tunnel-Strukturen (nur bei Änderung gesendet)
     if (snap.ground) this.ground = snap.ground; // Fahrzeugspuren/Matsch
     if (snap.jobs) this.jobs = snap.jobs;       // offene Terraform-Aufträge + Erdhügel
     if (snap.events && snap.events.length) for (const e of snap.events) this.events.push(e);
@@ -150,6 +162,7 @@ export class Net {
         abandoned: isUnit ? !!e[13] : false,
         submerged: isUnit ? !!((e[14] || 0) & 1) : false,
         subExposed: isUnit ? !!((e[14] || 0) & 2) : false,
+        inTunnel: isUnit ? !!((e[14] || 0) & 4) : false,
         sonarMask: isUnit ? (e[15] || 0) : 0,
         size: isUnit ? 1 : e[8], buildProgress: isUnit ? 1 : e[9] / 100, queue: isUnit ? 0 : e[10],
         powered: isUnit ? true : e[11] !== 0,   // Lastabwurf: Licht aus + Produktion steht
@@ -159,12 +172,25 @@ export class Net {
     return out;
   }
 
-  join(name, seat) { this.send({ t: 'join', name, seat }); }
-  watch(seat = null) {
+  join(name, seat) {
+    this.name = name || this.name || 'Spieler';
+    this.send({ t: 'join', name: this.name, seat });
+  }
+  watch(seat = null, name = 'Zuschauer') {
+    this.name = name || this.name || 'Zuschauer';
     this.seat = null;
     this.spectator = true;
     this.viewSeat = seat ?? this.players[0]?.id ?? 0;
     this.emit('joined', { ok: true, seat: null, spectator: true });
+  }
+  takeoverSeat(seat = this.viewSeat, name = this.name || 'Spieler') {
+    if (seat == null) return;
+    this.name = name || this.name || 'Spieler';
+    this.send({ t: 'takeover', seat, name: this.name });
+  }
+  releaseSeat() {
+    if (this.seat == null || this.spectator) return;
+    this.send({ t: 'release' });
   }
   setViewSeat(seat) {
     if (!this.players.some(p => p.id === seat)) return;

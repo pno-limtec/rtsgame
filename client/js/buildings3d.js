@@ -128,26 +128,21 @@ export function makeBuildingMesh(kind, size, mats) {
       break;
     }
     case 'pipe': {
-      // Etwas überlanges Rohr (reicht bis in die Nachbarzelle) + zentrale Kupplung, damit
-      // aufeinanderfolgende Segmente sichtbar ineinandergreifen (auch diagonal, siehe _orientPipe).
-      const p = cyl(0.2, 0.2, s * 1.45, metal, 0, 0.26, 0, 10);
-      p.rotation.z = Math.PI / 2; g.add(p);                                  // Hauptrohr (liegend)
+      // Die durchgehende Pipeline wird im Renderer als Netzmesh aufgebaut; dieses Objekt bleibt
+      // nur die lokale Kupplung/Armatur, damit keine unverbundenen Rohrstücke entstehen.
       const hub = cyl(0.3, 0.3, 0.34, dark, 0, 0.26, 0, 12);
-      hub.rotation.z = Math.PI / 2; g.add(hub);                              // Kupplung in der Mitte
-      g.add(box(0.5, 0.1, 0.5, dark, 0, 0.05, 0));                            // Fundament
+      hub.rotation.z = Math.PI / 2; g.add(hub);
+      const valve = cyl(0.09, 0.09, 0.7, metal, 0, 0.36, 0, 8);
+      valve.rotation.z = Math.PI / 2; g.add(valve);
+      g.add(box(0.5, 0.1, 0.5, dark, 0, 0.05, 0));
       break;
     }
     case 'road': {
-      g.add(box(s * 1.02, 0.12, s * 1.02, dark, 0, 0.06, 0));               // Fahrbahnplatte
-      g.add(box(s * 0.5, 0.13, 0.1, hazard, 0, 0.065, 0));                  // Mittelstreifen
+      // Straßenflächen kommen aus dem zusammenhängenden Road-Mesh des Renderers.
       break;
     }
     case 'bridge': {
-      g.add(box(s * 1.02, 0.25, s * 0.8, dark, 0, 0.5, 0));                  // Fahrbahn
-      g.add(box(s * 1.02, 0.18, 0.12, metal, 0, 0.75, s * 0.36));            // Geländer
-      g.add(box(s * 1.02, 0.18, 0.12, metal, 0, 0.75, -s * 0.36));
-      g.add(cyl(0.16, 0.2, 1.4, dark, -s * 0.32, -0.2, 0, 8));               // Pfeiler (reichen ins Wasser)
-      g.add(cyl(0.16, 0.2, 1.4, dark, s * 0.32, -0.2, 0, 8));
+      // Brückendecks werden als zusammenhängendes Mesh aus allen Brückenzellen gerendert.
       break;
     }
     case 'tunnel': {

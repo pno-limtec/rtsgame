@@ -108,6 +108,13 @@ function topUpResources(w) {
     p.resources.water = Math.max(p.resources.water || 0, 20000);
     p.resources.oil = Math.max(p.resources.oil || 0, 20000);
   }
+  // Der Coverage-Lauf erzwingt alle Produktions- und Versorgungsgebaeude in einer Basis.
+  // Strom soll hier nicht der limitierende Faktor sein; getestet wird, ob jede Einheit erreichbar ist.
+  for (const e of w.entities.values()) {
+    if (e.etype === 'building' && e.kind === 'power_plant' && e.buildProgress >= 1) {
+      e.power = Math.max(e.power || 0, 5000);
+    }
+  }
 }
 
 function prepareCoverageTerrain(w) {
