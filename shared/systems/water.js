@@ -778,9 +778,12 @@ function applyFloodDamage(world, didStep) {
   for (const e of world.entities.values()) {
     if (e.dead) continue;
     if (e.etype === 'building') {
-      // Gebäude im Wasser: nach Schonfrist kontinuierlicher Verfall (Wasserbauten sind immun).
+      // Gebäude im Wasser: nach Schonfrist kontinuierlicher Verfall — ABER Infrastruktur ist immun:
+      // Brücken, Pipelines, Straßen und Tunnel werden vom Wasser NICHT weggespült/zerstört
+      // (eine überflutete Straße/Leitung bleibt bestehen; Wasserbauten ohnehin).
       const def = e.def || {};
-      if (def.buildOnWater || def.requiresWater || def.bridges) { e._wetSince = null; continue; }
+      if (def.buildOnWater || def.requiresWater || def.bridges || def.pipe || def.roadBuilt
+        || def.tunnels || def.waterOptional || def.role === 'infrastructure') { e._wetSince = null; continue; }
       const ci = tIdx(t, e.tx + ((e.size / 2) | 0), e.ty + ((e.size / 2) | 0));
       const depth = t.water[ci] || 0;
       if (depth > WET_DEPTH) {

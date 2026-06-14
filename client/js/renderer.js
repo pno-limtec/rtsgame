@@ -4645,12 +4645,15 @@ export class Renderer {
   // Strömungspartikel entlang des Pfades streuen. Endet am Meer, am Kartenrand oder in einer Senke.
   _traceFlowToSea(gx, gy, surge) {
     const W = this.mapW, H = this.mapH;
+    const PRESENT = 0.018; // ab dieser Tiefe gilt eine Zelle als „hat Wasser"
     const maxLen = this.quality === 'low' ? 8 : this.quality === 'medium' ? 14 : 22;
     let cx = gx, cy = gy;
     for (let step = 0; step < maxLen && this._canSpawnEffect(1); step++) {
       const ci = cy * W + cx;
-      // Dem GELÄNDEBETT folgen (nicht der flachen Wasseroberfläche, sonst bleibt der Lauf in
-      // stehendem Wasser sofort hängen) — das Flussbett fällt durchgehend zum Meer ab.
+      // NUR dem nassen Lauf folgen: tiefster Bett-Nachbar, der AUCH Wasser führt. So tauchen die
+      // Partikel ausschließlich dort auf, wo wirklich Wasser auf der Karte liegt (kein „Bach" über
+      // trockenes Gelände). Endet, sobald das Wasser aufhört oder das Meer erreicht ist.
+      if ((this.waterDepth[ci] || 0) <= PRESENT && this.terrainType?.[ci] !== 3) break;
       const g0 = this.height[ci];
       let bx = -1, by = -1, bg = g0 - 0.0004, ndx = 0, ndy = 0;
       for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
@@ -4658,10 +4661,11 @@ export class Renderer {
         const nx = cx + dx, ny = cy + dy;
         if (nx < 0 || ny < 0 || nx >= W || ny >= H) continue;
         const j = ny * W + nx;
+        if ((this.waterDepth[j] || 0) <= PRESENT && this.terrainType?.[j] !== 3) continue; // nur nasse Nachbarn
         const gj = this.height[j];
         if (gj < bg) { bg = gj; bx = nx; by = ny; ndx = dx; ndy = dy; }
       }
-      if (bx < 0) break; // lokale Senke → Abfluss endet (staut)
+      if (bx < 0) break; // kein nasser Abstieg mehr → Lauf endet (matcht die sichtbare Wasserfläche)
       const dist = Math.hypot(ndx, ndy) || 1;
       const fx = ndx / dist, fz = ndy / dist;
       const wx = cx * TILE + fx * TILE * 0.5 + (Math.random() - 0.5) * TILE * 0.6;

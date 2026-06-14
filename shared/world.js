@@ -402,20 +402,31 @@ function protectStartTerrace(t, tx, ty, size) {
   if (!t.startSafe) t.startSafe = new Uint8Array(t.w * t.h);
   const cx = tx + size / 2, cy = ty + size / 2;
   const core = 9;
-  const outer = 15;
-  const coreHeight = SEA_LEVEL + 0.32;
-  const shoulderHeight = SEA_LEVEL + 0.21;
+  const outer = 17;
+  // Umgebungshöhe am äußeren Ring abtasten → der Plateau-Deckel liegt IMMER klar darüber, also ein
+  // echtes erhöhtes Plateau (auch bei den jetzt größeren Höhenunterschieden), nicht eine Mulde.
+  let sum = 0, cnt = 0;
+  for (let a = 0; a < 12; a++) {
+    const ax = Math.round(cx + Math.cos(a / 12 * Math.PI * 2) * outer);
+    const ay = Math.round(cy + Math.sin(a / 12 * Math.PI * 2) * outer);
+    if (inBounds(t, ax, ay)) { sum += t.height[tIdx(t, ax, ay)]; cnt++; }
+  }
+  const surround = cnt ? sum / cnt : SEA_LEVEL + 0.3;
+  const top = Math.min(1.05, Math.max(SEA_LEVEL + 0.40, surround + 0.14)); // ebener, deutlich erhöhter Deckel
   for (let y = Math.floor(cy - outer); y <= Math.ceil(cy + outer); y++) {
     for (let x = Math.floor(cx - outer); x <= Math.ceil(cx + outer); x++) {
       if (!inBounds(t, x, y)) continue;
       const i = tIdx(t, x, y);
       const d = Math.hypot(x + 0.5 - cx, y + 0.5 - cy);
       if (d > outer) continue;
-      const fade = d <= core ? 1 : Math.max(0, 1 - (d - core) / Math.max(1, outer - core));
-      const target = shoulderHeight + (coreHeight - shoulderHeight) * (fade * fade * (3 - 2 * fade));
+      // Ebener Deckel im Kern, sanft (smoothstep) auf die Umgebungshöhe abfallender Rand.
+      let target;
+      if (d <= core) target = top;
+      else { const f = (d - core) / (outer - core); const s = f * f * (3 - 2 * f); target = top * (1 - s) + t.height[i] * s; }
       t.type[i] = TT.LAND;
-      t.height[i] = Math.max(t.height[i], target);
-      if (t.height0) t.height0[i] = Math.max(t.height0[i], t.height[i]);
+      t.height[i] = target;
+      if (t.height0) t.height0[i] = target;
+      if (t.terra) t.terra[i] = 0;
       t.water[i] = 0; t.baseWater[i] = 0;
       if (t.lakeMask) t.lakeMask[i] = 0;
       if (t.waterActive) t.waterActive.delete(i);

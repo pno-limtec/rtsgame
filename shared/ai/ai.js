@@ -75,6 +75,7 @@ const AI_FORCE_DECISION_PRESSURE = 7;   // nach langer Zeit reicht eine kleinere
 const AI_HARD_DECISION_PRESSURE = 10;   // sehr langes KI-only Patt wird deterministisch entschieden
 const AI_ROUTE_PLAN_COOLDOWN = AI_REPLAN_TICKS * 2;
 const AI_ROUTE_PATH_ITER = 30000;
+const AI_CHEAT_STUCK_TICKS = 1500;      // 150s ohne Aufbaufortschritt = Ressourcen-Deadlock → KI darf cheaten
 
 export function initAi(player) {
   player.ai = { phase: 'expand', attackTimer: 0, airTimer: 0, lastBuild: 0, waveSize: 5, airWave: 2, navyTimer: 0, navyWave: 2 };
@@ -87,6 +88,7 @@ export function stepAi(world, player, applyCommand) {
   if (world.tick % AI_REPLAN_TICKS !== (player.id % AI_REPLAN_TICKS)) return;
 
   const s = surveyEconomy(world, player);
+  manageDeadlockCheat(world, player, s);
   if (manageStalledConstruction(world, player, s)) return;
   const builtCoverage = manageCoverageBuild(world, player, s, applyCommand);
   const builtInfra = !builtCoverage && managePipelines(world, player, s, applyCommand);
@@ -162,6 +164,25 @@ function aiPowerScore(world, owner) {
   }
   if (player) score += Math.min(1600, (player.resources.ore || 0) * 0.18 + (player.resources.materials || 0) * 0.10 + (player.resources.fuel || 0) * 0.05);
   return score;
+}
+
+// Deadlock-Cheat: Hat die KI über lange Zeit KEINEN Aufbaufortschritt mehr (kein neues
+// Gebäude/keine neue Einheit) — typischerweise weil eine Ressource fehlt und die Förderkette klemmt
+// — darf sie sich das Nötigste selbst gutschreiben, um wieder ins Spiel zu kommen. Greift NUR bei
+// echtem Stillstand (wachsende/kämpfende Wirtschaften lösen es nicht aus) und nur für KI-Spieler.
+function manageDeadlockCheat(world, player, s) {
+  if (world.aiCoverageTest) return;
+  const a = player.ai;
+  const built = s.units.length + s.buildings.length;
+  if (a._cheatBuilt == null || built > a._cheatBuilt) { a._cheatBuilt = built; a._cheatSince = world.tick; return; }
+  if (world.tick - (a._cheatSince || world.tick) < AI_CHEAT_STUCK_TICKS) return;
+  const res = player.resources;
+  let cheated = false;
+  const need = (k, to) => { if ((res[k] || 0) < to) { res[k] = to; cheated = true; } };
+  need('ore', 800); need('materials', 250); need('fuel', 250); need('water', 150);
+  a._cheatSince = world.tick;     // Cooldown bis zum nächsten möglichen Cheat
+  a._cheatBuilt = built;
+  if (cheated) world.events?.push({ type: 'ai_cheat', player: player.id, x: s.hq?.x || 0, y: s.hq?.y || 0 });
 }
 
 function manageStalledConstruction(world, player, s) {
@@ -927,6 +948,14 @@ function planRouteInfrastructure(world, player, s, from, to, applyCommand, opts 
         return true;
       }
     }
+    // Wasserlauf (Fluss): die GANZE zusammenhängende Wasserspanne auf einmal überbrücken, statt eine
+    // Kachel pro Planungsrunde — sonst bleibt die Brücke unvollständig und kein Fahrzeug kommt rüber.
+    if (waterBlocksLand(world.terrain, i) && !(world.terrain.bridge && world.terrain.bridge[i] > 0)) {
+      if (planBridgeSpan(world, player, cells, n, applyCommand)) {
+        player.ai.routePlanTick = world.tick;
+        return true;
+      }
+    }
     const action = routeCellAction(world, player, prev, { tx, ty }, n, opts);
     if (action && issueRouteAction(world, player, action, applyCommand)) {
       player.ai.routePlanTick = world.tick;
@@ -935,6 +964,30 @@ function planRouteInfrastructure(world, player, s, from, to, applyCommand, opts 
     if (world.terrain.type[i] !== TT.CLIFF && !waterBlocksLand(world.terrain, i)) prev = { tx, ty };
   }
   return false;
+}
+
+// Eine zusammenhängende Wasserspanne (Fluss) auf der Route in EINEM Zug überbrücken: ab der ersten
+// Wasserzelle alle folgenden Wasserzellen als Brücke setzen, soweit das Erz reicht (Rest folgt in
+// den nächsten Runden). So entsteht eine durchgehende Brücke statt verstreuter Einzelpfeiler.
+function planBridgeSpan(world, player, cells, n, applyCommand) {
+  const t = world.terrain;
+  const def = world.data.buildings.bridge;
+  if (!def) return false;
+  const cost = effectiveCost(world, player.id, def);
+  let built = false;
+  for (let k = n; k < cells.length; k++) {
+    const [tx, ty] = cells[k];
+    if (!inBounds(t, tx, ty)) break;
+    const i = tIdx(t, tx, ty);
+    if (!waterBlocksLand(t, i)) break;                         // Wasserlauf zu Ende → Spanne fertig
+    if (t.bridge && t.bridge[i] > 0) continue;                 // schon überbrückt
+    if (existingOrPendingBuilding(world, player.id, 'bridge', tx, ty)) continue;
+    if (!canAfford(player, cost)) break;                       // Erz alle → Rest später
+    if (!placeable(world, tx, ty, 1, def, player.id)) continue;
+    applyCommand(world, { type: 'build', building: 'bridge', tx, ty }, player.id);
+    built = true;
+  }
+  return built;
 }
 
 // Über einen Klippen-Riegel entlang der Route einen gültigen Tunnel finden: Mündung A = letzte

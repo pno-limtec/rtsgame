@@ -587,12 +587,54 @@ function addOuterPlateaus(height, w, h, rng, cx, cy) {
   }
 }
 
+// NUTZBARE PLATEAUS: flachgedeckelte Mesas mit ebener, bebaubarer Oberfläche und sanft abfallenden
+// Rändern. Läuft NACH der Endrundung (damit die Flächen eben bleiben) und nutzt eine SEPARATE rng,
+// um den deterministischen Hauptstrom (carveRiver etc. → Tests) nicht zu verschieben.
+function stampUsablePlateaus(height, w, h, rngP, cx, cy) {
+  const minDim = Math.min(w, h), maxR = Math.hypot(cx, cy);
+  const count = Math.max(5, Math.round(minDim / 22));
+  const placed = [];
+  for (let n = 0; n < count; n++) {
+    let px = 0, py = 0, ok = false;
+    for (let tries = 0; tries < 44 && !ok; tries++) {
+      const a = rngP() * Math.PI * 2;
+      const rr = minDim * (0.18 + rngP() * 0.30);
+      px = Math.round(cx + Math.cos(a) * rr + (rngP() - 0.5) * minDim * 0.10);
+      py = Math.round(cy + Math.sin(a) * rr + (rngP() - 0.5) * minDim * 0.10);
+      if (px < 8 || py < 8 || px >= w - 8 || py >= h - 8) continue;
+      if (Math.min(px, py, w - 1 - px, h - 1 - py) < minDim * 0.11) continue;
+      if (height[py * w + px] < SEA_LEVEL + 0.10) continue; // nicht ins Meer/an die Küste
+      ok = placed.every((p) => Math.hypot(px - p.x, py - p.y) > minDim * 0.13);
+    }
+    if (!ok) continue;
+    placed.push({ x: px, y: py });
+    const rad = 5 + rngP.int(5);          // ebener Deckel-Radius 5..9
+    const skirt = 3 + rngP.int(3);        // abfallender Rand 3..5
+    const rn = Math.min(1, Math.hypot(px - cx, py - cy) / maxR);
+    // Klar erhöhter, ebener Deckel — innen näher am Berg höher gelegen.
+    const level = Math.min(MAX_HEIGHT - 0.20, Math.max(height[py * w + px] + 0.14, 0.58 + (1 - rn) * 0.26 + rngP() * 0.12));
+    for (let yy = -rad - skirt; yy <= rad + skirt; yy++) for (let xx = -rad - skirt; xx <= rad + skirt; xx++) {
+      const x = px + xx, y = py + yy;
+      if (x < 1 || y < 1 || x >= w - 1 || y >= h - 1) continue;
+      const d = Math.hypot(xx, yy);
+      if (d > rad + skirt) continue;
+      const j = y * w + x;
+      let target;
+      if (d <= rad) target = level;        // EBENER Deckel (bebaubar)
+      else { const f = (d - rad) / skirt; const s = f * f * (3 - 2 * f); target = level * (1 - s) + height[j] * s; }
+      height[j] = Math.max(height[j], target); // Mesa hebt sich übers Umland
+    }
+  }
+}
+
 export function generateTerrain({ w, h, seed = 1 }) {
   const rng = makeRng(seed * 2654435761 >>> 0);
   const base = noise2(rng, w, h, 5);
   // Separates Grat-Rauschen für Gebirgsketten (ridged: Bergrücken statt Kuppen).
   const rng2 = makeRng((seed * 40503 + 0x9e3779b9) >>> 0);
   const ridge = noise2(rng2, w, h, 3);
+  // Eigener rng-Strom für nutzbare Plateaus — verschiebt den Haupt-rng-Strom NICHT (Determinismus/Tests).
+  const rngP = makeRng((seed * 2246822519 + 0x165667b1) >>> 0);
   const height = new Float32Array(w * h);
   const type = new Uint8Array(w * h);
   const water = new Float32Array(w * h);     // dynamische Wassertiefe pro Zelle (Höheneinheiten über Boden)
@@ -633,13 +675,14 @@ export function generateTerrain({ w, h, seed = 1 }) {
     const rn = Math.min(1, r / maxR);
     const fall = rn * rn * (3 - 2 * rn);
     // Dominantes Inselprofil: mittig hoch, zum Meer hin zuverlässig niedriger.
-    let e = SEA_LEVEL - 0.055 + (0.70 - (SEA_LEVEL - 0.055)) * Math.pow(1 - fall, 0.82);
-    // Sanftere Grundwelligkeit (weniger zerklüftet) — der Inselrahmen/Berg bleibt, das Gelände
-    // rollt aber weicher statt in vielen kleinen Kuppen/Kerben.
-    e += (base[i] - 0.5) * (0.40 * (1 - fall) + 0.105);
+    let e = SEA_LEVEL - 0.055 + (0.74 - (SEA_LEVEL - 0.055)) * Math.pow(1 - fall, 0.82);
+    // Etwas GRÖSSERE Höhenunterschiede (mehr Relief), aber NICHT zerklüftet: die Amplitude der
+    // Grundwellen/Grate steigt moderat — die roundTerrain-Pässe glätten nur die kleinskaligen scharfen
+    // Kanten weg, die großen Hügel/Senken (niederfrequent) bleiben erhalten.
+    e += (base[i] - 0.5) * (0.48 * (1 - fall) + 0.125);
     const ridged = Math.pow(1 - Math.abs(2 * ridge[i] - 1), 7);
     const flankMask = Math.min(1, r / Math.max(1, minDim * 0.09));
-    e += ridged * 0.52 * Math.max(0, base[i] - 0.5) * 2.0 * (1 - rn * 0.48) * flankMask;
+    e += ridged * 0.56 * Math.max(0, base[i] - 0.5) * 2.0 * (1 - rn * 0.48) * flankMask;
     // Zentralmassiv: spitzer Gipfel auf breitem Sockel; Grate und Rinnen brechen die Rundform.
     const summit = Math.exp(-r2 / (2 * sigma * sigma));
     const shoulder = Math.exp(-r2 / (2 * sigma3 * sigma3));
@@ -731,7 +774,7 @@ export function generateTerrain({ w, h, seed = 1 }) {
     carveHighLake(height, w, h, lx, ly, r, level);
     lakes.push({ x: lx, y: ly, r, level });
 
-    if (valleys.length < 3) {
+    if (valleys.length < 5) {   // mehr Trockentäler = mehr Flutziele (passt zu den größeren Überschwemmungen)
       const valleyFloor = Math.max(SEA_LEVEL + 0.055, level - 0.18);
       const v = carveDryValley(height, w, h, cx0, cy0, a, rr + r + 3, Math.round(Math.min(w, h) * 0.10), 2, valleyFloor);
       if (v) valleys.push({ ...v, level: valleyFloor, floodFrom: lakes[l].level });
@@ -765,6 +808,8 @@ export function generateTerrain({ w, h, seed = 1 }) {
   // wieder erzeugt haben (Flussufer, Kernrand). Mild gehalten, damit Flüsse/Berg erhalten bleiben;
   // die schiffbaren Fluss-Kerne werden direkt danach ohnehin neu gesetzt.
   roundTerrain(height, w, h, 1, 0.5);
+  // Nutzbare, ebene Plateaus NACH der Rundung stempeln (sonst würden die Deckel weggeglättet).
+  stampUsablePlateaus(height, w, h, rngP, cx0, cy0);
 
   for (let i = 0; i < w * h; i++) {
     const e = height[i];
