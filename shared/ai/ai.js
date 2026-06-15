@@ -587,10 +587,12 @@ function siegeDeficit(s) {
   if (n < 3) return null;
   const rockets = veh.filter(u => u.kind === 'rocket_launcher').length;
   if (rockets < Math.max(1, Math.round(n * 0.20))) return 'rocket_launcher';
-  // Artillerie ab 4 (statt 5) Fahrzeugen: die Fahrzeugarmee erreicht in vielen Partien selten 5
-  // gleichzeitig lebende Einheiten (Verluste/geringe Produktion) → bei Schwelle 5 kam Artillerie
-  // real kaum vor. 4 macht den Belagerungstyp verlässlich (Coverage C) und bricht Turtling.
-  if (n >= 4) {
+  // Artillerie ab 3 Fahrzeugen (vorher 4, davor 5): gemessen (coverage.js + econ-Diag) erreicht die
+  // Fahrzeugarmee selbst mit der neuen Fahrzeug-Erzreserve oft nur 3 gleichzeitig Lebende, 4 nur
+  // sporadisch → bei Schwelle 4 kam Artillerie auf vielen Seeds NIE vor. Bei n≥3 baut der Override
+  // GENAU EINE Artillerie (Quote round(3·0.15)=0 → max(1,0)=1) nachdem die Raketenquote steht — also
+  // kein Über-Belagern, nur die Garantie, dass der Typ vorkommt (Ziel C) und Turtling bricht.
+  if (n >= 3) {
     const arty = veh.filter(u => u.kind === 'artillery').length;
     if (arty < Math.max(1, Math.round(n * 0.15))) return 'artillery';
   }
@@ -613,6 +615,22 @@ function manageProduction(world, player, s, applyCommand) {
     const cost = effectiveCost(world, player.id, world.data.units[kind]);
     if (!canAfford(player, cost)) return false;
     return !keepReserve || (player.resources.ore - (cost.ore || 0)) >= reserve;
+  };
+  // Fahrzeug-Erzreserve AUCH UNTER DRUCK: in frozen/Dauerdruck-Partien rampt pressure hoch →
+  // die obige (reserve nur bei pressure<2) Sperre fällt weg, und billige Infanterie (100–200 Erz)
+  // saugt die Kasse leer, bevor sich die 460+ Erz für ein Kampffahrzeug ansammeln. Folge (gemessen
+  // via coverage.js): vehicleArmy bleibt oft 0–3, Artillerie/Belagerung kommen NIE vor (Ziel C) und
+  // die Angriffe verpuffen als reiner Fußvolk-Schwarm. Solange eine Fabrik steht und die
+  // Fahrzeugarmee unter einem Mindestkern liegt, hält affordInfantry zusätzlich die Kosten des
+  // nächsten Panzers zurück → Erz sammelt sich für Fahrzeuge an. Die FABRIK selbst nutzt weiter das
+  // lockerere afford() (sonst würde die Reserve auch das Fahrzeug blockieren). Kein world.rng()
+  // hier → RNG-Stream/brittle-Tests unverändert.
+  const vehReserve = (s.factories >= 1 && s.vehicleArmy < 4)
+    ? (effectiveCost(world, player.id, world.data.units.tank).ore || 0) : 0;
+  const affordInfantry = (kind) => {
+    const cost = effectiveCost(world, player.id, world.data.units[kind]);
+    if (!canAfford(player, cost)) return false;
+    return (player.resources.ore - (cost.ore || 0)) >= reserve + vehReserve;
   };
 
   // Bautrupp sicherstellen: ohne Bagger wird KEIN Gebäude mehr fertig → höchste Priorität.
@@ -679,7 +697,18 @@ function manageProduction(world, player, s, applyCommand) {
     // erzwingt Belagerungswaffen, sobald sie bezahlbar sind — Coverage-Ziel C + bricht Turtling.
     // Der world.rng()-Aufruf bleibt erhalten → RNG-Stream/Tests unverändert.
     const siege = siegeDeficit(s);
-    if (siege && afford(siege)) kind = siege;
+    if (siege && afford(siege)) {
+      kind = siege;
+    } else if (siege && s.vehicleArmy >= 5) {
+      // Belagerungs-/Panzer-Defizit, aber gerade unbezahlbar (gemessen via diag_arty: Armeen wuchsen
+      // auf 13 Fahrzeuge, aber NUR Spähwagen(240)+Flak(360) — Erz floss so schnell in Billiges, dass
+      // es nie die 480–520 für Rakete/Artillerie erreichte). Bei TRAGFÄHIGER Kernarmee (≥5 Fahrzeuge)
+      // diesen Tick AUSSETZEN und ansparen statt billig kaufen → Erz klettert auf die Belagerungs-
+      // kosten, der Typ wird gebaut. WICHTIG: nur ab 5 Fahrzeugen — früher würde das Aussetzen die
+      // Armee ausdünnen und kostete in match-sim den einen Sieg (1/6→0/6). Ab 5 ist genug Masse da,
+      // das Ansparen ist decisiveness-neutral. world.rng() oben bleibt → RNG-Stream unverändert.
+      continue;
+    }
     if (afford(kind)) applyCommand(world, { type: 'produce', building: fac.id, kind }, player.id);
   }
 
@@ -700,7 +729,7 @@ function manageProduction(world, player, s, applyCommand) {
     if (infantryArmy >= INFANTRY_TARGET && pressure < 4) continue;   // Schwarm begrenzen (nicht 100+ Riflemen)
     const r = world.rng();
     const kind = s.enemyAir && r > 0.72 ? 'aa_soldier' : r < riflemanShare ? 'rifleman' : 'at_soldier';
-    if (afford(kind)) applyCommand(world, { type: 'produce', building: bar.id, kind }, player.id);
+    if (affordInfantry(kind)) applyCommand(world, { type: 'produce', building: bar.id, kind }, player.id);
   }
 
   // Luft-Doktrin: spät und begrenzt. HLX darf etwas mehr, aber die Grundkosten bleiben hoch.
