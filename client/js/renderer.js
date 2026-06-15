@@ -61,7 +61,7 @@ const WEATHER_FOG_DAY = new THREE.Color(0x9faab0);
 const WEATHER_FOG_NIGHT = new THREE.Color(0x111821);
 const WATER_KINDS = new Set(['patrol_boat', 'destroyer', 'amphib_transport', 'sea_builder', 'submarine', 'underwater_drone']);
 // Wasserbauten schwimmen auf der Oberfläche (Werft, Pumpwerk) statt auf dem Seegrund zu stehen.
-const WATER_BUILDINGS = new Set(['shipyard', 'water_pump']);
+const WATER_BUILDINGS = new Set(['shipyard', 'water_pump', 'pontoon']);
 const SURFACE_SHIP_KINDS = new Set(['patrol_boat', 'destroyer', 'amphib_transport', 'sea_builder']);
 // Bauten, die ans Pipeline-Netz andocken (für die optische Rohrverbindung).
 const PIPE_CONNECT = new Set(['pipe', 'water_pump', 'water_tower', 'oil_derrick', 'oil_depot']);
@@ -4940,7 +4940,8 @@ export class Renderer {
     if (this._currentFxAt > 0) return;
     this._currentFxAt = gap;
     const tries = this.quality === 'low' ? 8 : this.quality === 'medium' ? 13 : 20;
-    const maxMade = this.quality === 'low' ? 2 : this.quality === 'medium' ? 4 : 6;
+    // Wenige, dafür DICHTE Läufe — jeder Lauf zeichnet ein durchgehendes blaues Band (s. _traceFlowToSea).
+    const maxMade = this.quality === 'low' ? 1 : this.quality === 'medium' ? 2 : 3;
     const radius = Math.max(14, Math.min(42, this.camDist * 0.22));
     let made = 0;
     for (let n = 0; n < tries && made < maxMade && this._canSpawnEffect(1); n++) {
@@ -4992,21 +4993,32 @@ export class Renderer {
       if (bx < 0) break; // kein nasser Abstieg mehr → Lauf endet (matcht die sichtbare Wasserfläche)
       const dist = Math.hypot(ndx, ndy) || 1;
       const fx = ndx / dist, fz = ndy / dist;
-      const wx = cx * TILE + fx * TILE * 0.5 + (Math.random() - 0.5) * TILE * 0.6;
-      const wz = cy * TILE + fz * TILE * 0.5 + (Math.random() - 0.5) * TILE * 0.6;
       const depth = this.waterDepth[ci] || 0;
-      const y = (depth > 0.02 ? this.waterSurfaceAt(wx, wz) : this.height[ci] * HEIGHT_SCALE) + 0.08;
       const fade = 0.6 + 0.4 * (1 - step / (maxLen + 2)); // Lauf bleibt bis zum Meer gut sichtbar
-      // Kräftiger, blauer Wasserkörper (mal heller, mal tiefer) — der Bach ist deutlich blau.
       const blue = surge > 0.45 ? 0x4fc3f7 : 0x2f9fe0;
-      this._sprite(blue, wx, y, wz, 0.42 + surge * 0.46, 0.9 + surge * 0.5, {
-        vx: fx * (1.25 + surge * 1.25), vz: fz * (1.25 + surge * 1.25), vy: 0.10 + surge * 0.18,
-        grow: 1.25 + surge * 0.55, opacity: (0.6 + surge * 0.38) * fade,
-      });
-      // Weiße Schaumkrone obenauf: heller, additiver Glanzpunkt → Funkeln/Gischt über dem Blau.
-      this._sprite(0xffffff, wx + (Math.random() - 0.5) * 0.55, y + 0.13, wz + (Math.random() - 0.5) * 0.55,
-        0.20 + surge * 0.24, 0.55 + surge * 0.35,
-        { vx: fx * 0.85, vz: fz * 0.85, vy: 0.16 + surge * 0.14, grow: 1.35, opacity: (0.45 + surge * 0.4) * fade, additive: true });
+      // DURCHGEHENDES BLAUES BAND: pro Segment (Zelle → tieferer Nachbar) mehrere große, überlappende
+      // blaue Partikel ENTLANG der Verbindungslinie setzen (wenig Jitter, wenig Drift) — so verschmelzen
+      // sie zu einem zusammenhängenden Band statt einzelner Tropfen. Schaum kommt sparsam obendrauf.
+      const sx = cx * TILE, sz = cy * TILE, ex = bx * TILE, ez = by * TILE;
+      const bandSize = 0.95 + surge * 0.7;
+      for (const t of [0.18, 0.5, 0.82]) {
+        if (!this._canSpawnEffect(1)) break;
+        const wx = sx + (ex - sx) * t + (Math.random() - 0.5) * 0.3;
+        const wz = sz + (ez - sz) * t + (Math.random() - 0.5) * 0.3;
+        const y = (depth > 0.02 ? this.waterSurfaceAt(wx, wz) : this.height[ci] * HEIGHT_SCALE) + 0.07;
+        this._sprite(blue, wx, y, wz, bandSize, 1.1 + surge * 0.5, {
+          vx: fx * (0.55 + surge * 0.6), vz: fz * (0.55 + surge * 0.6), vy: 0.04 + surge * 0.08,
+          grow: 1.06 + surge * 0.28, opacity: (0.52 + surge * 0.34) * fade,
+        });
+      }
+      // Weiße Schaumkrone obenauf (Funkeln/Gischt), sparsam — nur jeden 2. Schritt.
+      if (this._canSpawnEffect(1) && (step % 2 === 0 || surge > 0.5)) {
+        const wx = sx + (ex - sx) * 0.5, wz = sz + (ez - sz) * 0.5;
+        const y = (depth > 0.02 ? this.waterSurfaceAt(wx, wz) : this.height[ci] * HEIGHT_SCALE) + 0.16;
+        this._sprite(0xffffff, wx + (Math.random() - 0.5) * 0.5, y, wz + (Math.random() - 0.5) * 0.5,
+          0.24 + surge * 0.22, 0.55 + surge * 0.3,
+          { vx: fx * 0.7, vz: fz * 0.7, vy: 0.14 + surge * 0.12, grow: 1.3, opacity: (0.42 + surge * 0.38) * fade, additive: true });
+      }
       cx = bx; cy = by;
       if (this.terrainType?.[by * W + bx] === 3) break; // Meer erreicht
     }
