@@ -69,6 +69,9 @@ const PIPE_BRIDGE_CHAIN_MIN = TILE * 8;
 const PIPE_BRIDGE_SPACING = TILE * 7;
 const PIPE_BRIDGE_WIDTH = TILE * 1.8;
 const PIPE_BRIDGE_LIFT = 1.05;
+const PIPE_FLEX_SAG = 0.34;        // Durchhang des flexiblen Schlauchs am Pumpwerk-/Depot-Anschluss
+const PIPE_FLEX_RADIUS = 0.13;     // dünner als das starre Rohr (0.17) — wirkt wie ein Schlauch
+const ZERO_OFFSET = { x: 0, z: 0 }; // wiederverwendeter Null-Spurversatz (kein Garbage pro Frame)
 const INFANTRY_KINDS = new Set(['engineer', 'rifleman', 'at_soldier', 'aa_soldier']);
 const AIR_UNIT_KINDS = new Set(['recon_drone', 'gunship', 'bomber', 'cloud_seeder', 'transport_air']);
 const LAND_VEHICLE_KINDS = new Set(['scout', 'tank', 'artillery', 'flak_track', 'harvester', 'builder', 'truck', 'tractor']);
@@ -610,6 +613,13 @@ export class Renderer {
     this.trackMesh.renderOrder = 2; this.trackMesh.count = 0; this.trackMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
     this.scene.add(this.trackMesh);
     this.mudMesh = null;
+    // Krater: dunkle, leicht eingesengte Scheiben, die große Waffen am Einschlag hinterlassen.
+    const craterGeo = new THREE.CircleGeometry(TILE * 0.62, 16); craterGeo.rotateX(-Math.PI / 2);
+    this.craterMesh = new THREE.InstancedMesh(craterGeo,
+      new THREE.MeshLambertMaterial({ color: 0x1c1712, transparent: true, opacity: 0.7, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1 }), 160);
+    this.craterMesh.renderOrder = 2; this.craterMesh.count = 0; this.craterMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    this.scene.add(this.craterMesh);
+    this._craterIdx = 0; this._craterCount = 0; this._craterDummy = new THREE.Object3D();
     const wetGeo = new THREE.CircleGeometry(TILE * 0.64, 18); wetGeo.rotateX(-Math.PI / 2);
     this.wetGroundMesh = new THREE.InstancedMesh(wetGeo,
       new THREE.MeshLambertMaterial({ color: 0x2f3d32, transparent: true, opacity: 0.34, depthWrite: false }), 9000);
@@ -650,7 +660,19 @@ export class Renderer {
     this._bridgeSig = '';
     this.updateBridgeOverlay();
 
-    this.pipeMat = new THREE.MeshStandardMaterial({ color: 0x9aa3ad, roughness: 0.42, metalness: 0.55 });
+    this.pipeMat = new THREE.MeshStandardMaterial({ color: 0x9aa3ad, roughness: 0.42, metalness: 0.55, emissive: 0x18506e, emissiveIntensity: 0 });
+    // Durchfluss-Visualisierung: helle Bänder wandern entlang der Bogenlänge (aFlow) durch die Leitung,
+    // solange Förderung läuft (uFlowOn). Reines Shader-Overlay auf dem bestehenden Rohr-Mesh.
+    this.pipeMat.onBeforeCompile = (shader) => {
+      shader.uniforms.uFlowTime = { value: 0 };
+      shader.uniforms.uFlowOn = { value: 0 };
+      this._pipeShader = shader;
+      shader.vertexShader = 'attribute float aFlow;\nvarying float vFlow;\n'
+        + shader.vertexShader.replace('#include <begin_vertex>', '#include <begin_vertex>\n  vFlow = aFlow;');
+      shader.fragmentShader = 'uniform float uFlowTime;\nuniform float uFlowOn;\nvarying float vFlow;\n'
+        + shader.fragmentShader.replace('#include <emissivemap_fragment>',
+          '#include <emissivemap_fragment>\n  float fb = fract(vFlow * 0.6 - uFlowTime);\n  float band = smoothstep(0.72, 0.98, fb) * (1.0 - smoothstep(0.98, 1.0, fb));\n  totalEmissiveRadiance += vec3(0.25, 0.72, 1.0) * band * uFlowOn * 1.6;');
+    };
     this.pipeMesh = new THREE.Mesh(this._makeEmptyOverlayGeometry(), this.pipeMat);
     this.pipeMesh.renderOrder = 3;
     this.pipeMesh.castShadow = true;
@@ -665,6 +687,7 @@ export class Renderer {
     const oreRockMat = new THREE.MeshStandardMaterial({ color: 0x3d3a34, roughness: 0.98, metalness: 0.0, transparent: true, opacity: 0.7 });
     const oreVeinMat = new THREE.MeshStandardMaterial({ color: 0x6a5140, roughness: 0.88, metalness: 0.08, transparent: true, opacity: 0.28 });
     const oreGlintMat = new THREE.MeshStandardMaterial({ color: 0x857058, roughness: 0.78, metalness: 0.12, transparent: true, opacity: 0.08 });
+    this._oreInit = ore;   // Erzmengen (Startwerte) für die Feld-Ressourcenanzeige beim Anklicken
     const dummy = new THREE.Object3D();
     let count = 0; for (let i = 0; i < ore.length; i++) if (ore[i]) count++;
     if (count) {
@@ -2006,14 +2029,115 @@ export class Renderer {
     return geo;
   }
 
+  // Brücken-Deckhöhen: damit eine Brücke eine SCHLUCHT in angemessener Höhe überspannt (statt in den
+  // Graben zu tauchen), liegt das Deck auf Höhe der Uferränder. Pro Brückenzelle die maximale Boden-
+  // höhe der angrenzenden Nicht-Brückenzellen (= Ufer) ermitteln und über die zusammenhängende Brücke
+  // verteilen (max), sodass das Deck flach auf Randniveau verläuft; nie unter Wasser-/Bodenfläche.
+  _bridgeDeckHeights(cells, offset) {
+    const set = new Set(cells);
+    const deck = new Map();
+    const N8 = [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [1, -1], [-1, 1], [-1, -1]];
+    for (const idx of cells) {
+      const gx = idx % this.mapW, gy = (idx / this.mapW) | 0;
+      let rim = -Infinity;
+      for (const [dx, dy] of N8) {
+        const nx = gx + dx, ny = gy + dy;
+        if (nx < 0 || ny < 0 || nx >= this.mapW || ny >= this.mapH) continue;
+        if (set.has(ny * this.mapW + nx)) continue;       // Brückenzelle → kein Ufer
+        rim = Math.max(rim, this.heightAt(nx * TILE, ny * TILE));
+      }
+      deck.set(idx, rim);
+    }
+    // Randhöhe über die Brücke verteilen (mehrere Durchläufe bis stabil) → flaches Deck.
+    for (let pass = 0; pass < 64; pass++) {
+      let changed = false;
+      for (const idx of cells) {
+        const gx = idx % this.mapW, gy = (idx / this.mapW) | 0;
+        let best = deck.get(idx);
+        for (const [dx, dy] of N8) {
+          const ni = (gy + dy) * this.mapW + (gx + dx);
+          if (set.has(ni)) { const v = deck.get(ni); if (v > best) best = v; }
+        }
+        if (best > deck.get(idx)) { deck.set(idx, best); changed = true; }
+      }
+      if (!changed) break;
+    }
+    // Deck nie unter die lokale Wasser-/Bodenfläche; Boden für die Pfeiler merken.
+    const out = new Map();
+    for (const idx of cells) {
+      const gx = idx % this.mapW, gy = (idx / this.mapW) | 0;
+      const x = gx * TILE, z = gy * TILE;
+      const ground = this.heightAt(x, z);
+      const base = this._overlayY(x, z, offset, true);
+      const rim = deck.get(idx);
+      const top = Math.max(base, (rim > -Infinity ? rim + offset : base));
+      out.set(idx, { x, z, top, ground });
+    }
+    return out;
+  }
+
+  // Brücken-Mesh: ebenes Deck auf Uferniveau + Pfeiler hinab zum Schluchtboden.
+  _makeBridgeGeometry(cells, opts = {}) {
+    if (!cells.length) return this._makeEmptyOverlayGeometry();
+    const width = opts.width ?? TILE * 1.15;
+    const offset = opts.offset ?? 0.34;
+    const heights = this._bridgeDeckHeights(cells, offset);
+    const positions = [], indices = [];
+    const addQuad = (ax, ay, az, bx, by, bz, cx, cy, cz, dx, dy, dz) => {
+      const n = positions.length / 3;
+      positions.push(ax, ay, az, bx, by, bz, cx, cy, cz, dx, dy, dz);
+      indices.push(n, n + 1, n + 2, n, n + 2, n + 3);
+    };
+    const directions = [[1, 0], [0, 1], [1, 1], [1, -1]];
+    for (const idx of cells) {
+      const c = heights.get(idx);
+      // Deck-Kappe (kleines Quadrat) auf Deckhöhe.
+      const r = width * 0.5;
+      addQuad(c.x - r, c.top, c.z - r, c.x + r, c.top, c.z - r, c.x + r, c.top, c.z + r, c.x - r, c.top, c.z + r);
+      // Pfeiler zum Boden, wenn das Deck merklich über dem Untergrund schwebt (Schlucht).
+      if (c.top - c.ground > 0.6) {
+        const pr = width * 0.18, py = c.ground - 0.2;
+        for (const [sx, sz] of [[-1, -1], [1, -1], [1, 1], [-1, 1]]) {
+          const px = c.x + sx * r * 0.6, pz = c.z + sz * r * 0.6;
+          addQuad(px - pr, c.top, pz, px + pr, c.top, pz, px + pr, py, pz, px - pr, py, pz);
+          addQuad(px, c.top, pz - pr, px, c.top, pz + pr, px, py, pz + pr, px, py, pz - pr);
+        }
+      }
+    }
+    // Deck-Bänder zwischen benachbarten Zellen (auf interpolierter Deckhöhe) → durchgehende Fahrbahn.
+    for (const idx of cells) {
+      const a = heights.get(idx);
+      const gx = idx % this.mapW, gy = (idx / this.mapW) | 0;
+      for (const [dx, dy] of directions) {
+        const ni = (gy + dy) * this.mapW + (gx + dx);
+        const b = heights.get(ni);
+        if (!b) continue;
+        const ddx = b.x - a.x, ddz = b.z - a.z, len = Math.hypot(ddx, ddz);
+        if (len <= 0.001) continue;
+        const px = -ddz / len * width * 0.5, pz = ddx / len * width * 0.5;
+        addQuad(a.x + px, a.top, a.z + pz, b.x + px, b.top, b.z + pz, b.x - px, b.top, b.z - pz, a.x - px, a.top, a.z - pz);
+      }
+    }
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+    geo.setIndex(indices);
+    geo.computeVertexNormals();
+    geo.computeBoundingSphere();
+    return geo;
+  }
+
   // Straßennetz aus dem Snapshot: Indexliste → durchgehendes Fahrbahn-Ribbon knapp über dem Boden.
   updateRoads(list) {
     if (!this.roadMesh || !this.height || !list) return;
-    const sig = this._cellListSig(list);
+    const sig = this._cellListSig(list) + this._fogSig();
     if (sig === this._roadSig) return;
     this._roadSig = sig;
-    const cells = Array.from(list).slice(0, 9000);
-    this._replaceMeshGeometry(this.roadMesh, this._makeRibbonGeometry(cells, { width: TILE * 0.74, offset: 0.085 }));
+    let cells = Array.from(list).slice(0, 9000);
+    this._roadCellSet = new Set(cells);   // für Rechtsverkehr-Spurversatz der Fahrzeuge
+    // Im Nebel: nur Straßen im eigenen Sichtfeld zeigen (gegnerische Straßen verschwinden).
+    if (this.fowEnabled) cells = cells.filter(idx => this._infraCellVisible(idx % this.mapW, (idx / this.mapW) | 0));
+    // Breite Fahrbahn (zweispurig): Fahrzeuge können sich begegnen und rechts aneinander vorbeifahren.
+    this._replaceMeshGeometry(this.roadMesh, this._makeRibbonGeometry(cells, { width: TILE * 1.5, offset: 0.085 }));
   }
 
   // Tunnel aus dem Snapshot: alle Tunneltiles → eine durchgehende, erhabene dunkle Röhre.
@@ -2022,13 +2146,18 @@ export class Renderer {
     const cells = [];
     for (const tn of tunnels || []) {
       const ti = tn.tiles || [];
+      // Im Nebel: fremde Tunnel nur zeigen, wenn ein Tile im eigenen Sichtfeld liegt (eigene immer).
+      const own = !this.fowEnabled || tn.owner === this._fowSeat;
+      let visible = own;
+      if (!visible) { for (let k = 0; k + 1 < ti.length; k += 2) { if (this._infraCellVisible(ti[k], ti[k + 1])) { visible = true; break; } } }
+      if (!visible) continue;
       for (let k = 0; k + 1 < ti.length; k += 2) {
         const gx = ti[k], gy = ti[k + 1];
         if (gx >= 0 && gy >= 0 && gx < this.mapW && gy < this.mapH) cells.push(gy * this.mapW + gx);
       }
     }
     cells.sort((a, b) => a - b);
-    const sig = this._cellListSig(cells);
+    const sig = this._cellListSig(cells) + this._fogSig();
     if (sig === this._tunnelSig) return;
     this._tunnelSig = sig;
     this._replaceMeshGeometry(this.tunnelMesh, this._makeRibbonGeometry(cells, { width: TILE * 0.92, offset: 0.5 }));
@@ -2052,7 +2181,7 @@ export class Renderer {
     const sig = this._cellListSig(list);
     if (sig === this._bridgeSig) return;
     this._bridgeSig = sig;
-    this._replaceMeshGeometry(this.bridgeMesh, this._makeRibbonGeometry(list, { width: TILE * 1.15, offset: 0.34, water: true }));
+    this._replaceMeshGeometry(this.bridgeMesh, this._makeBridgeGeometry(list, { width: TILE * 1.15, offset: 0.34 }));
   }
 
   // Schneedecke: Vertex-Farben Richtung Weiß mischen; geschmolzene Zellen kehren zur Basisfarbe zurück.
@@ -2109,6 +2238,15 @@ export class Renderer {
     if (sig === this._oilSig) return;
     this._oilSig = sig;
     this._applyOilDelta(delta);
+  }
+
+  // Erz-Restmengen aktualisieren (für die Feld-Ressourcenanzeige): überschreibt die Startwerte in
+  // _oreInit mit den vom Server gestreamten aktuellen Restmengen geänderter Zellen.
+  updateOre(delta) {
+    if (!delta || !this._oreInit) return;
+    if (delta === this._oreDeltaSeen) return;   // dasselbe Delta nicht doppelt anwenden
+    this._oreDeltaSeen = delta;
+    for (let n = 0; n < delta.length; n += 2) this._oreInit[delta[n]] = delta[n + 1] || 0;
   }
 
   _applyOilDelta(delta) {
@@ -2288,6 +2426,18 @@ export class Renderer {
     return this.height[gy * this.mapW + gx] * HEIGHT_SCALE;
   }
 
+  // Rohstoffvorkommen an einem Weltpunkt (für die Anzeige beim Anklicken eines Öl-/Erzfeldes):
+  // Öl ist live (Snapshot), Erz ist der Startwert (wird serverseitig nicht gestreamt → Näherung).
+  resourceAt(wx, wz) {
+    if (!this.mapW) return null;
+    const gx = Math.max(0, Math.min(this.mapW - 1, Math.round(wx / TILE)));
+    const gy = Math.max(0, Math.min(this.mapH - 1, Math.round(wz / TILE)));
+    const i = gy * this.mapW + gx;
+    const oil = this.oilAmount ? (this.oilAmount[i] || 0) : 0;
+    const ore = this._oreInit ? (this._oreInit[i] || 0) : 0;
+    return (oil > 0 || ore > 0) ? { ore: Math.round(ore), oil: Math.round(oil) } : null;
+  }
+
   _waterSurfaceYAtIdx(idx) {
     if (!this.height) return 0;
     const ground = this.height[idx] * HEIGHT_SCALE;
@@ -2359,6 +2509,7 @@ export class Renderer {
       this._clearEnemyMist();
       return;
     }
+    this._fowSeat = seat;
     const night = (env?.d ?? 1) < 0.25;
     this._fowNight = night;
     this._fowWeatherFog = env?.w === 'fog' ? 1 : 0;
@@ -2366,12 +2517,15 @@ export class Renderer {
     for (const e of entities) {
       if (e.owner !== seat) continue;
       const def = e.etype === 'unit' ? this._fowData?.units?.[e.kind] : this._fowData?.buildings?.[e.kind];
-      let r = (def?.sight || (e.etype === 'building' ? 5 : 4)) * TILE;
+      const isB = e.etype === 'building';
+      let r = (def?.sight || (isB ? 5 : 4)) * TILE;
+      // Größerer Aufklärungsradius — Gebäude überblicken ihr Umland deutlich weiter als Einheiten.
+      r *= isB ? 1.6 : 1.3;
       if (night) {
-        const litBuilding = e.etype === 'building' && e.powered !== false && e.buildProgress >= 1;
-        r *= litBuilding ? 0.8 : 0.42;
-        if (litBuilding) r = Math.max(r, 9);
-      } else r *= 1.15;
+        const litBuilding = isB && e.powered !== false && e.buildProgress >= 1;
+        r *= litBuilding ? 0.62 : 0.34;
+        if (litBuilding) r = Math.max(r, 11);
+      }
       circles.push({ x: e.x, y: e.y, r });
     }
     circles.sort((a, b) => b.r - a.r);
@@ -2409,6 +2563,38 @@ export class Renderer {
     return false;
   }
 
+  // Infrastruktur-Sichtbarkeit für den Nebel des Krieges: bei aktivem Nebel ist eine Leitung/Straße/
+  // Brücke/Tunnel-Zelle nur sichtbar, wenn sie aktuell im eigenen Sichtfeld liegt (Gegner-Infra
+  // verschwindet so im Nebel). Tile-Koordinaten → Weltmitte.
+  _infraCellVisible(gx, gy) {
+    if (!this.fowEnabled) return true;
+    return this._inOwnSight(gx * TILE + TILE / 2, gy * TILE + TILE / 2);
+  }
+
+  // Rechtsverkehr-Spurversatz: steht eine Landeinheit auf einer Straße, wird sie um eine halbe Spur
+  // nach RECHTS (bzgl. Fahrtrichtung) versetzt. Entgegenkommende fahren so rechts aneinander vorbei.
+  _laneOffset(e) {
+    if (e.domain !== 'land' || !this._roadCellSet || this._roadCellSet.size === 0) return ZERO_OFFSET;
+    const tx = Math.floor(e.x / TILE), ty = Math.floor(e.y / TILE);
+    if (tx < 0 || ty < 0 || tx >= this.mapW || ty >= this.mapH) return ZERO_OFFSET;
+    if (!this._roadCellSet.has(ty * this.mapW + tx)) return ZERO_OFFSET;
+    const f = e.facing || 0;
+    const lane = TILE * 0.3;                 // halbe Fahrbahnbreite
+    return { x: Math.sin(f) * lane, z: -Math.cos(f) * lane };  // rechte Seite der Fahrtrichtung
+  }
+
+  // Grobe Signatur des Sichtfelds — ändert sich nur, wenn sich die Sicht spürbar verschiebt, damit
+  // die Overlay-Meshes nicht jeden Frame neu gebaut werden.
+  _fogSig() {
+    if (!this.fowEnabled) return 'off';
+    let h = 2166136261 >>> 0;
+    for (const c of this._fowCircles) {
+      h = Math.imul(h ^ Math.round(c.x / 8), 16777619) >>> 0;
+      h = Math.imul(h ^ Math.round(c.y / 8), 16777619) >>> 0;
+    }
+    return 'f' + h;
+  }
+
   _updateFogOverlay(night) {
     if (!this.fowMesh) return;
     this.fowMesh.visible = this.fowEnabled;
@@ -2431,13 +2617,15 @@ export class Renderer {
     // durchgehende Leitung mit Kurven/T-Stücken/Kreuzungen aufgebaut werden.
     this._pipeAnchors = [];
     const bridgeCells = new Set(this._baseBridgeCells || []);
+    // Im Nebel: fremde Pipelines/Brücken nur sichtbar, wenn im eigenen Sichtfeld (eigene immer).
+    const infraVisible = (e) => !this.fowEnabled || e.owner === seat || this._inOwnSight(e.x, e.y);
     for (const e of entities) {
       if (e.etype !== 'building') continue;
-      if (PIPE_CONNECT.has(e.kind) && (e.buildProgress ?? 1) >= 1) {
+      if (PIPE_CONNECT.has(e.kind) && (e.buildProgress ?? 1) >= 1 && infraVisible(e)) {
         const tx = e.x / TILE - 0.5, ty = e.y / TILE - 0.5;
         this._pipeAnchors.push({ id: e.id, owner: e.owner, kind: e.kind, x: e.x, z: e.y, tx, ty, size: e.size || 1 });
       }
-      if (e.kind === 'bridge' && (e.buildProgress ?? 1) >= 1) {
+      if (e.kind === 'bridge' && (e.buildProgress ?? 1) >= 1 && infraVisible(e)) {
         const tx = Math.round(e.x / TILE - 0.5), ty = Math.round(e.y / TILE - 0.5);
         const size = Math.max(1, e.size || 1);
         for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) {
@@ -2523,6 +2711,15 @@ export class Renderer {
               { additive: true, grow: 0.9, vy: 1.4, opacity: 0.9 });
           }
         }
+        // Depot-Aktivität: Öldepot/Wasserturm zeigen mit aufsteigenden Tröpfchen/Dampf, dass über
+        // eine funktionierende Pipeline gefördert wird (an die Förderkette gekoppelt).
+        if (e.buildProgress >= 1 && this._canSpawnEffect() && Math.random() < 0.10) {
+          if (e.kind === 'oil_depot' && this.time - (this._oilFlowT ?? -9) < 1.5) {
+            this._sprite(0x20201c, e.x, y + 2.4, e.y, 0.7, 1.0, { grow: 1.4, vy: 1.0, opacity: 0.4 });
+          } else if (e.kind === 'water_tower' && this.time - (this._waterFlowT ?? -9) < 1.5) {
+            this._sprite(0x6cd2ff, e.x + (Math.random() - 0.5), y + 2.6, e.y + (Math.random() - 0.5), 0.5, 0.8, { additive: true, grow: 1.1, vy: 1.2, opacity: 0.5 });
+          }
+        }
       }
       if (WATER_KINDS.has(e.kind)) {
         // Schiffe folgen der lokalen dynamischen Wasseroberfläche (Meer, Fluss, See, Flut).
@@ -2542,7 +2739,13 @@ export class Renderer {
         const yAlpha = smoothAlpha(this._lastDt, lift >= 5 ? 5.5 : 8.5);
         if (g.userData._smoothY == null) g.userData._smoothY = targetY;
         else g.userData._smoothY += (targetY - g.userData._smoothY) * yAlpha;
-        g.position.set(e.x, g.userData._smoothY, e.y);
+        // Rechtsverkehr: auf Straßen scheren Einheiten weich auf die rechte Spur aus → sie begegnen
+        // sich und fahren aneinander vorbei (rein visueller Versatz, ohne die Simulation zu stören).
+        const off = this._laneOffset(e);
+        const la = smoothAlpha(this._lastDt, 3.5);
+        g.userData._laneX = (g.userData._laneX || 0) + (off.x - (g.userData._laneX || 0)) * la;
+        g.userData._laneZ = (g.userData._laneZ || 0) + (off.z - (g.userData._laneZ || 0)) * la;
+        g.position.set(e.x + g.userData._laneX, g.userData._smoothY, e.y + g.userData._laneZ);
       } else {
         g.userData._smoothY = targetY;
         g.position.set(e.x, targetY, e.y);
@@ -2859,7 +3062,8 @@ export class Renderer {
     camera.aspect = width / height;
     camera.near = 0.1;
     camera.far = Math.max(60, maxDim * 8);
-    camera.position.set(maxDim * 1.05, maxDim * 0.72, maxDim * 1.45);
+    // Näher heran, damit das Modell die Thumbnail-Kachel gut füllt (vorher zu klein/viel Leerraum).
+    camera.position.set(maxDim * 0.8, maxDim * 0.56, maxDim * 1.12);
     camera.lookAt(target);
     camera.updateProjectionMatrix();
 
@@ -2898,6 +3102,8 @@ export class Renderer {
   }
 
   _prepareModelPreviewGroup(group) {
+    // Fundament + Hoflampe ganz aus der Vorschau entfernen (auch aus der Rahmen-Bounding-Box).
+    for (const o of group.userData.foundation || []) group.remove(o);
     const hidden = [
       group.userData.ring,
       group.userData.bar,
@@ -3108,7 +3314,8 @@ export class Renderer {
           x1 -= ux * inset;
           z1 -= uz * inset;
         }
-        if (Math.hypot(x1 - a.x, z1 - a.z) > 0.35) edges.push({ x0: a.x, z0: a.z, x1, z1, dist });
+        // Anschluss an ein Gebäude (Pumpwerk/Bohrturm/Depot) → letztes Stück als flexibler Schlauch.
+        if (Math.hypot(x1 - a.x, z1 - a.z) > 0.35) edges.push({ x0: a.x, z0: a.z, x1, z1, dist, flex: b.kind !== 'pipe' });
       }
     }
     return edges;
@@ -3116,12 +3323,12 @@ export class Renderer {
 
   _makePipelineGeometry(edges) {
     if (!edges.length) return this._makeEmptyOverlayGeometry();
-    const positions = [], indices = [];
+    const positions = [], indices = [], flows = [];
     const seg = 8, radius = 0.17;
     const edgeInfos = edges.map((e, index) => {
       const dx = e.x1 - e.x0, dz = e.z1 - e.z0, len = Math.hypot(dx, dz);
       const ux = len > 0 ? dx / len : 1, uz = len > 0 ? dz / len : 0;
-      return { e, index, len, ux, uz, rx: -uz, rz: ux, passThrough: false };
+      return { e, index, len, ux, uz, rx: -uz, rz: ux, passThrough: false, flex: !!e.flex };
     });
     const pointKey = (x, z) => `${Math.round(x * 100)},${Math.round(z * 100)}`;
     const endpointMap = new Map();
@@ -3168,25 +3375,29 @@ export class Renderer {
       const u = 1 - d / half;
       return Math.sin(u * Math.PI * 0.5) * PIPE_BRIDGE_LIFT;
     };
-    const addRing = (x, y, z, rx, rz) => {
+    const addRing = (x, y, z, rx, rz, rad = radius, flow = 0) => {
       const start = positions.length / 3;
       for (let n = 0; n < seg; n++) {
         const a = (n / seg) * Math.PI * 2;
-        const side = Math.cos(a) * radius, up = Math.sin(a) * radius;
+        const side = Math.cos(a) * rad, up = Math.sin(a) * rad;
         positions.push(x + rx * side, y + up, z + rz * side);
+        flows.push(flow);
       }
       return start;
     };
     for (const info of edgeInfos) {
       if (info.len < 0.05) continue;
       let prev = -1;
-      const steps = Math.max(1, Math.ceil(info.len / (TILE * 0.45)));
+      const flexRad = info.flex ? PIPE_FLEX_RADIUS : radius;
+      const steps = Math.max(info.flex ? 4 : 1, Math.ceil(info.len / (TILE * 0.45)));
       for (let s = 0; s <= steps; s++) {
         const f = s / steps;
         const x = info.e.x0 + (info.e.x1 - info.e.x0) * f;
         const z = info.e.z0 + (info.e.z1 - info.e.z0) * f;
-        const y = this.heightAt(x, z) + 0.42 + liftAt(x, z, info.ux, info.uz, info.passThrough);
-        const cur = addRing(x, y, z, info.rx, info.rz);
+        // Flexibler Schlauch: durchhängende Kettenlinie (Sinus-Bogen) statt starrer Geraden.
+        const sag = info.flex ? PIPE_FLEX_SAG * Math.sin(f * Math.PI) : 0;
+        const y = this.heightAt(x, z) + 0.42 + liftAt(x, z, info.ux, info.uz, info.passThrough) - sag;
+        const cur = addRing(x, y, z, info.rx, info.rz, flexRad, f * info.len); // Bogenlänge → Fluss-Phase
         if (prev >= 0) {
           for (let n = 0; n < seg; n++) {
             const p = (n + 1) % seg;
@@ -3198,6 +3409,7 @@ export class Renderer {
     }
     const geo = new THREE.BufferGeometry();
     geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+    geo.setAttribute('aFlow', new THREE.Float32BufferAttribute(flows, 1)); // Bogenlänge für Durchfluss-Shader
     geo.setIndex(indices);
     geo.computeVertexNormals();
     geo.computeBoundingSphere();
@@ -3309,12 +3521,16 @@ export class Renderer {
       // reicht tief nach unten und schließt am Hang den Spalt zum Gelände.
       if (!low) {
         const sz = e.size * TILE;
-        g.add(boxMesh(sz * 1.06, 3.6, sz * 1.06, this.envMats.concrete, 0, -1.82, 0));
+        const slab = boxMesh(sz * 1.06, 3.6, sz * 1.06, this.envMats.concrete, 0, -1.82, 0);
+        g.add(slab);
         // Hoflampe (Lampen-Mesh an jedem Gebäude; echte Punktlichter kommen aus dem Pool)
         const px = sz * 0.42;
-        g.add(cylMesh(0.05, 0.07, 1.7, this.envMats.metal, px, 0.85, px, 6));
+        const pole = cylMesh(0.05, 0.07, 1.7, this.envMats.metal, px, 0.85, px, 6);
+        g.add(pole);
         const head = new THREE.Mesh(new THREE.SphereGeometry(0.15, 8, 6), this.lampMat);
         head.position.set(px, 1.78, px); g.add(head);
+        // Fundament + Hoflampe für die Vorschau (Techtree/Baumenü) ausblenden — dort nur das Gebäude.
+        g.userData.foundation = [slab, pole, head];
       } else g.userData.noLamp = true;
       // Fenster-Meshes einsammeln (Lastabwurf schaltet sie auf das „aus"-Material um).
       const winMeshes = [];
@@ -3937,6 +4153,22 @@ export class Renderer {
     if (clone.emissive && base.emissive) clone.emissive.copy(base.emissive).multiplyScalar(1 - factor * 0.9);
   }
 
+  // Dunkler Einschlagkrater (Ringpuffer) — große Waffen brennen eine bleibende Narbe ins Gelände.
+  spawnCrater(x, z, scale = 1) {
+    if (!this.craterMesh) return;
+    const d = this._craterDummy;
+    const i = this._craterIdx % 160;
+    d.position.set(x, this.heightAt(x, z) + 0.05, z);
+    d.rotation.set(0, (this._craterIdx * 1.7) % (Math.PI * 2), 0);
+    d.scale.set(scale, 1, scale);
+    d.updateMatrix();
+    this.craterMesh.setMatrixAt(i, d.matrix);
+    this.craterMesh.instanceMatrix.needsUpdate = true;
+    this._craterIdx++;
+    this._craterCount = Math.min(160, this._craterCount + 1);
+    this.craterMesh.count = this._craterCount;
+  }
+
   spawnExplosion(x, y, z, scale = 1) {
     const cy = y + 1;
     // 1) greller additiver Blitz
@@ -4394,6 +4626,34 @@ export class Renderer {
     if (this.buildGhost) this.buildGhost.visible = false;
   }
 
+  // Bau-Reichweite: zeigt als geländefolgende Ringe, wo ein eingeschränkt platzierbares Gebäude
+  // gebaut werden darf (Bauradius ums HQ / Anker-Reichweite). centers = [{x,z,r}], r in Welt-Einheiten.
+  showBuildRange(centers) {
+    if (!this._buildRangeGroup) { this._buildRangeGroup = new THREE.Group(); this._buildRangeGroup.renderOrder = 6; this.scene.add(this._buildRangeGroup); }
+    const g = this._buildRangeGroup;
+    const sig = centers.map(c => `${Math.round(c.x)},${Math.round(c.z)},${Math.round(c.r)}`).join('|');
+    g.visible = true;
+    if (sig === this._buildRangeSig) return;     // gleiche Lage → Geometrie behalten
+    this._buildRangeSig = sig;
+    for (const ch of g.children) ch.geometry.dispose();
+    g.clear();
+    const SEG = 72;
+    for (const c of centers) {
+      const pos = [];
+      for (let n = 0; n <= SEG; n++) {
+        const a = (n / SEG) * Math.PI * 2;
+        const x = c.x + Math.cos(a) * c.r, z = c.z + Math.sin(a) * c.r;
+        pos.push(x, this.heightAt(x, z) + 0.3, z);
+      }
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+      const line = new THREE.Line(geo, new THREE.LineBasicMaterial({ color: 0x6cd2ff, transparent: true, opacity: 0.55, depthWrite: false }));
+      g.add(line);
+    }
+  }
+
+  hideBuildRange() { if (this._buildRangeGroup) { this._buildRangeGroup.visible = false; this._buildRangeSig = null; } }
+
   // Lawinen-Effekt: Schneewolken, Schaum und kompakte Schneebrocken kaskadieren den Pfad entlang.
   spawnAvalanche(path) {
     const rockEvery = this.quality === 'low' ? 8 : this.quality === 'medium' ? 6 : 4;
@@ -4479,6 +4739,8 @@ export class Renderer {
       if (ev.type === 'explosion') {
         const sc = 1 + (ev.splash || 0) * 0.6;
         this.spawnExplosion(ev.x, this.heightAt(ev.x, ev.y), ev.y, sc);
+        // Große Waffen (ordentlicher Splash) hinterlassen einen bleibenden Krater am Boden.
+        if ((ev.splash || 0) >= 1.4 && !this._isSeaWorldPoint(ev.x, ev.y)) this.spawnCrater(ev.x, ev.y, 0.7 + (ev.splash || 0) * 0.35);
         if (audio) audio.explosion(sc, vol);
       } else if (ev.type === 'fire') {
         this.spawnTracer(ev.x, this.heightAt(ev.x, ev.y), ev.y, ev.tx, this.heightAt(ev.tx, ev.ty), ev.ty);
@@ -4503,6 +4765,9 @@ export class Renderer {
         this.spawnDumpCargo(ev.x, ev.y, ev.dx ?? ev.x, ev.dy ?? ev.y);
       } else if (ev.type === 'industry') {
         this.spawnIndustryFx(ev.kind, ev.x, ev.y);
+        // Aktive Förderkette merken → Pipeline-Flussanimation + Depot-Aktivität.
+        if (ev.kind === 'oil_derrick') this._oilFlowT = this.time;
+        else if (ev.kind === 'water_pump') this._waterFlowT = this.time;
       } else if (ev.type === 'produced') {
         if (audio && ev.owner === seat) audio.ready_(1);
       } else if (ev.type === 'recover') {
@@ -4550,6 +4815,18 @@ export class Renderer {
 
   updateEffects(dt) {
     const visible = this._particlesVisible();
+    // Pipeline-Flussanimation: leuchtet/pulsiert, solange Öl- oder Wasserförderung aktiv ist.
+    if (this.pipeMat) {
+      const flowActive = (this.time - (this._oilFlowT ?? -9) < 1.5) || (this.time - (this._waterFlowT ?? -9) < 1.5);
+      const target = flowActive ? 0.28 + 0.16 * Math.sin(this.time * 6) : 0;
+      this.pipeMat.emissiveIntensity += (target - this.pipeMat.emissiveIntensity) * Math.min(1, dt * 6);
+      // wandernde Durchfluss-Bänder
+      if (this._pipeShader) {
+        this._pipeShader.uniforms.uFlowTime.value = (this._pipeShader.uniforms.uFlowTime.value + dt * 0.9) % 1024;
+        const on = flowActive ? 1 : 0, u = this._pipeShader.uniforms.uFlowOn;
+        u.value += (on - u.value) * Math.min(1, dt * 4);
+      }
+    }
     this._spawnCurrentParticles(dt);
     this._spawnSourceParticles(dt);
     for (let i = this.effects.length - 1; i >= 0; i--) {

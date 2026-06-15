@@ -48,6 +48,16 @@ export function serializeOil(world) {
   return out;
 }
 
+// Erz-Restmengen (echte Werte) für die Feld-Ressourcenanzeige — nur geänderte Zellen.
+export function serializeOre(world) {
+  const t = world.terrain;
+  if (!t.ore || !t.oreDirty || t.oreDirty.size === 0) return null;
+  const out = [];
+  for (const i of t.oreDirty) out.push(i, Math.max(0, Math.round(t.ore[i])));
+  t.oreDirty.clear();
+  return out;
+}
+
 // Terraforming-Deltas: Zellen, deren Höhe durch Bauten (Wall/Graben/Deich/Damm) verändert wurde.
 // Format: flaches Array [idx, h*1000, …]. Meist leer → günstig; der Client passt nur diese Vertices an.
 export function serializeTerraform(world) {
@@ -114,7 +124,7 @@ export function serializeInit(world) {
       // über snap.terra; so kann der Client Höhen exakt zurücksetzen, wenn ein Delta verschwindet.
       height: Array.from(t.height0, v => Math.round(v * 1000) / 1000),
       type: Array.from(t.type),
-      ore: Array.from(t.ore, v => (v > 0 ? 1 : 0)), // nur Vorkommen-Maske für Rendering
+      ore: Array.from(t.ore, v => Math.round(v)), // Erzmengen (für Rendering UND Feld-Ressourcenanzeige)
       oil: serializeInitialOil(world), // sichtbare Öl-Sickerflecken [idx, menge]
       water: Array.from(t.water, v => (v > WET_DEPTH ? 1 : 0)), // statische Nässe-Maske (Rendering-Basis)
       // Volle Basistiefen: der Client baut daraus das Wasser-Oberflächenmesh (Meer, Flüsse,
@@ -143,8 +153,11 @@ export function serializeSnapshot(world) {
       const load = e.carried ? e.carried.length : Math.round(e.cargo || 0);
       const working = e.order && (e.order.type === 'construct' || e.order.type === 'terra'
         || (e.kind === 'builder' && e.order.type === 'harvest' && !e.moveTarget));
+      // LKW: persistenten Transportmodus (haulMode) statt der transienten Ladungs-Rolle senden,
+      // damit die UI den gewählten Modus (Auto/Erz/Material) korrekt hervorhebt.
+      const roleField = e.kind === 'truck' ? (e.haulMode === 'ore' ? 'ore' : e.haulMode === 'materials' ? 'earth' : null) : e.resourceRole;
       ents.push([e.id, 0, kindId(e.kind), e.owner, r1(e.x), r1(e.y),
-        Math.max(0, Math.round(e.hp)), e.maxHp, r2(e.facing), load, e.vet || 0, roleId(e.resourceRole),
+        Math.max(0, Math.round(e.hp)), e.maxHp, r2(e.facing), load, e.vet || 0, roleId(roleField),
         working ? 1 : 0,
         e.abandoned ? 1 : 0,
         unitFlags(world, e), ownerMask(e._sonarBy)]);
@@ -186,6 +199,8 @@ export function serializeSnapshot(world) {
   };
   const oil = serializeOil(world);
   if (oil) snap.oil = oil;
+  const ore = serializeOre(world);
+  if (ore) snap.ore = ore;
   // Schnee ändert sich langsam → nur jeden 10. Tick mitsenden (1 Hz).
   if (world.tick % 10 === 0) snap.snow = serializeSnow(world);
   // Straßennetz nur senden, wenn es sich geändert hat (roads.js setzt roadDirty).
@@ -236,7 +251,7 @@ function unitFlags(world, e) {
 // Tunnel-Strukturen kompakt: id, flache Tile-Liste, beide Mündungs-Tiles, Versiegelungs-/Aktivflags.
 export function serializeTunnels(world) {
   return (world.tunnels || []).map(tn => ({
-    id: tn.id,
+    id: tn.id, owner: tn.owner,
     tiles: tn.tiles.flat(),
     a: tn.aTile, b: tn.bTile,
     sa: tn.sealedA ? 1 : 0, sb: tn.sealedB ? 1 : 0, on: tn.active ? 1 : 0,

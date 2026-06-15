@@ -4,6 +4,7 @@ import { CAMERA_TILT_MAX, CAMERA_TILT_MIN } from './renderer.js';
 const TILE = 2;
 const CLIENT_WET_DEPTH = 0.035;
 const CLIENT_NAVIGABLE_DEPTH = 0.12;
+const CLIENT_SEA_LEVEL = 0.28;   // spiegelt SEA_LEVEL (constants.js) — Süßwasser-Erkennung fürs Pumpwerk
 const TRANSPORT_KINDS = new Set(['transport_air', 'amphib_transport']);
 const TRANSPORT_CAP = 6;
 const PILE_KINDS = new Set(['earth_pile', 'ore_pile']);
@@ -180,8 +181,14 @@ export class Input {
       }
       if (best == null) best = bestBuilding;
       if (best != null) picked.push(best);
+      // Leeres Feld angeklickt: Öl-/Erzvorkommen darunter zur Anzeige merken (sonst löschen).
+      if (best == null) {
+        const g = this.renderer.groundPoint(d.x1, d.y1);
+        this.fieldInfo = g ? this.renderer.resourceAt(g.x, g.z) : null;
+      } else this.fieldInfo = null;
     }
     for (const id of picked) this.selected.add(id);
+    if (picked.length) this.fieldInfo = null;
     this.onSelectionChange && this.onSelectionChange();
   }
 
@@ -280,7 +287,7 @@ export class Input {
   }
 
   isLineMode() {
-    return !!this.buildMode && (LINE_KINDS.has(this.buildMode) || this.buildMode.startsWith('_terra_'));
+    return !!this.buildMode && (LINE_KINDS.has(this.buildMode) || this.buildMode.startsWith('_terra_') || this.buildMode === '_canal_');
   }
 
   isTerraformMode() {
@@ -306,7 +313,50 @@ export class Input {
     if (!g) { this.renderer.hideBuildGhost(); return; }
     const tx = Math.floor(g.x / TILE), ty = Math.floor(g.z / TILE);
     const size = this.data?.buildings?.[this.buildMode]?.size || 1;
-    this.renderer.showBuildGhost(tx, ty, size, !this.buildBlockedByWater(this.buildMode, tx, ty, size));
+    this.updateBuildRangeOverlay();
+    const valid = !this.buildBlockedByWater(this.buildMode, tx, ty, size)
+      && !this.buildOutsideRange(this.buildMode, tx, ty, size);
+    this.renderer.showBuildGhost(tx, ty, size, valid);
+  }
+
+  // Erlaubte Bauzonen (Tile-Koordinaten, r in Tiles) für ein eingeschränkt platzierbares Gebäude.
+  // null = überall erlaubt (remoteBuild: Pumpwerk, Bohrturm, Pipeline, Straße …). Spiegelt die
+  // Server-Regeln aus sim.js (inBuildRadius) bzw. world.js (hasNearbyBuildingAnchor) wider.
+  buildAllowedCenters(kind) {
+    const def = this.data?.buildings?.[kind];
+    if (!def || def.remoteBuild) return null;
+    const ANCHOR_ROLES = new Set(['logistics', 'defense', 'production']);
+    const anchored = ANCHOR_ROLES.has(def.role) || def.resourceDepot;
+    const out = [];
+    for (const e of this.myEntities()) {
+      if (e.etype !== 'building' || (e.buildProgress ?? 1) < 1 || e.dead) continue;
+      const ed = this.data.buildings[e.kind] || {};
+      if (anchored) {
+        if (['terrain', 'infrastructure', 'fortification', 'hydro'].includes(ed.role)) continue;
+        if (ed.pipe || ed.bridges || ed.tunnels || ed.roadBuilt) continue;
+        out.push({ x: e.x, z: e.y, r: 7 + (e.size || 1) });   // BUILD_ANCHOR_RANGE = 7 Tiles
+      } else {
+        const r = (ed.buildRadius || 0) + (e.size || 1);
+        if (r > 0) out.push({ x: e.x, z: e.y, r });
+      }
+    }
+    return out;
+  }
+
+  buildOutsideRange(kind, tx, ty, size = 1) {
+    if (this.isLineMode()) return false;
+    const centers = this.buildAllowedCenters(kind);
+    if (!centers) return false;                 // überall erlaubt
+    if (!centers.length) return true;           // nichts zum Anknüpfen → nirgends erlaubt
+    const cwx = (tx + size / 2) * TILE, cwz = (ty + size / 2) * TILE;
+    return !centers.some(c => Math.hypot(cwx - c.x, cwz - c.z) <= c.r * TILE);
+  }
+
+  updateBuildRangeOverlay() {
+    if (!this.buildMode || this.isLineMode()) { this.renderer.hideBuildRange?.(); return; }
+    const centers = this.buildAllowedCenters(this.buildMode);
+    if (!centers || !centers.length) { this.renderer.hideBuildRange?.(); return; }
+    this.renderer.showBuildRange(centers.map(c => ({ x: c.x, z: c.z, r: c.r * TILE })));
   }
 
   buildBlockedByWater(kind, tx, ty, size = 1) {
@@ -324,6 +374,8 @@ export class Input {
       if (def?.bridges) { if (!wet) return true; continue; } // Brücke nur übers Wasser (jede Tiefe)
       if (def?.buildOnWater && !realWater) return true;
       if (def?.mustStandInWater && !realWater) return true;
+      // Pumpwerk nur in Süßwasser: Bett über Meeresspiegel (Fluss/See), kein Meer.
+      if (def?.freshWater && !(realWater && (r.height?.[i] || 0) > CLIENT_SEA_LEVEL + 0.03)) return true;
       if (!def?.buildOnWater && !waterOptional && wet) return true;
     }
     return false;
@@ -332,6 +384,7 @@ export class Input {
   cancelBuild() {
     this.buildMode = null; this.lineDrag = null;
     this.renderer.hideBuildLine(); this.renderer.hideBuildGhost(); this.renderer.hideTerraformPreview?.();
+    this.renderer.hideBuildRange?.();
     this.onBuildPlaced && this.onBuildPlaced();
   }
 
@@ -384,11 +437,22 @@ export class Input {
   // Segmente mit buildRadius verketten sich selbst (jedes platzierte erweitert die Reichweite).
   finishLine() {
     if (!this.canControl()) return;
+    const d = this.lineDrag;
     const cells = this.lineCells();
     this.renderer.hideBuildLine();
     this.renderer.hideBuildGhost();
     this.renderer.hideTerraformPreview?.();
     this.lineDrag = null;
+    // Kanal: ausgewählte Wasserbau-Schiffe graben entlang Start→Ende einen schiffbaren Kanal.
+    if (this.buildMode === '_canal_') {
+      if (d) {
+        const ex = d.ex ?? d.sx, ey = d.ey ?? d.sy;
+        const units = [...this.selected];
+        if (units.length) this.net.cmd({ type: 'canal', units, sx: d.sx, sy: d.sy, ex, ey });
+      }
+      if (!this.keys.has('shift')) { this.buildMode = null; this.onBuildPlaced && this.onBuildPlaced(); }
+      return;
+    }
     if (!cells.length) return;
     const terra = this.buildMode.startsWith('_terra_');
     for (const [tx, ty] of cells) {

@@ -6,7 +6,7 @@ import {
     PUMP_RATE_WATER, PUMP_RATE_GROUND, PUMP_RAIN_BONUS, PIPE_LINK_RANGE,
   MINE_DIG, WET_DEPTH,
 } from '../constants.js';
-import { worldToTile, tileToWorld, tIdx, inBounds, hasWaterNear, applyHeightDelta, wakeWaterAround } from '../terrain.js';
+import { worldToTile, tileToWorld, tIdx, inBounds, hasWaterNear, isFreshWater, applyHeightDelta, wakeWaterAround } from '../terrain.js';
 import { addResource, hasResourceDepot } from '../world.js';
 import { setMoveGoal, stopMove } from './movement.js';
 import { assignOrePile, fillOrePile } from './construction.js';
@@ -44,11 +44,21 @@ export function stepEconomy(world) {
     // Liefert nur, wenn es ans eigene Netz angeschlossen ist (Basisnähe ODER Leitungskette) —
     // Leitungen sind damit ein strategisches (und verwundbares) Element.
     if (def.pump) {
-      if (e._nearWater == null) e._nearWater = def.mustStandInWater ? true : hasWaterNear(world.terrain, e.tx, e.ty, e.size + 2);
-      if (e._wConnected === true) {
-        let rate = e._nearWater ? PUMP_RATE_WATER : PUMP_RATE_GROUND;
+      // Pumpwerk fördert NUR, wenn es tatsächlich im (Süß-)Wasser steht — fällt das Wasser (Dürre)
+      // unter seine Standfläche, versiegt die Förderung. Live je Tick geprüft (wenige Tiles, billig).
+      let inWater = false;
+      for (let yy = 0; yy < (e.size || 1) && !inWater; yy++) {
+        for (let xx = 0; xx < (e.size || 1) && !inWater; xx++) {
+          if (isFreshWater(world.terrain, e.tx + xx, e.ty + yy)) inWater = true;
+        }
+      }
+      if (e._wConnected === true && inWater) {
+        let rate = PUMP_RATE_WATER;
         if (raining) rate += PUMP_RAIN_BONUS;
         addResource(world, p, 'water', rate * DT);
+        if (((world.tick + e.id) % 20) === 0) {
+          world.events.push({ type: 'industry', kind: e.kind, x: e.x, y: e.y, owner: e.owner }); // Durchfluss-Animation
+        }
       }
     }
   }
@@ -320,6 +330,7 @@ function stepBuilderOre(world) {
     const pile = assignOrePile(world, e, e.harvestNode[0], e.harvestNode[1]);
     if (!pile) { e._mineIdle = 24; continue; }
     terrain.ore[idx] -= amt;
+    (terrain.oreDirty || (terrain.oreDirty = new Set())).add(idx); // Restmenge an den Client streamen
     fillOrePile(world, e, amt);
     carveMiningFurrows(world, e.harvestNode[0], e.harvestNode[1], amt, 0.65);
     if (((world.tick + e.id) % 10) === 0) world.events.push({ type: 'mine', x: e.harvestNode[0] * 2 + 1, y: e.harvestNode[1] * 2 + 1 });

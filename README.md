@@ -165,6 +165,39 @@ Technische Details: [docs/TECHNICAL.md](docs/TECHNICAL.md) · Konzept: [docs/CON
 > unentschieden. Nächste Schritte: Wellen-Sammelpunkte, sichere Routenwahl (Straßen/Brücken im
 > A* bevorzugen). Die Wirtschafts-Deadlocks der Lager-Logistik sind behoben (siehe Memory/Tests).
 
+## Neu in v0.8: Tunnel, Kanäle, Nebel-Infrastruktur, Komfort (Phase 19)
+
+- **Tunnel als durchgehende Röhre**: per Linie von **Hang zu Hang** durch Klippen/Berge gezogen
+  (deutlich teurer als Straßen). **Fahrzeuge UND Wasser** kommen durch; Einheiten verschwinden in
+  der Röhre (nur als Umriss sichtbar) und tauchen am anderen Ende wieder auf. Eine zerstörte
+  Mündung **versiegelt** das Ende (Einheiten nutzen den intakten Ausgang), beide zerstört →
+  **Einsturz** mit allen Einheiten darin. Wasser-Fluidsimulation fließt durch den Tunnel.
+- **Kanal-Schiff**: das Bau-Schiff hebt per Linie einen **schiffbaren Kanal** durch Land aus.
+- **Nebel des Krieges** verbirgt jetzt auch **gegnerische Pipelines, Straßen, Brücken und Tunnel**;
+  der **Sichtradius ist größer**, besonders bei Gebäuden. Eigene Infrastruktur bleibt sichtbar.
+- **Pumpwerk nur im Süßwasser**: Pumpwerke dürfen nur in **Fluss/See** (nicht im Meer) stehen und
+  fördern **nur, solange sie tatsächlich im Wasser stehen** (Dürre legt sie still). Pumpwerke und
+  Bohrtürme lassen sich als **Außenposten fernab der Basis** errichten.
+- **Bau-Radius-Kreis**: beim Platzieren eines reichweitengebundenen Gebäudes zeigen geländefolgende
+  Ringe, **wo gebaut werden darf**; frei platzierbare Bauten (Pumpe/Bohrturm/Leitung/Straße)
+  zeigen keinen Kreis. Der Bau-Geist wird außerhalb der erlaubten Zone rot.
+- **LKW-Transportmodus** umstellbar (Auto / nur Erz / nur Baumaterial) per Auswahlknopf.
+- **Flugeinheiten anklickbar**: Picking trifft sie auf ihrer Flughöhe (Box-Auswahl, Klick,
+  Doppelklick, Befehlsziel).
+- **Ressourcenanzeige**: Klick auf eine **Öl- oder Erzquelle** zeigt die **verbleibende Menge**
+  (Erz-Restmengen werden live gestreamt); Klick auf Lager/LKW zeigt Bestand/Ladung.
+- **Animierter Pipeline-Durchfluss**: bei angeschlossener, fördernder Leitung wandern leuchtende
+  Bänder durch die Röhre; flexibler Schlauch am Pumpwerk/Bohrturm/Depot-Anschluss.
+- **Brücken** überspannen Schluchten auf **Uferniveau** (mit Pfeilern) statt in den Graben zu tauchen.
+- **KI-Strategien & Sekundärziele**: wechselnde Doktrinen (kombiniert, Luftschlag, Marine, Sturm,
+  Belagerung, Überfall, Nacht, **Fluten**), defensiver **Wasserwall** um die Basis, Flutkanäle
+  Richtung Gegner; **gesamtes Fahrzeugspektrum** statt Infanterie-Schwärme; KI baut sinnvolle
+  Brücken/Tunnel/Pipelines und gräbt sich per Deadlock-Cheat aus echten Klemmen.
+- **Audio**: durchgängig **rockiger Soundtrack** (treibender Rock im Hintergrund, harter Rock im
+  Gefecht) und **wuchtigere SFX** (geschichtete Synth-Schüsse/Explosionen + Samples).
+- **Komfort**: größere Icons in Baumenü & Techtree, Straßen ohne HP-Balken, schwimmende
+  Werft/Pumpwerk/Boote, Wall/Graben als steile Sperren (nur per Brücke/Tunnel passierbar).
+
 ## Stand (v0.2) & bekannte Punkte
 
 Lauffähiger, getesteter vertikaler Schnitt: Wirtschaft (Erz als Bau- und Produktionswährung, Energie, Munitions-/

@@ -1011,9 +1011,13 @@ ok(match.player(0).controller === 'ai', 'Sitz fällt nach Disconnect-Timeout an 
   u.waterActive = new Set(patch);
   for (let k = 0; k < 60; k++) { stepWater(tw); tw.tick++; }
   const dryBefore = u.water[iBasin] <= WET_DEPTH;
-  // Graben durch den Rücken ausheben (0.76 → ~0.66) → Stausee fließt ins Trockenbecken.
-  stampFortification(u, ux + 2, uy, 1, 0.5, false, false, data.buildings.trench.terraform);
-  for (let k = 0; k < 200; k++) { stepWater(tw); tw.tick++; }
+  // Rücken flach abgraben (0.76 → 0.66) → Stausee fließt als KANAL ins Trockenbecken. (Bewusst eine
+  // flache Abgrabung: der echte Sperr-Graben ist tiefer und HÄLT Wasser — hier wird nur die generische
+  // „Senken leitet Wasser um"-Mechanik geprüft, unabhängig von der Graben-Tiefe in den Daten.)
+  stampFortification(u, ux + 2, uy, 1, 0.5, false, false, -0.10);
+  // Mehr Schritte als früher: das Wasser fließt jetzt bewusst LANGSAMER (WATER_FLOW gesenkt), die
+  // Umleitung über den gesenkten Rücken ins Becken braucht daher länger.
+  for (let k = 0; k < 700; k++) { stepWater(tw); tw.tick++; }
   const wetAfter = u.water[iBasin] > WET_DEPTH;
   ok(dryBefore, 'Wasser überwindet den Bergrücken nicht — Trockenbecken bleibt trocken (Höhe sperrt den Fluss)');
   ok(wetAfter, 'Nach dem Ausheben eines Grabens fließt Wasser über den gesenkten Rücken ins Becken (Umleitung funktioniert)');
@@ -1289,6 +1293,12 @@ ok(match.player(0).controller === 'ai', 'Sitz fällt nach Disconnect-Timeout an 
   ok(farDist(corner) > 15, `Ecke weit genug von der Basis (${farDist(corner)} Tiles)`);
   const [px, py] = corner;
   const pump = spawnBuilding(w, 0, 'water_pump', px, py); pump.buildProgress = 1;
+  // Pumpwerk steht im Süßwasser (Voraussetzung fürs Fördern): Standfläche als Binnensee markieren.
+  for (let yy = 0; yy < 2; yy++) for (let xx = 0; xx < 2; xx++) {
+    const i = (py + yy) * w.terrain.w + (px + xx);
+    if (w.terrain.lakeMask) w.terrain.lakeMask[i] = 1;
+    w.terrain.water[i] = Math.max(w.terrain.water[i] || 0, 0.2);
+  }
   const P = w.players[0];
   for (let i = 0; i < 25; i++) step(w);
   const wUnconnected = P.resources.water;
@@ -2005,6 +2015,27 @@ ok(match.player(0).controller === 'ai', 'Sitz fällt nach Disconnect-Timeout an 
   ok(w.tunnels.length === 0, 'Beide Mündungen zerstört → Tunnel zerfällt');
   ok(!isPassable(t, 'land', X, Y), 'Kollabierter Tunnel: Klippe wieder unpassierbar');
   ok(u.dead, 'Einheiten im kollabierten Tunnel kommen mit unter');
+}
+
+// 30) Kanal-Schiff: hebt entlang einer Linie eine Landenge zu schiffbarem Kanal aus
+{
+  const w = createWorld({ data, seed: 9, players: [{ id: 0, faction: 'FLG', controller: 'human' }] });
+  const t = w.terrain;
+  w.env = { weather: 'clear', weatherLeft: 1e9, daylight: 1, dayT: 0.5 }; w._nextQuake = 1e9; w._lightningCd = 1e9;
+  const Y = 60;
+  for (let y = Y - 3; y <= Y + 3; y++) for (let x = 34; x <= 55; x++) {
+    const i = tIdx(t, x, y);
+    if (x <= 40 || x >= 49) { t.type[i] = TT.WATER; t.height[i] = SEA_LEVEL - 0.1; t.height0[i] = t.height[i]; t.water[i] = NAVIGABLE_DEPTH * 1.6; t.baseWater[i] = t.water[i]; }
+    else { t.type[i] = TT.LAND; t.height[i] = 0.55; t.height0[i] = 0.55; t.water[i] = 0; t.baseWater[i] = 0; }
+    t.block[i] = 0; if (t.lakeMask) t.lakeMask[i] = 0; if (t.waterActive) t.waterActive.add(i);
+  }
+  ok(!isPassable(t, 'water', 44, Y), 'Landenge: vor dem Kanal ist die Mitte nicht schiffbar');
+  const ship = spawnUnit(w, 0, 'sea_builder', 39 * 2 + 1, Y * 2 + 1);
+  applyCommand(w, { type: 'canal', units: [ship.id], sx: 41, sy: Y, ex: 48, ey: Y }, 0);
+  for (let k = 0; k < 800 && ship.order.type === 'canal'; k++) step(w);
+  let dug = 0; for (let x = 41; x <= 48; x++) if (isPassable(t, 'water', x, Y)) dug++;
+  ok(dug >= 7, `Kanal-Schiff hebt die Landenge zu schiffbarem Kanal aus (${dug}/8 Zellen)`);
+  ok(isPassable(t, 'water', 44, Y), 'Nach dem Kanalbau ist die ehemalige Landenge schiffbar');
 }
 
 console.log(`\nSmoke-Test: ${pass} bestanden, ${fail} fehlgeschlagen\n`);

@@ -24,8 +24,8 @@ import { applyDamage } from '../world.js';
 const SETTLE_EPS = 1e-4;   // Schwelle, unter der eine Zelle als beruhigt gilt
 const FLOW_EPS = 0.0015;   // minimale Oberflächenneigung, bevor Wasser sichtbar strömt
 const FLOW_DEPTH_EPS = WET_DEPTH * 0.8; // dünner Regenfilm = Bodenfeuchte, kein teurer Oberflächenfluss
-const SEA_DRAIN = 0.48;    // Meer nimmt überschüssiges Wasser schnell auf
-const EDGE_DRAIN = 0.18;   // Kartenrand als offener Ozean-Auslass
+const SEA_DRAIN = 0.12;    // Meer nimmt überschüssiges Wasser nur LANGSAM auf (Wasser fließt sichtbar zu, statt zu verschwinden)
+const EDGE_DRAIN = 0.05;   // Kartenrand-Auslass — bewusst langsam, damit Wasser nicht abrupt am Rand verschwindet
 const SNOW_PATCH_EPS = 0.08; // dünne Restflecken verschwinden visuell statt als einzelne Pixel zu bleiben
 const RAIN_SINK_STEPS = 20; // lokale Einzugsfläche: Regen sucht einige Zellen talwärts eine Senke
 const RAIN_SINK_LOCAL_FRACTION = 0.05; // nur ein dünner Rest bleibt am Einschlag; Boden wird nicht flächig nass
@@ -46,8 +46,8 @@ const DIR8 = [
 const POOL_COMPONENT_DEPTH = WET_DEPTH * 0.22;
 const POOL_FLAT_DEPTH = WET_DEPTH;
 const POOL_LEVEL_EPS = 0.0025;
-const OPEN_RUNOFF_DRAIN = 0.045;
-const OPEN_RUNOFF_MIN = WET_DEPTH * 0.018;
+const OPEN_RUNOFF_DRAIN = 0.010;          // dünne Restfeuchte verschwindet jetzt SEHR langsam (war 0.045)
+const OPEN_RUNOFF_MIN = WET_DEPTH * 0.005;
 const DRAIN_SEARCH_LIMIT = 9000;
 
 function flowGround(t, i) {
@@ -558,12 +558,12 @@ function componentHasDrainPathToSea(t, cells, level) {
   return false;
 }
 
-// Meeresverbundene Komponente: dünne, nicht mehr fließfähige Restfeuchte als Oberflächenabfluss
-// abgeben (günstig, hält die Flutquote niedrig). SICHTBAR fließendes Wasser (über der CA-Schwelle
-// mit Gefälle) wird NICHT angetastet — das transportiert die normale CA talwärts zum Meer. Die
-// sichtbare „Bach läuft bis zum Meer"-Optik macht der Client über Strömungspartikel entlang des
-// Gefälles (renderer `_spawnCurrentParticles`), ohne die Simulation mit einem dauerhaft aktiven
-// Nass-Pfad zu belasten (das war zu teuer).
+// Meeresverbundene Komponente: SICHTBAR fließendes Wasser (über der CA-Schwelle mit Gefälle) wird
+// NICHT angetastet — das transportiert die normale CA talwärts zum Meer. Nur die dünne, nicht mehr
+// CA-fließfähige Restfeuchte wird abgegeben, jetzt aber SEHR langsam (OPEN_RUNOFF_DRAIN stark
+// gesenkt), damit Wasser kaum noch „verschwindet" und stattdessen über die CA Richtung Meer wandert.
+// (Greedy-Steepest-Descent-Routing wurde verworfen: es leitet Wasser an Senken VORBEI und brach die
+// „Graben → Becken umleiten"-Mechanik; die sichtbare Bach-bis-zum-Meer-Optik macht der Client.)
 function drainOutletComponent(t, cells, next) {
   const { water, baseWater } = t;
   for (const i of cells) {

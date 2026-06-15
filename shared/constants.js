@@ -17,7 +17,7 @@ export const BUILDER_WADE_DEPTH = FLOOD_DEPTH * 1.55; // Bagger dürfen für Arb
 export const BUILDER_WADE_TIME = 14;           // Sekunden Arbeitszeit im Wasser, danach sucht der Bagger Land
 export const NAVIGABLE_DEPTH = 0.12;           // Tiefe ab der Wasser als echtes Fahrwasser für Schiffe zählt
 export const WATER_STEP_TICKS = 2;             // Wasser-CA läuft alle N Ticks (5 Hz) — günstig & stabil
-export const WATER_FLOW = 0.62;                // hydraulischer Ausgleich je Wasser-Schritt (8-Nachbarn, masseerhaltend)
+export const WATER_FLOW = 0.34;                // hydraulischer Ausgleich je Wasser-Schritt — bewusst niedrig: Wasser breitet sich langsam in kleinen Schritten aus
 export const WATER_SEEP = 0.0035;              // sehr langsame Versickerung/Verdunstung; Wasser soll primär zum Meer abfließen
 export const FLOOD_CAP_FRAC = 0.25;            // Zufluss-Stopp erst bei 25 % überflutetem Land — Worst-Case-Überschwemmungen dürfen groß werden
 export const FLOOD_CAP_DRAIN = 0.05;           // Notabfluss/Schritt für überflutetes Land oberhalb des Deckels
@@ -92,8 +92,9 @@ export const EDGE_SEA = 0.085;                 // Anteil der Kartenbreite, der z
 // --- Straßen & Fahrzeugphysik (Phase 15) ---
 export const ROAD_RECALC_TICKS = 50;           // Straßennetz alle 5 s neu verbinden
 export const ROAD_MAX_DIST = 20;               // max. Tile-Distanz für automatische Straßen zwischen Gebäuden
-export const ROAD_SPEED = 1.25;                // Tempobonus auf Straßen (leichte Einheiten)
-export const ROAD_SPEED_HEAVY = 1.5;           // Tempobonus auf Straßen (schwere Fahrzeuge)
+export const ROAD_SPEED = 1.5;                 // Tempobonus auf Straßen (Infanterie zu Fuß)
+export const ROAD_SPEED_VEHICLE = 6;           // Fahrzeuge fahren auf Straßen 6× so schnell wie im Gelände
+export const ROAD_SPEED_HEAVY = 6;             // (Alt-Name, = Fahrzeug-Bonus)
 export const MUD_SPEED_HEAVY = 0.3;            // schwere Fahrzeuge abseits der Straße bei Regen (Matsch)
 export const HEAVY_WATER_DPS = 14;             // Schaden/s für schwere Fahrzeuge in nassen Zellen
 export const TURN_RATE_VEHICLE = 3.4;          // rad/s Drehrate Fahrzeuge (erst drehen, dann fahren)

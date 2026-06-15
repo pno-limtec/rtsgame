@@ -20,6 +20,7 @@ import { stepRoads } from './systems/roads.js';
 import { stepConstruction, addTerraJob, assignEarthPile } from './systems/construction.js';
 import { stepRecovery } from './systems/recovery.js';
 import { placeTunnel, onTunnelMouthDestroyed, stepTunnels } from './systems/tunnel.js';
+import { stepCanal, canalLineTiles } from './systems/canal.js';
 import { forestBlocks, inBounds, isPassable, tIdx, worldToTile, tileToWorld } from './terrain.js';
 import { stepAi, initAi } from './ai/ai.js';
 
@@ -52,6 +53,7 @@ export function step(world) {
   stepAir(world);          // Luft-Logistik: leere Maschinen kehren zur Basis zum Nachladen zurück
   stepMovement(world);
   stepTunnels(world);      // Tunnel: Zugehörigkeit (verborgene Einheiten) + Wasserfluss durch die Röhre
+  stepCanal(world);        // Kanal-Schiff: Landengen zu schiffbarem Kanal ausheben
   stepRecovery(world);     // Traktoren bergen verlassene Fahrzeuge aus Matsch/Wasser
   stepConstruction(world); // Bagger: zu Baustellen/Terraform-Aufträgen fahren und arbeiten
   stepRoads(world);        // automatisches Straßennetz zwischen nahen Gebäuden
@@ -241,12 +243,22 @@ export function applyCommand(world, cmd, playerId) {
     case 'setRole': {
       const rawRole = cmd.role === 'materials' ? 'build' : cmd.role;
       const role = ['ore', 'build', 'earth'].includes(rawRole) ? rawRole : 'build';
+      // LKW-Transportmodus: auto (Erz + Material), nur Erz oder nur Baumaterial.
+      const haul = cmd.role === 'ore' ? 'ore' : (cmd.role === 'materials' || cmd.role === 'earth') ? 'materials' : 'auto';
       for (const id of cmd.units || []) {
         const u = world.entities.get(id);
-        if (!u || u.etype !== 'unit' || u.owner !== playerId || u.kind !== 'builder') continue;
-        u.resourceRole = role;
-        if (u.order.type === 'harvest' || u.order.type === 'construct' || u.order.type === 'terra') {
-          u.order = { type: 'idle' }; u.target = null; stopMove(u);
+        if (!u || u.etype !== 'unit' || u.owner !== playerId) continue;
+        if (u.kind === 'builder') {
+          u.resourceRole = role;
+          if (u.order.type === 'harvest' || u.order.type === 'construct' || u.order.type === 'terra') {
+            u.order = { type: 'idle' }; u.target = null; stopMove(u);
+          }
+        } else if (u.kind === 'truck') {
+          u.haulMode = haul;
+          // Läuft der LKW gerade zu einem nicht mehr erlaubten Haufen, Auftrag lösen (Ladung behält er).
+          if (u.order.type === 'haul_pile' && u.order.state === 'toPile') {
+            u.order = { type: 'idle' }; u.target = null; stopMove(u);
+          }
         }
       }
       break;
@@ -289,7 +301,20 @@ export function applyCommand(world, cmd, playerId) {
     }
     case 'tunnel': {
       // Tunnel als EIN Liniengebäude (Mündung→Mündung), nicht je Tile ein Gebäude.
-      placeTunnel(world, player, cmd.sx | 0, cmd.sy | 0, cmd.ex | 0, cmd.ey | 0, inBuildRadius);
+      // remoteBuild → überall baubar (kein Bauradius-Zwang); sonst muss eine Mündung im Radius liegen.
+      const radCheck = world.data.buildings.tunnel?.remoteBuild ? null : inBuildRadius;
+      placeTunnel(world, player, cmd.sx | 0, cmd.sy | 0, cmd.ex | 0, cmd.ey | 0, radCheck);
+      break;
+    }
+    case 'canal': {
+      // Kanal-Schiffe (Wasserbau-Einheit mit 'canal') graben entlang einer Linie einen schiffbaren Kanal.
+      const path = canalLineTiles(cmd.sx | 0, cmd.sy | 0, cmd.ex | 0, cmd.ey | 0);
+      for (const u of commandUnits(world, cmd.units, playerId)) {
+        const def = world.data.units[u.kind];
+        if (!def || !(def.canal || def.abilities?.includes('canal'))) continue;
+        u.order = { type: 'canal', path, step: 0 };
+        u.target = null; stopMove(u);
+      }
       break;
     }
     case 'assist': {

@@ -29,6 +29,12 @@ const BUILDER_ROLES = [
   ['build', 'builder', 'Bauen', 'Bauarbeiter: Bagger bevorzugt Baustellen und Gebäudeaufbau.'],
 ];
 const BUILDER_ROLE_LABEL = { ore: 'Erz', earth: 'Erde', build: 'Bauen', materials: 'Bauen' };
+// LKW-Transportmodus: Auto (beides), nur Erz, nur Baumaterial.
+const TRUCK_ROLES = [
+  ['auto', 'truck', 'Auto', 'Automatik: holt den nächsten Erz- ODER Erdhaufen.'],
+  ['ore', 'ore', 'Erz', 'Nur Erz: holt ausschließlich Erzhaufen ins Erzlager.'],
+  ['materials', 'down', 'Material', 'Nur Baumaterial: holt ausschließlich Erdhaufen ins Baumateriallager.'],
+];
 const WEATHER_ICON = { clear: 'sun', rain: 'rain', storm: 'storm', fog: 'fog', drought: 'sun', night: 'moon' };
 const WEATHER_LABEL = { clear: 'klar', rain: 'Regen', storm: 'Gewitter', fog: 'Nebel', drought: 'Trockenheit' };
 const SPECTATOR_SPEEDS = [1, 2, 4, 8];
@@ -1013,7 +1019,19 @@ export class UI {
     const ents = ids.map(id => this.curEntity(id)).filter(Boolean);
     const grid = document.getElementById('selgrid');
     const title = this.selPanel.querySelector('.title');
-    if (!ents.length) { this.selPanel.classList.add('empty'); title.textContent = 'Keine Auswahl'; grid.innerHTML = ''; this.renderBuildbar(); return; }
+    if (!ents.length) {
+      // Kein Objekt gewählt: zeigt das angeklickte Öl-/Erzfeld die Vorkommensmenge.
+      const fi = this.input.fieldInfo;
+      if (fi && (fi.ore > 0 || fi.oil > 0)) {
+        this.selPanel.classList.remove('empty');
+        title.textContent = fi.oil > 0 ? 'Ölfeld' : 'Erzvorkommen';
+        let h = '';
+        if (fi.ore > 0) h += `<span class="chip" title="Erz im Boden (Startwert)">${resIcon('ore', 'costicon')}${fi.ore}</span>`;
+        if (fi.oil > 0) h += `<span class="chip" title="Restöl im Feld">${resIcon('oil', 'costicon')}${fi.oil}</span>`;
+        grid.innerHTML = h; this.renderBuildbar(); return;
+      }
+      this.selPanel.classList.add('empty'); title.textContent = 'Keine Auswahl'; grid.innerHTML = ''; this.renderBuildbar(); return;
+    }
     this.selPanel.classList.remove('empty');
     const counts = {};
     for (const e of ents) { const lbl = (this.data.units[e.kind] || this.data.buildings[e.kind] || {}).label || e.kind; counts[lbl] = (counts[lbl] || 0) + 1; }
@@ -1054,10 +1072,36 @@ export class UI {
       }
       html += '</div>';
     }
+    // LKW-Transportmodus umstellen (Auto/Erz/Material).
+    const trucks = ents.filter(e => e.kind === 'truck' && e.owner === this.net.seat);
+    if (trucks.length) {
+      const modeOf = (t) => t.role === 'ore' ? 'ore' : t.role === 'earth' ? 'materials' : 'auto';
+      const firstMode = modeOf(trucks[0]);
+      const active = trucks.every(t => modeOf(t) === firstMode) ? firstMode : null;
+      html += '<div class="rolebar">';
+      for (const [mode, icon, label, tip] of TRUCK_ROLES) {
+        html += `<button class="rolebtn ${active === mode ? 'active' : ''}" data-haul="${mode}" title="${tip}">${iconSvg(icon, 'roleicon')} ${label}</button>`;
+      }
+      html += '</div>';
+    }
+    // Kanal-Schiff: Knopf zum Ausheben eines schiffbaren Kanals (Linie Start→Ende ziehen).
+    const canalShips = ents.filter(e => e.owner === this.net.seat && (this.data.units[e.kind]?.canal));
+    if (canalShips.length) {
+      const armed = this.input.buildMode === '_canal_';
+      html += `<div class="rolebar"><button class="rolebtn ${armed ? 'active' : ''}" data-canal="1" title="Kanal ausheben\nLinie von Wasser durch Land zu Wasser ziehen — das Schiff gräbt einen schiffbaren Kanal.">${iconSvg('down', 'roleicon')} Kanal ziehen</button></div>`;
+    }
     grid.innerHTML = html;
     grid.querySelectorAll('[data-role]').forEach(b => b.onclick = () => {
       const units = ents.filter(e => e.kind === 'builder' && e.owner === this.net.seat).map(e => e.id);
       if (units.length) this.net.cmd({ type: 'setRole', units, role: b.dataset.role });
+    });
+    grid.querySelectorAll('[data-haul]').forEach(b => b.onclick = () => {
+      const units = ents.filter(e => e.kind === 'truck' && e.owner === this.net.seat).map(e => e.id);
+      if (units.length) this.net.cmd({ type: 'setRole', units, role: b.dataset.haul });
+    });
+    grid.querySelectorAll('[data-canal]').forEach(b => b.onclick = () => {
+      this.input.buildMode = this.input.buildMode === '_canal_' ? null : '_canal_';
+      this.renderSelection();
     });
     this.renderBuildbar();
   }

@@ -10,6 +10,9 @@ const KIND_TABLE = [
   'aa_soldier', 'rocket_launcher', 'underwater_drone', 'mg_turret', 'flak_turret',
 ];
 const ROLE_TABLE = [null, 'ore', 'build', 'earth'];
+// Flugeinheiten brauchen client-seitig die Domäne, damit Picking (entityToScreen/pickRadius) sie an
+// ihrer Flughöhe statt am Boden anvisiert — sonst sind sie mit der Maus nicht anklickbar.
+const AIR_KINDS = new Set(['recon_drone', 'gunship', 'bomber', 'cloud_seeder', 'transport_air']);
 
 export class Net {
   constructor() {
@@ -106,6 +109,7 @@ export class Net {
     this.snapTime = performance.now();
     if (snap.water) this.water = this.mergeWater(snap.water);   // Basis-Binnenwasser + dynamische Flut-/Trockenzellen
     if (snap.oil) this.oil = snap.oil;           // Ölquellen schrumpfen bei Förderung
+    if (snap.ore) this.oreDelta = snap.ore;      // Erz-Restmengen (für die Feldanzeige), nur Änderungen
     if (snap.terra) this.terra = snap.terra;   // terraformte Zellen (Höhenänderung durch Bauten/Beben)
     if (snap.env) this.env = snap.env;         // Tageszeit/Wetter/Beben für Licht & Effekte
     if (snap.controls) { this.controls = snap.controls; this.emit('controls', snap.controls); }
@@ -155,6 +159,7 @@ export class Net {
       }
       out.push({
         id: e[0], etype: isUnit ? 'unit' : 'building', kind: KIND_TABLE[e[2]], owner: e[3],
+        domain: isUnit && AIR_KINDS.has(KIND_TABLE[e[2]]) ? 'air' : null,
         x, y, hp: e[6], maxHp: e[7],
         facing, cargo: isUnit ? e[9] : 0, vet: isUnit ? (e[10] || 0) : 0,
         role: isUnit ? (ROLE_TABLE[e[11] || 0] || null) : null,

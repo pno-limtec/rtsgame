@@ -247,6 +247,9 @@ function assignTruckHauling(world, workersByOwner) {
       let best = null, bestD = Infinity;
       for (const p of piles) {
         if (!canHaulPile(t, p)) continue;
+        // Manuell gewählter Transportmodus: nur Erz bzw. nur Baumaterial holen (auto = beides).
+        if (t.haulMode === 'ore' && pileResource(p) !== 'ore') continue;
+        if (t.haulMode === 'materials' && pileResource(p) !== 'materials') continue;
         const d = (p.x - t.x) ** 2 + (p.y - t.y) ** 2;
         if (d < bestD) { bestD = d; best = p; }
       }

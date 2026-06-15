@@ -101,6 +101,21 @@ export class Audio {
     src.start(t0); src.stop(t0 + dur + 0.02);
   }
 
+  // Rauschstoß mit Filter-Sweep: heller Knall, der dunkel ausläuft (Explosionsschweif) oder
+  // umgekehrt aufzischt (Raketenstart). Gibt SFX deutlich mehr Wucht und Charakter als ein Flat-Burst.
+  _sweepNoise(vol, f0, f1, dur, q = 0.7, type = 'lowpass') {
+    const t0 = this.ctx.currentTime;
+    const src = this._noiseSource();
+    const filt = this.ctx.createBiquadFilter();
+    filt.type = type; filt.Q.value = q;
+    filt.frequency.setValueAtTime(Math.max(40, f0), t0);
+    filt.frequency.exponentialRampToValueAtTime(Math.max(40, f1), t0 + dur);
+    const g = this.ctx.createGain();
+    this._env(g, t0, vol, dur, 0.003);
+    src.connect(filt); filt.connect(g); g.connect(this.master);
+    src.start(t0); src.stop(t0 + dur + 0.02);
+  }
+
   // Tiefer Sinus-Schlag (Kanonen/Explosionen) mit Tonhöhenabfall.
   _thump(vol, f0, f1, dur) {
     const t0 = this.ctx.currentTime;
@@ -203,23 +218,34 @@ export class Audio {
     if (!this.ready || this.sfxMuted || vol <= 0.02) return;
     if (!this._budget('fire', 6)) return;
     this.markCombat();
-    const v = 0.35 * vol;
+    const v = 0.38 * vol;
     switch (weapon) {
       case 'tank_cannon': case 'turret_cannon': case 'naval_gun': case 'artillery':
-        this._sample('artillery', Math.min(0.32, v * 0.7), 0.92 + Math.random() * 0.12);
-        this._thump(v, 220, 60, 0.22); this._burst(v * 0.5, 900, 0.12, 0.7); break;
+        // Harter Abschuss: scharfer Crack → kräftiger Sub-Boom mit Tonhöhenabfall → kurzer Mündungs-Schweif.
+        this._sample('artillery', Math.min(0.24, v * 0.5), 0.9 + Math.random() * 0.12);
+        this._burst(v * 0.55, 3200, 0.035, 1.0, 'highpass');
+        this._thump(v * 1.25, 280, 46, 0.3);
+        this._sweepNoise(v * 0.7, 1500, 220, 0.2, 0.6); break;
       case 'sam_missile': case 'aa_missile': case 'at_launcher': case 'torpedo': case 'micro_missile':
-        this._burst(v * 0.6, 1800, 0.3, 0.4, 'bandpass'); this._thump(v * 0.3, 400, 120, 0.18); break;
+        // Raketenstart: aufzischender Sweep + Schub-Impuls.
+        this._sweepNoise(v * 0.6, 420, 2600, 0.34, 0.5, 'bandpass');
+        this._thump(v * 0.4, 380, 110, 0.16); break;
       case 'rocket_salvo':
-        this._burst(v * 0.8, 1300, 0.34, 0.45, 'bandpass'); this._thump(v * 0.45, 300, 70, 0.22); break;
+        this._sweepNoise(v * 0.8, 520, 2900, 0.38, 0.5, 'bandpass');
+        this._thump(v * 0.5, 300, 70, 0.22); break;
       case 'bomb':
-        this._thump(v * 1.2, 160, 45, 0.4); break;
+        this._burst(v * 0.5, 3000, 0.04, 1.0, 'highpass');
+        this._thump(v * 1.3, 170, 40, 0.42);
+        this._sweepNoise(v * 0.7, 1200, 120, 0.4, 0.6); break;
       case 'flak_gun': case 'turret_flak': case 'turret_mg': case 'autocannon': case 'chain_gun':
-        this._sample('gunfire', Math.min(0.22, v * 0.5), 0.95 + Math.random() * 0.1);
-        this._burst(v * 0.7, 2200, 0.06, 1.5); break;
+        // Maschinenwaffe: knackiger Transient + kurzer Körper.
+        this._sample('gunfire', Math.min(0.18, v * 0.4), 0.95 + Math.random() * 0.1);
+        this._burst(v * 0.75, 2400, 0.045, 1.6, 'bandpass');
+        this._thump(v * 0.4, 260, 110, 0.05); break;
       default: // rifle
-        this._sample('shoot', Math.min(0.18, v * 0.65), 0.9 + Math.random() * 0.2);
-        this._burst(v, 3000, 0.05, 1.2, 'highpass');
+        this._sample('shoot', Math.min(0.14, v * 0.5), 0.9 + Math.random() * 0.2);
+        this._burst(v * 0.95, 3300, 0.035, 1.4, 'highpass');
+        this._thump(v * 0.5, 340, 90, 0.06);
     }
   }
 
@@ -227,10 +253,12 @@ export class Audio {
     if (!this.ready || this.sfxMuted || vol <= 0.02) return;
     if (!this._budget('explosion', 8)) return;
     this.markCombat();
-    const v = Math.min(0.9, 0.4 * vol * (0.7 + scale * 0.2));
-    this._sample('explosion', Math.min(0.45, v * 0.8), 0.85 + Math.random() * 0.14);
-    this._thump(v, 120 + 40 / scale, 30, 0.35 + scale * 0.12);
-    this._burst(v * 0.8, 700, 0.25 + scale * 0.08, 0.6);
+    const v = Math.min(0.95, 0.46 * vol * (0.7 + scale * 0.22));
+    // Schichten: initialer Crack (Hochpass), tiefer Sub-Boom mit Tonhöhenabfall, heller→dunkler Rauschschweif.
+    this._sample('explosion', Math.min(0.38, v * 0.55), 0.82 + Math.random() * 0.14);
+    this._burst(v * 0.5, 3200, 0.05, 1.1, 'highpass');
+    this._thump(v * 1.2, 200 + 50 / scale, 26, 0.4 + scale * 0.14);
+    this._sweepNoise(v * 0.85, 1700, 120, 0.38 + scale * 0.12, 0.6);
   }
 
   // Donnerschlag: Knall (Hochpass-Crack) + langes tiefes Grollen.
@@ -269,6 +297,28 @@ export class Audio {
     if (!this.ready || this.sfxMuted) return;
     if (!this._budget('command', 3)) return;
     if (!this._sample('yes', 0.18 * vol, 0.94 + Math.random() * 0.08)) this._tone(0.18 * vol, 520, 0.08);
+  }
+
+  // Befehls-Quittung mit EIGENEM Klang je Einheitentyp: Grundton aus dem Namen-Hash (jeder Typ klingt
+  // anders), Charakter aus Domäne/Kategorie — Infanterie zwitschert, Fahrzeuge piepen mechanisch,
+  // Flieger steigen auf, Schiffe geben ein tiefes Horn.
+  unitAck(kind = '', category = 'vehicle', domain = 'land', vol = 1) {
+    if (!this.ready || this.sfxMuted) return;
+    if (!this._budget('command', 3)) return;
+    let h = 2166136261 >>> 0;
+    for (let i = 0; i < kind.length; i++) h = Math.imul(h ^ kind.charCodeAt(i), 16777619) >>> 0;
+    const semi = h % 12;
+    const f = 300 * Math.pow(2, semi / 12);     // typeigener Grundton
+    const v = 0.16 * vol;
+    if (domain === 'air') {                       // aufsteigender Doppelton
+      this._tone(v, f * 1.5, 0.07, 'sine'); this._tone(v, f * 2.1, 0.08, 'sine', 0.07);
+    } else if (domain === 'water') {              // tiefes Horn
+      this._tone(v, f * 0.5, 0.2, 'sawtooth'); this._tone(v * 0.7, f * 0.66, 0.16, 'sawtooth', 0.08);
+    } else if (category === 'infantry') {         // weiches Zwitschern
+      this._tone(v * 0.85, f * 1.3, 0.06, 'triangle'); this._tone(v * 0.7, f * 1.6, 0.05, 'triangle', 0.06);
+    } else {                                      // Fahrzeug: mechanisches Piep-Piep
+      this._tone(v, f, 0.06, 'square'); this._tone(v * 0.8, f * 1.26, 0.06, 'square', 0.07);
+    }
   }
 
   motor(vol = 1) {

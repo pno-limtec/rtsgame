@@ -1,6 +1,6 @@
 // A*-Pfadfindung auf dem Tile-Grid, domänenabhängig (land/air/water/amphibious),
 // mit Steigungslimit je Einheit (Straßen erlauben steilere Passagen — Serpentinen).
-import { isPassable, inBounds, tIdx, heightAt, TT, tileType, slopeOk, forestBlocks } from './terrain.js';
+import { isPassable, inBounds, tIdx, heightAt, TT, tileType, slopeOk, forestBlocks, roadAtIdx } from './terrain.js';
 import { BUILDER_WADE_DEPTH, FLOOD_DEPTH, MUD_IMPASSABLE, SLOPE_ON_ROAD, SLOPE_TERRAFORM_BUILDER, WET_DEPTH } from './constants.js';
 
 const NEI = [
@@ -11,6 +11,9 @@ const GOAL_FALLBACK_RADIUS = 8;
 
 // Bewegungskosten einer Zelle: Steigung & Hügel verteuern, Deckung neutral.
 function tileCost(t, tx, ty, opts) {
+  // Straßen klar bevorzugen: Fahrzeuge fahren dort 6× schneller, also Wegkosten stark senken
+  // (ein Umweg über die Straße bis ~5× Länge lohnt sich noch). Infanterie nur leicht bevorzugt.
+  if (roadAtIdx(t, tx, ty)) return (opts && opts.category !== 'infantry') ? 0.2 : 0.7;
   let c = 1;
   if (tileType(t, tx, ty) === TT.HILL) c += 0.4;
   if (t.mud) c += t.mud[tIdx(t, tx, ty)] * (opts && opts.heavy ? 8 : 2);

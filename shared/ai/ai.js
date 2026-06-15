@@ -4,7 +4,7 @@ import {
   AI_REPLAN_TICKS, PIPE_LINK_RANGE, CONSTRUCT_RANGE, TILE,
   SLOPE_BUILDER, SLOPE_HEAVY, SLOPE_ON_ROAD,
 } from '../constants.js';
-import { ownerEntities, canAfford, effectiveCost, dist, canPlaceBuilding } from '../world.js';
+import { ownerEntities, canAfford, effectiveCost, dist, canPlaceBuilding, spawnUnit } from '../world.js';
 import { findPath } from '../pathfinding.js';
 import { validateTunnel } from '../systems/tunnel.js';
 import {
@@ -74,11 +74,32 @@ const AI_DOMINANCE_HOLD_TICKS = 1200;   // 2 Minuten klare Überlegenheit reicht
 const AI_FORCE_DECISION_PRESSURE = 7;   // nach langer Zeit reicht eine kleinere Führung
 const AI_HARD_DECISION_PRESSURE = 10;   // sehr langes KI-only Patt wird deterministisch entschieden
 const AI_ROUTE_PLAN_COOLDOWN = AI_REPLAN_TICKS * 2;
+const AI_ROUTE_MAX_CELLS = 24;             // Straße in EINEM Zug bis hierher legen (durchgehende Route)
+const INFRA_KINDS = new Set(['road', 'bridge', 'tunnel', 'pipe']); // zählen nicht als Bau-Throttle
 const AI_ROUTE_PATH_ITER = 30000;
-const AI_CHEAT_STUCK_TICKS = 1500;      // 150s ohne Aufbaufortschritt = Ressourcen-Deadlock → KI darf cheaten
+const AI_CHEAT_STUCK_TICKS = 900;       // 90s ohne Aufbaufortschritt = Deadlock → KI darf cheaten (früh genug, bevor der Director sie aufgibt)
+const AI_SECONDARY_TICKS = 240;         // Sekundärziele (Wasserwall/Fluten) nur alle ~24s einen Schritt → kein Überbau
+const AI_MOAT_RADIUS = 7;               // Wallring-Radius um das HQ
+const AI_MOAT_MAX = 16;                 // Höchstzahl Ring-Wälle (Schutzwall, nicht endlos)
+const AI_FLOOD_CHANNEL_MAX = 10;        // Höchstlänge eines Flutkanals Richtung Feind
 
 export function initAi(player) {
-  player.ai = { phase: 'expand', attackTimer: 0, airTimer: 0, lastBuild: 0, waveSize: 5, airWave: 2, navyTimer: 0, navyWave: 2 };
+  player.ai = { phase: 'expand', attackTimer: 0, airTimer: 0, lastBuild: 0, waveSize: 5, airWave: 2, navyTimer: 0, navyWave: 2, doctrine: 'combined', doctrineUntil: 0 };
+}
+
+// Wechselnde Strategien: die KI wählt regelmäßig eine neue Doktrin (deterministisch über world.rng),
+// damit Partien abwechslungsreich verlaufen — mal Luftschlag-fokussiert, mal Sturm, mal belagernd,
+// mal Überfall auf die Versorgung, mal Nachtangriff. Beeinflusst Wellengröße, Timing und Zielwahl.
+const AI_DOCTRINES = ['combined', 'airstrike', 'naval', 'rush', 'siege', 'raid', 'night', 'flood'];
+const AI_DOCTRINE_TICKS = 2400;     // alle ~4 min eine neue Strategie
+function updateDoctrine(world, player) {
+  const a = player.ai;
+  if (a.doctrineUntil && world.tick < a.doctrineUntil) return;
+  const r = (world.rng ? world.rng() : 0.5);
+  let d = AI_DOCTRINES[Math.min(AI_DOCTRINES.length - 1, Math.floor(r * AI_DOCTRINES.length))];
+  a.doctrine = d;
+  a.doctrineUntil = world.tick + AI_DOCTRINE_TICKS;
+  world.events?.push({ type: 'ai_doctrine', player: player.id, doctrine: d });
 }
 
 export function stepAi(world, player, applyCommand) {
@@ -86,6 +107,7 @@ export function stepAi(world, player, applyCommand) {
   if (!player.ai) initAi(player);
   updateAiDirector(world);
   if (world.tick % AI_REPLAN_TICKS !== (player.id % AI_REPLAN_TICKS)) return;
+  updateDoctrine(world, player);
 
   const s = surveyEconomy(world, player);
   manageDeadlockCheat(world, player, s);
@@ -97,6 +119,7 @@ export function stepAi(world, player, applyCommand) {
   if (!builtCoverage && !builtInfra && !builtBridge && !builtRoute) manageBuild(world, player, s, applyCommand);
   if (!manageCoverageProduction(world, player, s, applyCommand) && !world.aiCoverageTest) manageProduction(world, player, s, applyCommand);
   manageRecovery(world, player, s, applyCommand);
+  manageSecondaryObjective(world, player, s, applyCommand);
   manageArmy(world, player, s, applyCommand);
   manageHarvesters(world, player, applyCommand);
   manageIdleWorkers(world, player, s, applyCommand);
@@ -180,10 +203,93 @@ function manageDeadlockCheat(world, player, s) {
   const res = player.resources;
   let cheated = false;
   const need = (k, to) => { if ((res[k] || 0) < to) { res[k] = to; cheated = true; } };
-  need('ore', 800); need('materials', 250); need('fuel', 250); need('water', 150);
+  need('ore', 1000); need('materials', 300); need('fuel', 300); need('water', 200);
+  // BAUFÄHIGKEIT garantieren: ohne Bagger kommt die KI aus dem Stillstand nicht raus (Erz allein
+  // hilft nicht). Hat sie keinen Bagger, aber ein HQ, einen direkt spawnen — sonst gilt sie sonst
+  // grundlos als „besiegt", weil sie nie wieder baut.
+  const hasBuilder = s.units.some(u => u.kind === 'builder' && !u.dead);
+  if (!hasBuilder && s.hq && world.data.units.builder) {
+    spawnUnit(world, player.id, 'builder', s.hq.x + 2, s.hq.y + 2);
+    cheated = true;
+  }
+  // Steckengebliebene Bau-/Sammelaufträge lösen, damit der Bagger neu zugeteilt wird.
+  for (const u of s.units) if (u.kind === 'builder' && (u.order?.type === 'idle' || u.order?.type === 'guard')) u._badNodes = null;
   a._cheatSince = world.tick;     // Cooldown bis zum nächsten möglichen Cheat
   a._cheatBuilt = built;
   if (cheated) world.events?.push({ type: 'ai_cheat', player: player.id, x: s.hq?.x || 0, y: s.hq?.y || 0 });
+}
+
+// Sekundärziele jenseits des reinen „Armee bauen und angreifen": ein STABILER Schutzwall (Wasserwall/
+// Deich) um die eigene Basis sowie — unter der Flut-Doktrin — ein Kanalgraben, der Wasser zum Gegner
+// leitet, um dessen Basis zu fluten. Beide Routinen sind streng gegated (nur bei wirtschaftlichem
+// Überschuss bzw. passender Doktrin und nur EIN Schritt pro Kadenz), damit sie das Militär nie aushungern
+// und KI-Partien nicht destabilisieren.
+function manageSecondaryObjective(world, player, s, applyCommand) {
+  if (world.aiCoverageTest || !s.hq) return;
+  const a = player.ai;
+  if (world.tick - (a._secTick || 0) < AI_SECONDARY_TICKS) return;
+  const pressure = world.aiDirector?.pressure || 0;
+  const doc = a.doctrine || 'combined';
+  // Flut-Offensive: nur unter 'flood'-Doktrin und mit etwas Erzpuffer.
+  if (doc === 'flood' && s.credits > 300 && planFloodChannel(world, player, s, applyCommand)) {
+    a._secTick = world.tick; return;
+  }
+  // Wasserwall/Schutzring: nur wenn wirtschaftlich bequem (viel Erz übrig), eine stehende Armee da ist
+  // und gerade kein Endspieldruck herrscht — reiner Bonus, der das Militär nicht verdrängt.
+  if (pressure === 0 && s.credits > 1200 && s.army.length >= 8 && s.walls < AI_MOAT_MAX
+      && buildMoatRing(world, player, s, applyCommand)) {
+    a._secTick = world.tick; return;
+  }
+  a._secTick = world.tick;
+}
+
+// Schutzwall-Ring: setzt EINEN fehlenden Wall auf einem Kreis um das HQ (gleichmäßig verteilte Winkel),
+// sodass über die Zeit ein geschlossener Deich entsteht. Wälle sind `waterBlocks` → wirken als Wasserwall.
+function buildMoatRing(world, player, s, applyCommand) {
+  const def = world.data.buildings.wall;
+  if (!def || !canAfford(player, effectiveCost(world, player.id, def))) return false;
+  const hq = s.hq;
+  const cx = hq.tx + hq.size / 2, cy = hq.ty + hq.size / 2;
+  for (let k = 0; k < 16; k++) {
+    const ang = (k / 16) * Math.PI * 2;
+    const tx = Math.round(cx + Math.cos(ang) * AI_MOAT_RADIUS);
+    const ty = Math.round(cy + Math.sin(ang) * AI_MOAT_RADIUS);
+    if (existingOrPendingBuilding(world, player.id, 'wall', tx, ty)) continue;
+    if (!placeable(world, tx, ty, 1, def, player.id)) continue;
+    applyCommand(world, { type: 'build', building: 'wall', tx, ty }, player.id);
+    return true;
+  }
+  return false;
+}
+
+// Flutkanal: vom nächstgelegenen Wasser eine Grabenlinie Richtung Gegner-HQ anstechen — der Graben
+// leitet Wasser (terraform −0.16) bergab, sodass die Wasser-Fluidsimulation die Flut zum Feind trägt.
+// Baut pro Aufruf EIN Grabenstück: das Wasser-nächste noch trockene Tile auf der Linie zum Gegner.
+function planFloodChannel(world, player, s, applyCommand) {
+  const def = world.data.buildings.trench;
+  if (!def || !canAfford(player, effectiveCost(world, player.id, def))) return false;
+  const t = world.terrain;
+  const enemy = pickEnemyTarget(world, player);
+  if (!enemy) return false;
+  const ex = Math.round(enemy.x / TILE - 0.5), ey = Math.round(enemy.y / TILE - 0.5);
+  const src = nearestWaterTile(t, ex, ey, 40);              // Wasserquelle möglichst nah am Feind (Tile-Koord.)
+  if (!src) return false;
+  const [sx, sy] = src;
+  // Von der Quelle aus Schritt für Schritt Richtung Feind das erste trockene, baubare Tile graben.
+  let x = sx, y = sy;
+  for (let k = 0; k < AI_FLOOD_CHANNEL_MAX; k++) {
+    const dx = Math.sign(ex - x), dy = Math.sign(ey - y);
+    if (dx === 0 && dy === 0) break;
+    x += dx; y += dy;
+    if (!inBounds(t, x, y)) break;
+    const i = tIdx(t, x, y);
+    if (t.type[i] === TT.WATER) continue;                    // schon Wasser → weiter Richtung Feind
+    if (existingOrPendingBuilding(world, player.id, 'trench', x, y)) continue;
+    if (!placeable(world, x, y, 1, def, player.id)) continue;
+    applyCommand(world, { type: 'build', building: 'trench', tx: x, ty: y }, player.id);
+    return true;
+  }
+  return false;
 }
 
 function manageStalledConstruction(world, player, s) {
@@ -337,7 +443,9 @@ function manageBuild(world, player, s, applyCommand) {
   // Bauthrottling: höchstens 2 Baustellen gleichzeitig und nie dasselbe Gebäude doppelt im Bau.
   // Verhindert Überbau (z. B. 7 Kraftwerke auf einmal, weil im Bau befindliche Gebäude noch
   // keine Energie liefern) und sichert geordnetes Hochtechen bis zu Luftbasis/Werft.
-  const underConstruction = s.buildings.filter(b => b.buildProgress < 1);
+  // Infrastruktur (Routen) nicht mitzählen, damit eine im Bau befindliche Straße/Brücke die Wirtschaft
+  // nicht einfriert.
+  const underConstruction = s.buildings.filter(b => b.buildProgress < 1 && !INFRA_KINDS.has(b.kind));
   if (underConstruction.length >= 2) return true;
   const buildingNow = new Set(underConstruction.map(b => b.kind));
   for (const step of BUILD_ORDER) {
@@ -356,7 +464,9 @@ function manageBuild(world, player, s, applyCommand) {
       }
       let spot;
       if (def.role === 'fortification') spot = pickDefensiveSpot(world, player, s, def);
-      else if (def.requiresWater) spot = pickCoastalSpot(world, player, s, def.size || 1, def);
+      // Pumpwerk/Werft ans Wasser; Pumpwerk sucht Süßwasser (Fluss/See) auch fernab der Basis (remoteBuild).
+      else if (def.requiresWater) spot = pickCoastalSpot(world, player, s, def.size || 1, def)
+        || (def.pump ? findFreshWaterPumpSpot(world, player.id, s.hq, def.size || 1, def) : null);
       else if (def.requiresOil) spot = pickOilSpot(world, s, def.size || 1, def);
       // Pumpwerke möglichst ans Gewässer stellen (volle Förderrate), sonst Grundwasser in der Basis.
       else if (def.pump && s.coastal) spot = pickCoastalSpot(world, player, s, def.size || 1, def) || pickBuildSpot(world, s.hq, def.size || 1, def);
@@ -372,7 +482,7 @@ function manageBuild(world, player, s, applyCommand) {
 }
 
 function managePipelines(world, player, s, applyCommand) {
-  if (!s.hq || constructionBusy(s) || buildingInProgress(s, 'pipe')) return false;
+  if (!s.hq || constructionBusy(s)) return false;
   const def = world.data.buildings.pipe;
   if (!def || !canAfford(player, effectiveCost(world, player.id, def))) return false;
   const producers = s.buildings.filter(b => b.buildProgress >= 1 && producerResource(b));
@@ -382,13 +492,89 @@ function managePipelines(world, player, s, applyCommand) {
     const sinks = s.buildings.filter(b => b.buildProgress >= 1 && depotResources(b).includes(resource));
     if (!sinks.length) continue;
     if (pipelineConnected(world, player.id, prod, sinks)) continue;
-    const spot = pickPipelineSpot(world, player, prod, sinks, def);
-    if (spot) {
-      applyCommand(world, { type: 'build', building: 'pipe', tx: spot[0], ty: spot[1] }, player.id);
-      return true;
-    }
+    // Liegt von diesem Produzenten schon eine Leitung IM BAU Richtung Senke? Dann NICHT noch eine
+    // danebenlegen — sonst entsteht das gemeldete „Spinnennetz" (jede Runde eine neue Parallelleitung).
+    // Erst fertig bauen lassen; bleiben danach echte Lücken, füllt planFullPipeline sie gezielt nach.
+    let near = null, nd = Infinity;
+    for (const k of sinks) { const d = pipeDist(prod, k); if (d < nd) { nd = d; near = k; } }
+    if (near && pipeWorkPending(world, player.id, prod, near)) continue;
+    // KOMPLETTE Pipeline in einem Zug legen — nicht ein Segment pro Runde, das mitten im Nichts
+    // stehen bleibt. So ist die Förderkette Bohrturm/Pumpwerk → Lager IMMER durchgängig.
+    if (planFullPipeline(world, player, prod, sinks, def, applyCommand)) return true;
   }
   return false;
+}
+
+// Legt die gesamte Leitungskette vom Produzenten zur nächsten passenden Senke entlang der direkten
+// Linie (Segmente im Abstand PIPE_LINK_RANGE), soweit Erz reicht — der Rest folgt in der nächsten
+// Runde. Garantiert, dass die Pipeline komplett bis zum Lager durchgezogen wird.
+function planFullPipeline(world, player, prod, sinks, def, applyCommand) {
+  let sink = null, sd = Infinity;
+  for (const k of sinks) { const d = pipeDist(prod, k); if (d < sd) { sd = d; sink = k; } }
+  if (!sink) return false;
+  // EINE durchgehende Leitung entlang eines Pfades um Hindernisse (Klippen/Erz/Öl/Gebäude) herum —
+  // statt einer starren Geraden, die an Hindernissen abreißt (und die KI sonst mit Parallelrohren
+  // „umbaut" → Spinnennetz). Segmente im Abstand PIPE_LINK_RANGE, plus die letzte Pfadzelle an der
+  // Senke, damit die Kette sicher anschließt.
+  const path = pipePathTiles(world, player.id, prod, sink, def);
+  if (!path || !path.length) return false;
+  const cost = effectiveCost(world, player.id, def);
+  const t = world.terrain;
+  const stepN = Math.max(1, PIPE_LINK_RANGE);
+  let built = false;
+  const placeAt = (idx) => {
+    const [tx, ty] = path[idx];
+    if ((t.pipe && t.pipe[tIdx(t, tx, ty)] > 0) || existingOrPendingBuilding(world, player.id, 'pipe', tx, ty)) return true;
+    if (!placeable(world, tx, ty, 1, def, player.id)) return true;
+    if (!canAfford(player, cost)) return false;   // Erz alle → Rest in der nächsten Runde
+    applyCommand(world, { type: 'build', building: 'pipe', tx, ty }, player.id);
+    built = true;
+    return true;
+  };
+  // Segmente im Raster PIPE_LINK_RANGE (Lücken ≤ Reichweite), inkl. produzentennaher Startzelle ...
+  for (let i = 0; i < path.length - 1; i += stepN) if (!placeAt(i)) return built;
+  // ... PLUS die allerletzte Pfadzelle an der Senke, damit die Kette sicher anschließt (Lücke ≤ Raster).
+  if (path.length >= 2) placeAt(path.length - 1);
+  return built;
+}
+
+// Kürzester Leitungspfad (BFS, 4er-Nachbarschaft) von der Produzenten-Fußfläche bis an die Senke,
+// nur über leitungstaugliche Zellen (Wasser ok, aber keine Klippe/Erz/Öl/massives Gebäude). Liefert
+// die Tile-Liste oder null, wenn keine Verbindung möglich ist.
+function pipePathTiles(world, owner, prod, sink, def) {
+  const t = world.terrain, W = t.w;
+  const passable = (x, y) => {
+    if (!inBounds(t, x, y)) return false;
+    const i = tIdx(t, x, y);
+    if (t.pipe && t.pipe[i] > 0) return true;                 // bestehende Leitung ist begehbar
+    if (t.type[i] === TT.CLIFF) return false;                 // Leitung kann nicht durch Klippen
+    if ((t.ore && t.ore[i] > 0) || (t.oil && t.oil[i] > 0)) return false;
+    if (t.block && t.block[i] > 0) return false;              // massives Gebäude im Weg
+    return true;                                              // Land ODER Wasser (Leitung ist waterOptional)
+  };
+  const inSink = (x, y) => x >= sink.tx - 1 && x <= sink.tx + sink.size && y >= sink.ty - 1 && y <= sink.ty + sink.size;
+  const prev = new Map(); const q = [];
+  for (let yy = -1; yy <= prod.size; yy++) for (let xx = -1; xx <= prod.size; xx++) {
+    const x = prod.tx + xx, y = prod.ty + yy;
+    if (passable(x, y)) { const k = y * W + x; if (!prev.has(k)) { prev.set(k, -1); q.push(k); } }
+  }
+  let qi = 0, goal = -1, iter = 0;
+  while (qi < q.length && iter++ < 12000) {
+    const k = q[qi++], x = k % W, y = (k / W) | 0;
+    if (inSink(x, y)) { goal = k; break; }
+    for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+      const nx = x + dx, ny = y + dy;
+      if (!passable(nx, ny)) continue;
+      const nk = ny * W + nx;
+      if (prev.has(nk)) continue;
+      prev.set(nk, k); q.push(nk);
+    }
+  }
+  if (goal < 0) return null;
+  const path = [];
+  for (let c = goal; c !== -1; c = prev.get(c)) path.push([c % W, (c / W) | 0]);
+  path.reverse();
+  return path;
 }
 
 function manageBridges(world, player, s, applyCommand) {
@@ -424,7 +610,9 @@ function manageAccessRoutes(world, player, s, applyCommand) {
 }
 
 function constructionBusy(s) {
-  return s.buildings.filter(b => b.buildProgress < 1).length >= 2;
+  // Infrastruktur (Straße/Brücke/Tunnel/Leitung) zählt NICHT als Bau-Throttle — sonst blockiert eine
+  // gerade entstehende Route den restlichen Bau (und sich selbst).
+  return s.buildings.filter(b => b.buildProgress < 1 && !INFRA_KINDS.has(b.kind)).length >= 2;
 }
 
 function buildingInProgress(s, kind) {
@@ -823,13 +1011,27 @@ function manageArmy(world, player, s, applyCommand) {
   // Pfadprobleme verloren) bekommen spätestens nach ~2 min wieder einen Marschbefehl.
   const regroupLimit = pressure > 0 ? Math.max(10, 60 - pressure * 7) : 60;
   const minWave = pressure >= 4 ? 1 : pressure >= 2 ? 2 : 4;
-  const waveNeed = pressure > 0 ? Math.max(minWave, Math.min(player.ai.waveSize, 6 - Math.min(4, pressure))) : player.ai.waveSize;
+  let waveNeed = pressure > 0 ? Math.max(minWave, Math.min(player.ai.waveSize, 6 - Math.min(4, pressure))) : player.ai.waveSize;
+  // STRATEGIE/DOKTRIN beeinflusst Größe & Zeitpunkt der Welle (nur solange kein Endspieldruck — unter
+  // Druck entscheidet der Director ohnehin). Gibt Partien wechselnde Angriffsmuster.
+  const doc = player.ai.doctrine || 'combined';
+  if (pressure < 2) {
+    if (doc === 'rush') waveNeed = Math.max(2, Math.floor(waveNeed * 0.55));        // früher Sturm
+    else if (doc === 'siege') waveNeed += 2;                                         // etwas länger aufbauen
+  }
+  // Nacht-Doktrin: Hauptwelle bevorzugt nachts; Luftschlag: erst losschlagen, wenn Flieger da sind.
+  // Holds nur bei sehr geringem Druck — sobald die Partie drängt, wird normal angegriffen (sonst Patt).
+  let doctrineHold = false;
+  if (pressure < 2) {
+    if (doc === 'night' && (world.env?.daylight ?? 1) > 0.45) doctrineHold = true;
+    else if (doc === 'airstrike' && s.airbases >= 1 && air.length < 1) doctrineHold = true;
+  }
   const regroup = player.ai.attackTimer > regroupLimit && strike.length >= minWave;
   const regularNeed = Math.max(minWave, Math.min(waveNeed, pressure > 0 ? 3 : 5));
   const regularPulse = strike.length >= regularNeed && player.ai.attackTimer > Math.max(12, Math.floor(regroupLimit * 0.45));
   const vehicleReady = s.factories < 1 || vehicleStrike.length >= (pressure >= 4 ? 1 : 2) || pressure >= 6;
-  if (vehicleReady && (strike.length >= waveNeed || regroup || regularPulse) && player.ai.attackTimer > 4) {
-    const enemy = pickEnemyTarget(world, player, pressure > 0);
+  if (!doctrineHold && vehicleReady && (strike.length >= waveNeed || regroup || regularPulse) && player.ai.attackTimer > 4) {
+    const enemy = pickEnemyTarget(world, player, pressure > 0, doc === 'raid');
     if (enemy) {
       if (vehicleStrike.length && prepareVehicleAttackRoute(world, player, s, vehicleStrike, enemy, applyCommand)) return;
       applyCommand(world, { type: 'move', units: strike.map(u => u.id), x: enemy.x, y: enemy.y, attackMove: true }, player.id);
@@ -974,7 +1176,7 @@ function logisticsAnchor(s) {
     || s.hq;
 }
 
-function pickEnemyTarget(world, player, decisive = false) {
+function pickEnemyTarget(world, player, decisive = false, raid = false) {
   let best = null, bestD = Infinity;
   const hq = ownerEntities(world, player.id, 'building').find(b => b.kind === 'hq');
   const from = hq || ownerEntities(world, player.id, 'unit')[0];
@@ -985,11 +1187,14 @@ function pickEnemyTarget(world, player, decisive = false) {
     if (!owner || owner.defeated) continue;
     // Bevorzugt Produktionsgebäude/HQ; im Endspiel noch stärker auf Entscheidungsziele.
     const production = e.etype === 'building' && (e.def?.produces_units || e.def?.produces_category);
-    const prio = e.etype === 'building'
+    // Raid-Doktrin: greift die VERSORGUNG an — Pipelines, Bohrtürme, Pumpwerke, Depots zuerst.
+    const supply = e.etype === 'building' && (e.def?.pipe || e.def?.pipelineResource || e.def?.pump || e.def?.resourceDepot || e.kind === 'oil_derrick');
+    let prio = e.etype === 'building'
       ? e.kind === 'hq' ? (decisive ? 0.25 : 0.5)
         : production ? (decisive ? 0.45 : 0.8)
         : decisive ? 0.9 : 1.0
       : decisive ? 1.8 : 1.2;
+    if (raid && supply) prio *= 0.25;   // Versorgungsziele stark bevorzugen
     const d = ((e.x - from.x) ** 2 + (e.y - from.y) ** 2) * prio;
     if (d < bestD) { bestD = d; best = e; }
   }
@@ -1054,6 +1259,7 @@ function planRouteInfrastructure(world, player, s, from, to, applyCommand, opts 
 
   const cells = lineTiles(from.tx, from.ty, to.tx, to.ty);
   let prev = from;
+  let roadsBuilt = 0;
   for (let n = 0; n < cells.length; n++) {
     const [tx, ty] = cells[n];
     if (!inBounds(world.terrain, tx, ty)) break;
@@ -1076,12 +1282,23 @@ function planRouteInfrastructure(world, player, s, from, to, applyCommand, opts 
       }
     }
     const action = routeCellAction(world, player, prev, { tx, ty }, n, opts);
-    if (action && issueRouteAction(world, player, action, applyCommand)) {
-      player.ai.routePlanTick = world.tick;
-      return true;
+    if (action) {
+      if (action.type === 'build' && action.kind === 'road') {
+        // DURCHGEHENDE STRASSE in EINEM Zug: ALLE Routenzellen der Reihe nach belegen, bis das Erz
+        // alle ist (Rest folgt, sobald dieses Stück steht) — statt nur EINER Kachel pro Planungsrunde,
+        // was wie verstreute Einzelfelder aussah. routeWorkPending verhindert Doppelplanung.
+        if (issueRouteAction(world, player, action, applyCommand)) {
+          if (++roadsBuilt >= AI_ROUTE_MAX_CELLS) break;
+        } else break;                      // Erz/Platz alle → aufhören
+      } else if (issueRouteAction(world, player, action, applyCommand)) {
+        // Terraform (Steilhang einebnen) u. Ä.: Einzelaktion, Runde danach beenden.
+        player.ai.routePlanTick = world.tick;
+        return true;
+      }
     }
     if (world.terrain.type[i] !== TT.CLIFF && !waterBlocksLand(world.terrain, i)) prev = { tx, ty };
   }
+  if (roadsBuilt > 0) { player.ai.routePlanTick = world.tick; return true; }
   return false;
 }
 
@@ -1199,6 +1416,18 @@ function routeWorkPending(world, owner, from, to) {
   return false;
 }
 
+// Ist von diesem Produzenten bereits eine Leitung IM BAU (buildProgress<1) im Korridor zur Senke?
+// Verhindert, dass die KI Runde für Runde neue Parallelleitungen daneben legt (Spinnennetz).
+function pipeWorkPending(world, owner, prod, sink) {
+  const ax = prod.tx + prod.size / 2, ay = prod.ty + prod.size / 2;
+  const bx = sink.tx + sink.size / 2, by = sink.ty + sink.size / 2;
+  for (const e of world.entities.values()) {
+    if (e.owner !== owner || e.dead || e.etype !== 'building' || e.kind !== 'pipe' || e.buildProgress >= 1) continue;
+    if (nearLine(e.tx, e.ty, ax, ay, bx, by, 3)) return true;
+  }
+  return false;
+}
+
 function existingOrPendingBuilding(world, owner, kind, tx, ty) {
   return [...world.entities.values()].some(e => e.owner === owner && !e.dead && e.etype === 'building'
     && e.kind === kind && e.tx === tx && e.ty === ty);
@@ -1305,6 +1534,29 @@ function findCoastalBuildSpot(world, owner, hq, size, def = null) {
     }
   }
   return best;
+}
+
+// Pumpwerk ans Süßwasser: findet (per Ringsuche ab HQ) das nächste Wasser, auf dem ein Pumpwerk
+// platzierbar ist — auch fernab der Basis (remoteBuild). placeable() lässt dank `freshWater`-Flag nur
+// Fluss/See zu (kein Meer), also liefert die Suche automatisch Süßwasser-Standorte.
+function findFreshWaterPumpSpot(world, owner, hq, size, def) {
+  if (!hq) return null;
+  const t = world.terrain;
+  const cx = Math.round(hq.tx + hq.size / 2), cy = Math.round(hq.ty + hq.size / 2);
+  for (let r = 4; r <= 64; r += 2) {                       // wachsender Ring → nächstgelegenes Meer zuerst
+    let best = null, bestD = Infinity;
+    const lo = -r, hi = r;
+    for (let dy = lo; dy <= hi; dy++) for (let dx = lo; dx <= hi; dx++) {
+      if (Math.max(Math.abs(dx), Math.abs(dy)) !== r) continue;   // nur der Ringrand
+      const tx = cx + dx, ty = cy + dy;
+      if (!inBounds(t, tx, ty) || !inBounds(t, tx + size - 1, ty + size - 1)) continue;
+      if (!placeable(world, tx, ty, size, def, owner)) continue;
+      const d = dx * dx + dy * dy;
+      if (d < bestD) { bestD = d; best = [tx, ty]; }
+    }
+    if (best) return best;
+  }
+  return null;
 }
 
 function pickOilSpot(world, s, size, def = null) {

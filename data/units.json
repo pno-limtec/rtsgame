@@ -481,6 +481,7 @@
     "upkeep": {
       "fuel": 0.3
     },
-    "desc": "Hydro-Spezialschiff: repariert und unterstützt Wasserbau. Gebäude errichtet ausschließlich der Bagger."
+    "desc": "Hydro-Spezialschiff: repariert, unterstützt Wasserbau UND hebt schiffbare Kanäle durch Landengen aus (Kanal-Befehl, per Linie).",
+    "canal": true
   }
 }

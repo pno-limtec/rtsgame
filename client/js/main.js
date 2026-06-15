@@ -16,13 +16,18 @@ async function boot() {
   const rawCmd = net.cmd.bind(net);
   const INFANTRY = new Set(['rifleman', 'at_soldier', 'engineer']);
   net.cmd = (cmd) => {
-    if (cmd.type === 'move' || cmd.type === 'attack' || cmd.type === 'load' || cmd.type === 'unload') audio.command(1);
-    if (cmd.type === 'move') {
-      // Motorengeräusch nur, wenn tatsächlich Fahrzeuge losfahren — Infanterie macht Schritte.
+    if (cmd.type === 'move' || cmd.type === 'attack' || cmd.type === 'load' || cmd.type === 'unload') {
       const ids = new Set(cmd.units || []);
-      const moved = net.entities(1).filter(e => ids.has(e.id));
-      if (moved.some(e => !INFANTRY.has(e.kind))) audio.motor(0.8);
-      else if (moved.length) audio.steps(0.8);
+      const moved = ids.size ? net.entities(1).filter(e => ids.has(e.id)) : [];
+      // Befehls-Quittung im EIGENEN Klang des kommandierten Einheitentyps (statt eines Einheitssounds).
+      const prim = moved[0];
+      const pdef = prim ? data.units[prim.kind] : null;
+      if (prim) audio.unitAck(prim.kind, pdef?.category, pdef?.domain, 1); else audio.command(1);
+      if (cmd.type === 'move') {
+        // Motorengeräusch nur, wenn tatsächlich Fahrzeuge losfahren — Infanterie macht Schritte.
+        if (moved.some(e => !INFANTRY.has(e.kind))) audio.motor(0.8);
+        else if (moved.length) audio.steps(0.8);
+      }
     }
     if (cmd.type === 'build' || cmd.type === 'terraform') audio.build(0.7);
     rawCmd(cmd);
@@ -102,6 +107,7 @@ async function boot() {
     renderer.updateTerraform(net.terra); // terraformte Geländehöhen übernehmen
     renderer.updateSnow(net.snow);     // Schneedecke (schmilzt bei Sonne, wächst bei Schneefall)
     renderer.updateOil(net.oil);       // Öl-Sickerflecken schrumpfen bei Förderung
+    renderer.updateOre(net.oreDelta);  // Erz-Restmengen für die Feldanzeige aktualisieren
     renderer.updateRoads(net.roads);   // automatisches Straßennetz
     renderer.updateTunnels(net.tunnels); // Tunnelröhren (durchgehend)
     renderer.updateGroundWear(net.ground); // Fahrzeugspuren, Pfützenrillen, Matsch

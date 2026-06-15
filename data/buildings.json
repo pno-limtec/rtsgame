@@ -22,8 +22,8 @@
   "water_pump": {
     "label": "Pumpwerk", "role": "economy",
     "hp": 450, "cost": { "ore": 300 }, "buildTime": 8,
-    "power": -10, "size": 2, "sight": 5, "pump": true, "buildOnWater": true, "requiresWater": true, "mustStandInWater": true, "remoteBuild": true,
-    "desc": "Kann direkt im Wasser als Außenposten gebaut werden. Fördert Wasser erst mit Pipeline zum Wasserturm."
+    "power": -10, "size": 2, "sight": 5, "pump": true, "buildOnWater": true, "requiresWater": true, "mustStandInWater": true, "freshWater": true, "remoteBuild": true,
+    "desc": "Steht im Süßwasser (Fluss/See, NICHT im Meer) und fördert nur dort. Liefert das Wasser per Pipeline zum Wasserturm."
   },
   "pipe": {
     "label": "Pipeline", "role": "economy",
@@ -150,20 +150,20 @@
     "label": "Tunnel", "role": "infrastructure",
     "hp": 900, "cost": { "ore": 60, "materials": 10 }, "buildTime": 6,
     "power": 0, "size": 1, "sight": 2, "tunnels": true, "buildOnCliff": true, "buildRadius": 3, "earthYield": 25,
-    "lineBuild": true,
+    "lineBuild": true, "remoteBuild": true,
     "desc": "Durchgehende Röhre durch Klippen/Berge — wie eine Straße per Linie gezogen (Hang zu Hang), aber deutlich teurer (Kosten je Tile). Fahrzeuge UND Wasser kommen durch; Einheiten sind in der Röhre verborgen. Eine zerstörte Mündung versiegelt das Ende, zwei lassen den Tunnel mit allen Einheiten darin einstürzen."
   },
   "wall": {
     "label": "Wall", "role": "fortification",
     "hp": 450, "cost": { "ore": 60, "materials": 12 }, "buildTime": 3,
-    "power": 0, "size": 1, "sight": 2, "cover": 0.35, "terraform": 0.20, "buildRadius": 2,
+    "power": 0, "size": 1, "sight": 2, "cover": 0.35, "terraform": 0.20, "buildRadius": 2, "remoteBuild": true,
     "blocks": true, "waterBlocks": true,
-    "desc": "Steiler Erdwall: hebt das Gelände stark an (steile Kanten), blockiert ALLE Bodeneinheiten (auch Infanterie) UND Wasser (Deich). Nur per Brücke/Tunnel überwindbar."
+    "desc": "Steiler Erdwall: hebt das Gelände stark an (steile Kanten), blockiert ALLE Bodeneinheiten (auch Infanterie) UND Wasser (Deich). Nur per Brücke/Tunnel überwindbar. Überall baubar."
   },
   "trench": {
     "label": "Graben", "role": "fortification",
     "hp": 300, "cost": { "ore": 80 }, "buildTime": 3,
-    "power": 0, "size": 1, "sight": 3, "cover": 0.5, "garrison": 4, "terraform": -0.20, "earthYield": 40, "buildRadius": 2,
+    "power": 0, "size": 1, "sight": 3, "cover": 0.5, "garrison": 4, "terraform": -0.16, "earthYield": 40, "buildRadius": 2, "remoteBuild": true,
     "blocks": true,
     "desc": "Tiefer, steiler Graben — der Aushub liefert Erde. Sperrt den Durchgang für ALLE Bodeneinheiten (nur per Brücke/Tunnel passierbar); eigene Infanterie kann sich darin eingraben. Leitet Wasser (Kanal), kann Hochseen anstechen."
   },

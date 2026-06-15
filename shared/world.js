@@ -1,5 +1,5 @@
 // Weltzustand + gemeinsame Hilfsfunktionen (Spawning, Abfragen, Spatial-Hash, Schaden).
-import { generateTerrain, worldToTile, tileToWorld, TT, tIdx, inBounds, stampOre, coverAt, stampFortification, unstampFortification, hasWaterNear, isNavigableWater, isPassable, softenRiverBanks, stabilizeWaterTerrain, enforceDrainageToSea } from './terrain.js';
+import { generateTerrain, worldToTile, tileToWorld, TT, tIdx, inBounds, stampOre, coverAt, stampFortification, unstampFortification, hasWaterNear, isNavigableWater, isFreshWater, isPassable, softenRiverBanks, stabilizeWaterTerrain, enforceDrainageToSea } from './terrain.js';
 import { makeRng } from './rng.js';
 import {
   TILE, DEFAULT_MAP, SUB_DETECT_RANGE, GARRISON_DAMAGE_MULT,
@@ -530,6 +530,8 @@ export function canPlaceBuilding(world, tx, ty, size, def, owner = null) {
     if (onWater && !waterOptional && !bridges && !realWater) return false;
     if (bridges && !wetCell) return false; // Brücke nur übers Wasser, nicht auf Trockenland
     if (def && def.mustStandInWater && !realWater) return false;
+    // Pumpwerk nur in Süßwasser (Fluss/See), nicht im Meer.
+    if (def && def.freshWater && !isFreshWater(terrain, nx, ny)) return false;
     if (terrain.ore[i] > 0) return false;
     if (terrain.oil && terrain.oil[i] > 0 && !(def && def.requiresOil)) return false;
   }

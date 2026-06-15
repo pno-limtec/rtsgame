@@ -1041,6 +1041,17 @@ function isNavigableWaterIdx(t, i) {
   return (t.water?.[i] || 0) >= NAVIGABLE_DEPTH;
 }
 
+// Süßwasser (Fluss/Binnensee) vs. Meer: das Meer liegt im Becken auf/unter SEA_LEVEL und ist mit dem
+// Kartenrand verbunden; Flüsse/Seen sind in höheres Gelände gegraben (Bett deutlich über SEA_LEVEL)
+// bzw. als Hochsee markiert (lakeMask). Pumpwerke dürfen nur in Süßwasser stehen.
+export function isFreshWater(t, tx, ty) {
+  if (!inBounds(t, tx, ty)) return false;
+  const i = tIdx(t, tx, ty);
+  const wet = (t.water?.[i] || 0) >= NAVIGABLE_DEPTH || !!(t.lakeMask && t.lakeMask[i]);
+  if (!wet) return false;
+  return !!(t.lakeMask && t.lakeMask[i]) || (t.height?.[i] || 0) > SEA_LEVEL + 0.03;
+}
+
 function isDryOreCell(t, i) {
   return (t.type[i] === TT.LAND || t.type[i] === TT.HILL)
     && !waterBlocksLand(t, i)
