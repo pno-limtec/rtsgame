@@ -60,6 +60,8 @@ const SKY_DROUGHT = new THREE.Color(0xd2b77a);
 const WEATHER_FOG_DAY = new THREE.Color(0x9faab0);
 const WEATHER_FOG_NIGHT = new THREE.Color(0x111821);
 const WATER_KINDS = new Set(['patrol_boat', 'destroyer', 'amphib_transport', 'sea_builder', 'submarine', 'underwater_drone']);
+// Wasserbauten schwimmen auf der Oberfläche (Werft, Pumpwerk) statt auf dem Seegrund zu stehen.
+const WATER_BUILDINGS = new Set(['shipyard', 'water_pump']);
 const SURFACE_SHIP_KINDS = new Set(['patrol_boat', 'destroyer', 'amphib_transport', 'sea_builder']);
 // Bauten, die ans Pipeline-Netz andocken (für die optische Rohrverbindung).
 const PIPE_CONNECT = new Set(['pipe', 'water_pump', 'water_tower', 'oil_derrick', 'oil_depot']);
@@ -2528,6 +2530,9 @@ export class Renderer {
         if (e.kind === 'submarine') y -= 0.5;                                 // getaucht: nur Turm schaut raus
         else if (e.kind === 'underwater_drone') y -= 0.42;                    // klein und knapp unter der Oberfläche
         else if (!this._isSeaWorldPoint(e.x, e.y)) y += Math.sin(this.time * 1.3 + e.id) * 0.06; // Binnenwasser-Dümpeln
+      } else if (WATER_BUILDINGS.has(e.kind)) {
+        // Werft/Pumpwerk schwimmen: auf der Wasseroberfläche sitzen (nicht auf dem Seegrund).
+        y = Math.max(this.waterSurfaceAt(e.x, e.y), this.seaY ?? y) - 0.05;
       } else if ((g.userData.lift || 0) >= 5) {
         y += Math.sin(this.time * 1.7 + e.id * 0.7) * 0.35;                   // Schwebe-Bob der Luftfahrzeuge
       }
@@ -2662,7 +2667,8 @@ export class Renderer {
         g.userData.bar.scale.x = Math.max(0.001, f);
         g.userData.bar.position.x = -1 + f;
         g.userData.bar.material.color.setHex(f > 0.5 ? 0x4caf50 : f > 0.25 ? 0xffb300 : 0xf44336);
-        const showHp = !e.abandoned && f < 0.75;
+        // Straßen bekommen KEINE HP-Anzeige (reine Fahrbahn, kein „Gebäude-Gefühl").
+        const showHp = !e.abandoned && f < 0.75 && e.kind !== 'road';
         g.userData.bar.visible = showHp;
         if (g.userData.barBack) g.userData.barBack.visible = showHp;
       }

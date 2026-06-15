@@ -392,13 +392,12 @@ function manageAccessRoutes(world, player, s, applyCommand) {
   if (landArmy.length < (pressure > 0 ? 2 : 5) && s.vehicleArmy < 1 && s.factories < 1) return false;
   const enemy = pickEnemyTarget(world, player, pressure > 0);
   if (!enemy) return false;
-  const vehicles = landArmy.filter(u => u.category === 'vehicle');
-  const builders = s.units.filter(u => u.kind === 'builder' && !u.dead);
-  const starter = nearestEntityToPoint(vehicles.length ? vehicles : (builders.length ? builders : [s.hq]), enemy.x, enemy.y);
-  if (!starter) return false;
-  const from = entityTile(starter);
+  // Route IMMER vom (unbeweglichen) HQ aus planen — sonst wandert die Linie mit der jeweils
+  // nächsten Einheit und die KI verstreut Brückenpfeiler über viele Flussreihen, statt EINE
+  // Überquerung fertigzustellen. Stabiler Ankerpunkt = eine durchgehende Brücke/Straße.
+  const from = { tx: Math.round(s.hq.tx + s.hq.size / 2), ty: Math.round(s.hq.ty + s.hq.size / 2) };
   const [gx, gy] = worldToTile(enemy.x, enemy.y);
-  if (canReachTile(world.terrain, from.tx, from.ty, gx, gy, starter.maxSlope ?? SLOPE_HEAVY,
+  if (canReachTile(world.terrain, from.tx, from.ty, gx, gy, SLOPE_HEAVY,
     { heavy: true, category: 'vehicle' }, 5)) return false;
   return planRouteInfrastructure(world, player, s, from, { tx: gx, ty: gy }, applyCommand, { preferRoad: true });
 }
@@ -973,19 +972,32 @@ function planBridgeSpan(world, player, cells, n, applyCommand) {
   const t = world.terrain;
   const def = world.data.buildings.bridge;
   if (!def) return false;
+  const [ex, ey] = cells[n];
+  // KÜRZESTE ORTHOGONALE Überquerung ab der Eintrittszelle (x- ODER y-Richtung). Wichtig: eine
+  // diagonale Brückentreppe ist für Fahrzeuge NICHT passierbar (A* schneidet keine Wasser-Ecken),
+  // darum bauen wir eine gerade, orthogonal zusammenhängende Spanne quer durch den Fluss.
+  const runLen = (dx, dy) => {
+    let L = 0, x = ex, y = ey;
+    while (inBounds(t, x, y) && waterBlocksLand(t, tIdx(t, x, y)) && L < 30) { L++; x += dx; y += dy; }
+    return L;
+  };
+  let best = null, bestLen = Infinity;
+  for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+    const L = runLen(dx, dy);
+    if (L > 0 && L < bestLen) { bestLen = L; best = [dx, dy]; }
+  }
+  if (!best) return false;
   const cost = effectiveCost(world, player.id, def);
-  let built = false;
-  for (let k = n; k < cells.length; k++) {
-    const [tx, ty] = cells[k];
-    if (!inBounds(t, tx, ty)) break;
-    const i = tIdx(t, tx, ty);
-    if (!waterBlocksLand(t, i)) break;                         // Wasserlauf zu Ende → Spanne fertig
-    if (t.bridge && t.bridge[i] > 0) continue;                 // schon überbrückt
-    if (existingOrPendingBuilding(world, player.id, 'bridge', tx, ty)) continue;
-    if (!canAfford(player, cost)) break;                       // Erz alle → Rest später
-    if (!placeable(world, tx, ty, 1, def, player.id)) continue;
-    applyCommand(world, { type: 'build', building: 'bridge', tx, ty }, player.id);
-    built = true;
+  let built = false, x = ex, y = ey;
+  for (let k = 0; k < bestLen; k++) {
+    const i = tIdx(t, x, y);
+    if (!(t.bridge && t.bridge[i] > 0) && !existingOrPendingBuilding(world, player.id, 'bridge', x, y)
+      && placeable(world, x, y, 1, def, player.id)) {
+      if (!canAfford(player, cost)) break;                     // Erz alle → Rest in der nächsten Runde
+      applyCommand(world, { type: 'build', building: 'bridge', tx: x, ty: y }, player.id);
+      built = true;
+    }
+    x += best[0]; y += best[1];
   }
   return built;
 }

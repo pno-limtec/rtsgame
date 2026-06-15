@@ -590,7 +590,7 @@ function addOuterPlateaus(height, w, h, rng, cx, cy) {
 // NUTZBARE PLATEAUS: flachgedeckelte Mesas mit ebener, bebaubarer Oberfläche und sanft abfallenden
 // Rändern. Läuft NACH der Endrundung (damit die Flächen eben bleiben) und nutzt eine SEPARATE rng,
 // um den deterministischen Hauptstrom (carveRiver etc. → Tests) nicht zu verschieben.
-function stampUsablePlateaus(height, w, h, rngP, cx, cy) {
+function stampUsablePlateaus(height, w, h, rngP, cx, cy, avoid = []) {
   const minDim = Math.min(w, h), maxR = Math.hypot(cx, cy);
   const count = Math.max(5, Math.round(minDim / 22));
   const placed = [];
@@ -604,6 +604,8 @@ function stampUsablePlateaus(height, w, h, rngP, cx, cy) {
       if (px < 8 || py < 8 || px >= w - 8 || py >= h - 8) continue;
       if (Math.min(px, py, w - 1 - px, h - 1 - py) < minDim * 0.11) continue;
       if (height[py * w + px] < SEA_LEVEL + 0.10) continue; // nicht ins Meer/an die Küste
+      // Trockentäler/Flutziele freihalten — ein Plateau dort würde die Senke zuschütten.
+      if (avoid.some(V => Math.hypot(px - V.x, py - V.y) < minDim * 0.10)) continue;
       ok = placed.every((p) => Math.hypot(px - p.x, py - p.y) > minDim * 0.13);
     }
     if (!ok) continue;
@@ -774,7 +776,7 @@ export function generateTerrain({ w, h, seed = 1 }) {
     carveHighLake(height, w, h, lx, ly, r, level);
     lakes.push({ x: lx, y: ly, r, level });
 
-    if (valleys.length < 5) {   // mehr Trockentäler = mehr Flutziele (passt zu den größeren Überschwemmungen)
+    if (valleys.length < 3) {
       const valleyFloor = Math.max(SEA_LEVEL + 0.055, level - 0.18);
       const v = carveDryValley(height, w, h, cx0, cy0, a, rr + r + 3, Math.round(Math.min(w, h) * 0.10), 2, valleyFloor);
       if (v) valleys.push({ ...v, level: valleyFloor, floodFrom: lakes[l].level });
@@ -809,7 +811,7 @@ export function generateTerrain({ w, h, seed = 1 }) {
   // die schiffbaren Fluss-Kerne werden direkt danach ohnehin neu gesetzt.
   roundTerrain(height, w, h, 1, 0.5);
   // Nutzbare, ebene Plateaus NACH der Rundung stempeln (sonst würden die Deckel weggeglättet).
-  stampUsablePlateaus(height, w, h, rngP, cx0, cy0);
+  stampUsablePlateaus(height, w, h, rngP, cx0, cy0, valleys);
 
   for (let i = 0; i < w * h; i++) {
     const e = height[i];

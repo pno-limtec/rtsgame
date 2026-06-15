@@ -1028,7 +1028,19 @@ export class UI {
       if (e.etype === 'building' && e.buildProgress < 1) html += `<span class="chip" title="Baufortschritt">${Math.round(e.buildProgress * 100)}%</span>`;
       if (e.etype === 'building' && e.queue) html += `<span class="chip" title="Produktionswarteschlange">Queue ${e.queue}</span>`;
       if (e.etype === 'building' && e.powered === false) html += '<span class="chip" title="Lastabwurf">ohne Strom</span>';
-      if (e.etype === 'unit' && e.cargo) html += `<span class="chip" title="Ladung">Ladung ${e.cargo}</span>`;
+      // Lager: gespeicherte Menge der Annahme-Ressource (Vorrat/Kapazität des Besitzers) anzeigen.
+      const bdef = this.data.buildings[e.kind] || {};
+      const depotRes = bdef.resourceDepot || (bdef.integratedStorage && Object.keys(bdef.integratedStorage)[0]);
+      if (e.etype === 'building' && depotRes && owner?.res) {
+        const have = Math.round(owner.res[depotRes] ?? 0);
+        const cap = owner.cap ? Math.round(owner.cap[depotRes] ?? 0) : 0;
+        html += `<span class="chip" title="Eingelagert">${resIcon(depotRes, 'costicon')}${have}${cap ? '/' + cap : ''}</span>`;
+      }
+      // LKW/Bagger-Ladung: Menge + Ressourcenart.
+      if (e.etype === 'unit' && e.cargo) {
+        const cr = e.role && e.role !== 'build' ? e.role : 'ore';
+        html += `<span class="chip" title="Ladung">${resIcon(cr, 'costicon')}${Math.round(e.cargo)}</span>`;
+      }
       if (e.etype === 'unit' && e.role) html += `<span class="chip" title="Bagger/LKW-Rolle">${escAttr(BUILDER_ROLE_LABEL[e.role] || e.role)}</span>`;
     }
     const builders = ents.filter(e => e.kind === 'builder' && e.owner === this.net.seat);
