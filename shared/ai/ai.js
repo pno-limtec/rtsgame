@@ -96,6 +96,7 @@ export function stepAi(world, player, applyCommand) {
   const builtRoute = !builtCoverage && !builtInfra && !builtBridge && manageAccessRoutes(world, player, s, applyCommand);
   if (!builtCoverage && !builtInfra && !builtBridge && !builtRoute) manageBuild(world, player, s, applyCommand);
   if (!manageCoverageProduction(world, player, s, applyCommand) && !world.aiCoverageTest) manageProduction(world, player, s, applyCommand);
+  manageRecovery(world, player, s, applyCommand);
   manageArmy(world, player, s, applyCommand);
   manageHarvesters(world, player, applyCommand);
   manageIdleWorkers(world, player, s, applyCommand);
@@ -586,7 +587,10 @@ function siegeDeficit(s) {
   if (n < 3) return null;
   const rockets = veh.filter(u => u.kind === 'rocket_launcher').length;
   if (rockets < Math.max(1, Math.round(n * 0.20))) return 'rocket_launcher';
-  if (n >= 5) {
+  // Artillerie ab 4 (statt 5) Fahrzeugen: die Fahrzeugarmee erreicht in vielen Partien selten 5
+  // gleichzeitig lebende Einheiten (Verluste/geringe Produktion) → bei Schwelle 5 kam Artillerie
+  // real kaum vor. 4 macht den Belagerungstyp verlässlich (Coverage C) und bricht Turtling.
+  if (n >= 4) {
     const arty = veh.filter(u => u.kind === 'artillery').length;
     if (arty < Math.max(1, Math.round(n * 0.15))) return 'artillery';
   }
@@ -711,6 +715,50 @@ function manageProduction(world, player, s, applyCommand) {
         : (world.rng() < bomberShare ? 'bomber' : 'gunship');
     if (afford(kind)) applyCommand(world, { type: 'produce', building: air.id, kind }, player.id);
   }
+}
+
+// Bergungs-/Spezialdoktrin: stellt einen Bergungstraktor und einen Flugabwehrschützen bereit
+// (beide kamen real NIE vor → tote Bauoptionen; coverage.js Ziel C) und setzt den Traktor ECHT
+// ein, um verlassene Fahrzeuge zu bergen (25%-HP-Fahrzeug gratis statt Dauerersatz). Läuft NACH
+// manageProduction, damit aa_soldier/tractor erst slotten, wenn die Hauptarmee ihr Soll erreicht
+// hat (freier Queue-Slot) → kein Verdrängen des Siegpfads. KEIN world.rng() → RNG-Stream und die
+// brittle terrain-/wave-Smoke-Tests bleiben unberührt.
+function manageRecovery(world, player, s, applyCommand) {
+  const pressure = world.aiDirector?.pressure || 0;
+  const cap = pressure > 2 ? 3 : 2;
+  const hasKind = (k) => s.units.some(u => u.kind === k)
+    || s.buildings.some(b => (b.queue || []).some(q => q.kind === k));
+  const free = (kind) => s.buildings.find(b => b.buildProgress >= 1 && b.kind === kind && b.queue.length < cap);
+  const can = (k) => world.data.units[k] && canAfford(player, effectiveCost(world, player.id, world.data.units[k]));
+
+  // Flugabwehr-Schütze: kleine proaktive Luftverteidigung, sobald eine Infanteriebasis steht
+  // (nicht erst wenn Feindluft sichtbar — der Gegner KANN Luft bauen, AA ist billige Versicherung).
+  const infArmy = s.army.filter(u => u.category === 'infantry' && !u.abilities.includes('harvest')).length;
+  if (!hasKind('aa_soldier') && infArmy >= 4 && can('aa_soldier')) {
+    const bar = free('barracks');
+    if (bar) { applyCommand(world, { type: 'produce', building: bar.id, kind: 'aa_soldier' }, player.id); return; }
+  }
+
+  // Bergungstraktor: einer, sobald die Fahrzeugarmee trägt (tractor hat kein weapon → zählt nicht
+  // gegen VEHICLE_TARGET, verdrängt also keine Kampffahrzeuge).
+  if (!hasKind('tractor') && s.vehicleArmy >= 4 && can('tractor')) {
+    const fac = free('factory');
+    if (fac) { applyCommand(world, { type: 'produce', building: fac.id, kind: 'tractor' }, player.id); return; }
+  }
+
+  // Vorhandene Traktoren auf nahe verlassene Fahrzeuge ansetzen (nur im Umkreis der eigenen Basis,
+  // kein Selbstmord-Trip ins Feindgebiet). Verlassene Fahrzeuge sind owner -1 (neutral) → frei bergbar.
+  const tractors = s.units.filter(u => u.kind === 'tractor' && u.abilities?.includes('tow') && !u.abandoned);
+  if (!tractors.length || !s.hq) return;
+  let wreck = null, bestD = 70 * 70;
+  for (const e of world.entities.values()) {
+    if (!e.abandoned || e.dead || e.domain !== 'land') continue;
+    const d = (e.x - s.hq.x) ** 2 + (e.y - s.hq.y) ** 2;
+    if (d < bestD) { bestD = d; wreck = e; }
+  }
+  if (!wreck) return;
+  const idleTr = tractors.filter(u => u.order?.type !== 'tow');
+  if (idleTr.length) applyCommand(world, { type: 'tow', targetId: wreck.id, units: idleTr.map(u => u.id) }, player.id);
 }
 
 function manageArmy(world, player, s, applyCommand) {

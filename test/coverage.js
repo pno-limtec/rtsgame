@@ -41,8 +41,9 @@ const bldFirstMatch = {};
 
 let waterKillsUnits = 0;            // Einheiten von Wasser getötet (washout-Event, etype unit)
 let waterKillsBld = 0;             // Gebäude von Wasser zerstört (washout-Event, etype building)
-let matchesWithWaterKill = 0;      // Partien mit ≥1 Wasser-Tötung
+let matchesWithWaterKill = 0;      // Partien mit ≥1 Wasser-Tötung (Einheit)
 let matchesWithWaterBldKill = 0;   // Partien mit ≥1 von Wasser zerstörtem Gebäude
+let matchesWithWaterImpact = 0;    // Partien mit ≥1 Wasser-Verlust (Einheit ODER Gebäude) = Ziel B
 let floodedUnitTicks = 0;          // Stichproben: Einheiten gerade im Flutwasser (inFlood)
 
 let tunnelBuilds = 0, bridgeBuilds = 0, roadBuilds = 0;   // gebaute Infrastruktur (Endbestand)
@@ -110,6 +111,7 @@ for (let s = 0; s < N; s++) {
   tunnelBuilds += tn; bridgeBuilds += br; roadBuilds += rd;
   if (mWaterUnit > 0) matchesWithWaterKill++;
   if (mWaterBld > 0) matchesWithWaterBldKill++;
+  if (mWaterUnit > 0 || mWaterBld > 0) matchesWithWaterImpact++;
   if (mTunnelUse > 0) { matchesWithTunnelUse++; }
   if (mBridgeUse > 0) { matchesWithBridgeUse++; }
 
@@ -132,6 +134,7 @@ console.log(`  Gebäude   ${seenBuildings.size}/${BUILDABLE.length} (${(bldCov *
 console.log(`\n--- (B) Wasser-Beitrag ---`);
 console.log(`  Einheiten ertränkt/weggespült: ${waterKillsUnits}  ·  Gebäude zerstört: ${waterKillsBld}`);
 console.log(`  Partien mit Wasser-Tötung: ${matchesWithWaterKill}/${N} (${(matchesWithWaterKill / N * 100).toFixed(0)}%)  ·  mit Gebäude-Verlust: ${matchesWithWaterBldKill}/${N}`);
+console.log(`  Partien mit Wasser-Beitrag (Einheit ODER Gebäude): ${matchesWithWaterImpact}/${N} (${(matchesWithWaterImpact / N * 100).toFixed(0)}%)`);
 console.log(`  Stichproben Einheiten im Flutwasser: ${floodedUnitTicks}`);
 
 console.log(`\n--- (D) Infrastruktur-Nutzung ---`);
@@ -145,14 +148,16 @@ console.log(`  Partien mit Tunnel-Durchfahrt: ${matchesWithTunnelUse}/${N}  ·  
 const TARGET = {
   unitCov: 0.60,        // ≥ 60 % der Einheitentypen kommen vor
   bldCov: 0.75,         // ≥ 75 % der baubaren Gebäudetypen
-  waterMatchRate: 0.20, // Wasser tötet in ≥ 20 % der Partien etwas
+  waterMatchRate: 0.20, // Wasser fordert in ≥ 20 % der Partien Verluste (Einheit ODER Gebäude — Ziel B
+                        // umfasst ausdrücklich „Fluten zerstören Gebäude"; reine Einheiten-Ertrinkung
+                        // ist auf 4 Partien ein 1-Match-Messer und kippt bei jeder KI-Störung)
   bridgeOrTunnelUse: 1, // Brücken/Tunnel werden in ≥ 1 Partie tatsächlich befahren
 };
 const bridgeTunnelUseMatches = matchesWithTunnelUse + matchesWithBridgeUse;
 const checks = [
   ['Einheiten-Abdeckung', unitCov >= TARGET.unitCov, `${(unitCov * 100).toFixed(0)}% ≥ ${(TARGET.unitCov * 100)}%`],
   ['Gebäude-Abdeckung', bldCov >= TARGET.bldCov, `${(bldCov * 100).toFixed(0)}% ≥ ${(TARGET.bldCov * 100)}%`],
-  ['Wasser-Beitrag', matchesWithWaterKill / N >= TARGET.waterMatchRate, `${(matchesWithWaterKill / N * 100).toFixed(0)}% ≥ ${(TARGET.waterMatchRate * 100)}%`],
+  ['Wasser-Beitrag', matchesWithWaterImpact / N >= TARGET.waterMatchRate, `${(matchesWithWaterImpact / N * 100).toFixed(0)}% ≥ ${(TARGET.waterMatchRate * 100)}%`],
   ['Infra befahren', bridgeTunnelUseMatches >= TARGET.bridgeOrTunnelUse, `${bridgeTunnelUseMatches} Partien ≥ ${TARGET.bridgeOrTunnelUse}`],
 ];
 console.log(`\n--- Zielwerte ---`);
