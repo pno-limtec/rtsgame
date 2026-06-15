@@ -325,7 +325,11 @@ function manageBuild(world, player, s, applyCommand) {
   const buildingNow = new Set(underConstruction.map(b => b.kind));
   for (const step of BUILD_ORDER) {
     if (buildingNow.has(step.kind)) continue;
-    if (pressure > 0 && ['wall', 'trench', 'mg_turret', 'turret'].includes(step.kind)) continue;
+    if (pressure > 0 && ['wall', 'trench', 'mg_turret'].includes(step.kind)) continue;
+    // Ein zweiter, stärkerer Geschützturm (turret, Deckel turrets<2) darf auch unter Druck noch
+    // entstehen: in eingefrorenen KI-Partien rampt stalePressure schnell (>0 nach ~90s), sonst
+    // erreicht die Build-Order den turret-Schritt nie → tote Bauoption. Ein Hardpoint ist billig,
+    // gedeckelt und hilft dem Führenden, die Front zu festigen (Coverage-Ziel C/F).
     if (pressure > 2 && ['flak_turret', 'sam_site', 'sonar'].includes(step.kind) && !s.enemyAir && !s.enemySubs) continue;
     const def = world.data.buildings[step.kind];
     if (step.want(s)) {
