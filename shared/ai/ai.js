@@ -573,6 +573,22 @@ function lineTiles(ax, ay, bx, by) {
   return out;
 }
 
+// Welche Belagerungswaffe fehlt der Fahrzeugarmee gerade am dringendsten? Liefert den
+// Einheitentyp oder null. Quote: ab 3 Fahrzeugen ≥1 Raketenwerfer (~20 %), ab 5 zusätzlich
+// ≥1 Artillerie (~15 %). Raketenwerfer hat Vorrang (billiger, früher verfügbar).
+function siegeDeficit(s) {
+  const veh = s.units.filter(u => u.category === 'vehicle' && u.weapon);
+  const n = veh.length;
+  if (n < 3) return null;
+  const rockets = veh.filter(u => u.kind === 'rocket_launcher').length;
+  if (rockets < Math.max(1, Math.round(n * 0.20))) return 'rocket_launcher';
+  if (n >= 5) {
+    const arty = veh.filter(u => u.kind === 'artillery').length;
+    if (arty < Math.max(1, Math.round(n * 0.15))) return 'artillery';
+  }
+  return null;
+}
+
 function manageProduction(world, player, s, applyCommand) {
   const pressure = world.aiDirector?.pressure || 0;
   // Spar-Reserve: genug Erz zurückhalten, um das nächste Schlüsselgebäude tatsächlich zu
@@ -648,7 +664,14 @@ function manageProduction(world, player, s, applyCommand) {
     }
     if (s.vehicleArmy >= VEHICLE_TARGET && pressure < 4) continue;
     const r = world.rng();
-    const kind = r < 0.36 ? 'tank' : r < 0.55 ? 'flak_track' : r < 0.74 ? 'rocket_launcher' : r < 0.88 ? 'scout' : 'artillery';
+    let kind = r < 0.36 ? 'tank' : r < 0.55 ? 'flak_track' : r < 0.74 ? 'rocket_launcher' : r < 0.88 ? 'scout' : 'artillery';
+    // Belagerungs-Garantie: ohne sie verdrängen billigere Würfe (Panzer/Flak/Spähwagen) die
+    // teuren Raketenwerfer/Artillerie aus der Mischung (unbezahlbare Würfe bauen nichts → die
+    // Armee füllt sich mit Günstigem bis zum Cap). Ein deterministischer Quoten-Override
+    // erzwingt Belagerungswaffen, sobald sie bezahlbar sind — Coverage-Ziel C + bricht Turtling.
+    // Der world.rng()-Aufruf bleibt erhalten → RNG-Stream/Tests unverändert.
+    const siege = siegeDeficit(s);
+    if (siege && afford(siege)) kind = siege;
     if (afford(kind)) applyCommand(world, { type: 'produce', building: fac.id, kind }, player.id);
   }
 
