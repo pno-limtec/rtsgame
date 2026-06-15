@@ -1225,9 +1225,12 @@ export function isPassable(t, domain, tx, ty, category) {
   switch (domain) {
     case 'air': return true;
     case 'water': return isNavigableWaterIdx(t, i) || ty_ === TT.BRIDGE || inTunnel; // Schiffe queren durch den Tunnel
-    case 'amphibious': return (ty_ !== TT.CLIFF || inTunnel) && !blocked;
+    // Eine Brücke ODER ein Tunnel überwindet auch eine gebaute Sperre (Wall/Graben) — sonst wäre eine
+    // Bodensperre für ALLE undurchlässig (auch Infanterie-Kletterer). Massive Gebäude liegen nie unter
+    // Brücke/Tunnel (Überlappungsprüfung beim Bau), daher unkritisch.
+    case 'amphibious': return (ty_ !== TT.CLIFF || inTunnel) && (!blocked || onBridge || inTunnel);
     case 'land':
-    default: return (ty_ !== TT.CLIFF || inTunnel || climber) && (!wet || onBridge) && !blocked;
+    default: return (ty_ !== TT.CLIFF || inTunnel || climber) && (!wet || onBridge) && (!blocked || onBridge || inTunnel);
   }
 }
 

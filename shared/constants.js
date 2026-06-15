@@ -120,6 +120,7 @@ export const SLOPE_HEAVY = 0.085;              // schwere Fahrzeuge brauchen san
 export const SLOPE_BUILDER = 0.150;            // Bagger/Radlader kommen als Arbeitsfahrzeuge auch steilere Hänge hoch
 export const SLOPE_ON_ROAD = 0.135;            // … außer auf Straßen: Serpentinen-Effekt
 export const SLOPE_TERRAFORM_BUILDER = 0.18;   // Bagger kommen über die steilen Kanten eigener Erdarbeiten
+export const STEEP_BUILD_SLOPE = 0.34;         // Bagger meistert sehr steile Hänge, um Pipeline/Brücke dort zu bauen
 
 // --- Strömung: fließendes Wasser reißt mit (Phase 16) ---
 export const CURRENT_MIN_DEPTH = 0.04;         // ab dieser Tiefe wirkt Strömung

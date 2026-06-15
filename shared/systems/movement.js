@@ -4,7 +4,7 @@ import { findPath } from '../pathfinding.js';
 import { worldToTile, tileToWorld, tileType, TT, inBounds, tIdx, isPassable, slopeOk, roadAtIdx, forestBlocks, waterBlocksLand } from '../terrain.js';
 import {
   BUILDER_WADE_DEPTH, BUILDER_WADE_TIME, DT, FLOOD_DEPTH, WET_DEPTH, ROAD_SPEED, ROAD_SPEED_HEAVY, MUD_SPEED_HEAVY,
-  TURN_RATE_VEHICLE, TURN_RATE_NAVAL, VEHICLE_ACCEL, SLOPE_ON_ROAD, CONSTRUCT_RANGE,
+  TURN_RATE_VEHICLE, TURN_RATE_NAVAL, VEHICLE_ACCEL, SLOPE_ON_ROAD, CONSTRUCT_RANGE, STEEP_BUILD_SLOPE,
   RAIN_AIR_SLOW, STORM_NAVAL_SLOW, FOG_NAVAL_SLOW, FOG_NAVAL_DRIFT, FOG_NAVAL_CRASH_DMG,
   TRACK_GAIN_LIGHT, TRACK_GAIN_HEAVY, MUD_GAIN_HEAVY, MUD_IMPASSABLE, MUD_SPEED_MIN,
   SLOPE_TERRAFORM_BUILDER,
@@ -49,7 +49,14 @@ export function setMoveGoal(world, ent, wx, wy) {
   world._pathBudget--;
   const [sx, sy] = worldToTile(ent.x, ent.y);
   const [gx, gy] = worldToTile(wx, wy);
-  const path = findPath(world.terrain, ent.domain, sx, sy, gx, gy, 48000, ent.maxSlope ?? Infinity,
+  // Pipelines & Brücken dürfen an steilen Hängen gebaut werden — der Bagger meistert dafür eine
+  // deutlich höhere Steigung auf dem Weg zur Baustelle.
+  let maxSlope = ent.maxSlope ?? Infinity;
+  if (ent.kind === 'builder' && (ent.order?.type === 'construct' || ent.order?.type === 'terra')) {
+    const site = ent.order.site != null ? world.entities.get(ent.order.site) : null;
+    if (site && (site.def?.pipe || site.def?.bridges)) maxSlope = Math.max(maxSlope, STEEP_BUILD_SLOPE);
+  }
+  const path = findPath(world.terrain, ent.domain, sx, sy, gx, gy, 48000, maxSlope,
     { heavy: !!ent.heavy, category: ent.category, mudCrawler: ent.kind === 'builder', builderWade: builderWadeOrder(ent), terraCrawler: ent.kind === 'builder' }); // große Karte → mehr Iterationen
   ent.pathGoal = path?.goal || [gx, gy];
   if (path?.goal && (path.goal[0] !== gx || path.goal[1] !== gy)) {

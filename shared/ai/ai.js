@@ -317,6 +317,19 @@ function surveyEconomy(world, player) {
 
 function manageBuild(world, player, s, applyCommand) {
   if (!s.hq) return false;
+  // Harvester-Bootstrap schützen (Anti-Deadlock): steht eine Fabrik UND eine Raffinerie, aber noch GAR
+  // KEINE Erntemaschine und reicht das Erz nicht für die erste (600 + Puffer), dann KEINE diskretionären
+  // Gebäude bauen — sonst versickert sowohl gespartes Erz als auch der Deadlock-Cheat-Zuschuss (800) in
+  // Infrastruktur, die ERSTE Erntemaschine wird NIE bezahlt, es entsteht KEIN Erzeinkommen → die
+  // Wirtschaft verhungert und die Partie friert ein (gemessen seed4000: KBN-Spieler bleibt 0
+  // Erntemaschinen/0 Fahrzeuge, blutet 2000→17 Erz aus). Die Bedingung „Fabrik vorhanden" stellt sicher,
+  // dass die Erntemaschine sofort baubar ist; manageProduction (läuft im selben Tick danach) kauft sie,
+  // sobald das Erz reicht. NUR bis zur ERSTEN Erntemaschine (harvesters<1) → sobald Einkommen fließt,
+  // baut manageBuild normal weiter (Türme etc. bleiben in der Abdeckung). Mit Fix: KBN 0→5 Fahrzeuge.
+  if (s.factories >= 1 && s.refineries >= 1 && s.harvesters < 1) {
+    const harvOre = effectiveCost(world, player.id, world.data.units.harvester).ore || 0;
+    if (player.resources.ore < harvOre + 150) return false;
+  }
   const pressure = world.aiDirector?.pressure || 0;
   // Bauthrottling: höchstens 2 Baustellen gleichzeitig und nie dasselbe Gebäude doppelt im Bau.
   // Verhindert Überbau (z. B. 7 Kraftwerke auf einmal, weil im Bau befindliche Gebäude noch

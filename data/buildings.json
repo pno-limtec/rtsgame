@@ -156,15 +156,16 @@
   "wall": {
     "label": "Wall", "role": "fortification",
     "hp": 450, "cost": { "ore": 60, "materials": 12 }, "buildTime": 3,
-    "power": 0, "size": 1, "sight": 2, "cover": 0.35, "terraform": 0.09, "buildRadius": 2,
+    "power": 0, "size": 1, "sight": 2, "cover": 0.35, "terraform": 0.20, "buildRadius": 2,
     "blocks": true, "waterBlocks": true,
-    "desc": "Erdwall: hebt das Gelände an, blockiert Bodenbewegung UND Wasser (Deichfunktion). Leitet Flüsse um, staut auf, gibt Deckung."
+    "desc": "Steiler Erdwall: hebt das Gelände stark an (steile Kanten), blockiert ALLE Bodeneinheiten (auch Infanterie) UND Wasser (Deich). Nur per Brücke/Tunnel überwindbar."
   },
   "trench": {
     "label": "Graben", "role": "fortification",
     "hp": 300, "cost": { "ore": 80 }, "buildTime": 3,
-    "power": 0, "size": 1, "sight": 3, "cover": 0.5, "garrison": 4, "terraform": -0.10, "earthYield": 40, "buildRadius": 2,
-    "desc": "Senkt das Gelände aus — der Aushub liefert Erde. Deckung für Infanterie; leitet Wasser (Kanal) und kann Hochseen anstechen."
+    "power": 0, "size": 1, "sight": 3, "cover": 0.5, "garrison": 4, "terraform": -0.20, "earthYield": 40, "buildRadius": 2,
+    "blocks": true,
+    "desc": "Tiefer, steiler Graben — der Aushub liefert Erde. Sperrt den Durchgang für ALLE Bodeneinheiten (nur per Brücke/Tunnel passierbar); eigene Infanterie kann sich darin eingraben. Leitet Wasser (Kanal), kann Hochseen anstechen."
   },
   "dam": {
     "label": "Staudamm", "role": "hydro",
