@@ -287,7 +287,7 @@ export class Input {
   }
 
   isLineMode() {
-    return !!this.buildMode && (LINE_KINDS.has(this.buildMode) || this.buildMode.startsWith('_terra_') || this.buildMode === '_canal_');
+    return !!this.buildMode && (LINE_KINDS.has(this.buildMode) || this.buildMode.startsWith('_terra_') || this.buildMode === '_canal_' || this.buildMode === '_pontoon_');
   }
 
   isTerraformMode() {
@@ -449,6 +449,14 @@ export class Input {
         const ex = d.ex ?? d.sx, ey = d.ey ?? d.sy;
         const units = [...this.selected];
         if (units.length) this.net.cmd({ type: 'canal', units, sx: d.sx, sy: d.sy, ex, ey });
+      }
+      if (!this.keys.has('shift')) { this.buildMode = null; this.onBuildPlaced && this.onBuildPlaced(); }
+      return;
+    }
+    // Ponton verlegen: der Brückenleger baut entlang der Linie Pontonbrücken-Zellen übers Wasser.
+    if (this.buildMode === '_pontoon_') {
+      for (const [tx, ty] of cells) {
+        if (!this.buildBlockedByWater('pontoon', tx, ty, 1)) this.net.cmd({ type: 'build', building: 'pontoon', tx, ty });
       }
       if (!this.keys.has('shift')) { this.buildMode = null; this.onBuildPlaced && this.onBuildPlaced(); }
       return;

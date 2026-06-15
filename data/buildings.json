@@ -146,6 +146,12 @@
     "power": 0, "size": 1, "sight": 3, "bridges": true, "buildOnWater": true, "buildRadius": 3, "lineBuild": true, "remoteBuild": true,
     "desc": "Per Linie über Wasser gezogen (Ufer zu Ufer, wie ein Tunnel). Landeinheiten überqueren Wasser; Schiffe passieren darunter. Zerstörbar — Nachschublinien sichern!"
   },
+  "pontoon": {
+    "label": "Pontonbrücke", "role": "infrastructure",
+    "hp": 60, "cost": { "ore": 18 }, "buildTime": 1,
+    "power": 0, "size": 1, "sight": 1, "bridges": true, "buildOnWater": true, "pontoon": true, "lineBuild": true, "remoteBuild": true,
+    "desc": "Schnell vom Brückenleger verlegte Pontonbrücke: Landeinheiten queren Wasser, aber nur LANGSAM — und sie ist sehr leicht zu zerstören (improvisierte Nachschublinie)."
+  },
   "tunnel": {
     "label": "Tunnel", "role": "infrastructure",
     "hp": 900, "cost": { "ore": 60, "materials": 10 }, "buildTime": 6,

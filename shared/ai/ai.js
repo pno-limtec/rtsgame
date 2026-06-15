@@ -451,6 +451,10 @@ function manageBuild(world, player, s, applyCommand) {
   for (const step of BUILD_ORDER) {
     if (buildingNow.has(step.kind)) continue;
     if (pressure > 0 && ['wall', 'trench', 'mg_turret'].includes(step.kind)) continue;
+    // Erz für KAMPFFAHRZEUGE reservieren: solange eine Fabrik steht, die Fahrzeugarmee aber noch klein
+    // ist, KEINE diskretionären Verteidigungsbauten (Wall/Graben) — sonst versickert der Erzüberschuss
+    // in Mauern statt in Panzern (gemessene Ursache der Mini-Armeen/frozen draws).
+    if (['wall', 'trench'].includes(step.kind) && s.factories >= 1 && s.vehicleArmy < 5) continue;
     // Ein zweiter, stärkerer Geschützturm (turret, Deckel turrets<2) darf auch unter Druck noch
     // entstehen: in eingefrorenen KI-Partien rampt stalePressure schnell (>0 nach ~90s), sonst
     // erreicht die Build-Order den turret-Schritt nie → tote Bauoption. Ein Hardpoint ist billig,

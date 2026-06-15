@@ -648,6 +648,7 @@ export function generateTerrain({ w, h, seed = 1 }) {
   const ore = new Float32Array(w * h);        // Erzvorkommen
   const oil = new Float32Array(w * h);        // Ölquellen (sichtbare schwarze Flecken, erschöpfbar)
   const bridge = new Uint8Array(w * h);       // Brückenzellen: Land läuft über Wasser
+  const pontoon = new Uint8Array(w * h);      // Pontonbrücken-Zellen: Land quert Wasser, aber LANGSAM
   const tunnel = new Uint8Array(w * h);       // Tunnelzellen: Land quert Klippen/Berge
   const tracks = new Float32Array(w * h);     // Fahrzeugspuren/Spurrillen (0..1)
   const mud = new Float32Array(w * h);        // aufgeweichter, festgefahrener Matsch (0..1)
@@ -1011,7 +1012,7 @@ export function generateTerrain({ w, h, seed = 1 }) {
 
   return {
     w, h, height, height0, terra, terraDirty, type, water, baseWater, waterBlock,
-    cover, coverBuilt, block, ore, oreList, oil, oilList, oilDirty: new Set(), sources, waterActive, bridge, tunnel,
+    cover, coverBuilt, block, ore, oreList, oil, oilList, oilDirty: new Set(), sources, waterActive, bridge, pontoon, tunnel,
     tracks, mud, trackDir, lakeMask,
     snow, snowIdx, snowFallIdx, road, roadBuilt, lakes, valleys, riverPaths, furrowPaths: dryDrainPaths,
     startMeltCells, startMeltLeft: 300, startMeltTotal: 300,
@@ -1115,6 +1116,7 @@ export function stampFortification(t, tx, ty, size, cover, blocks, waterBlocks, 
     if (blocks && t.block[i] < 255) t.block[i]++;
     if (waterBlocks && t.waterBlock[i] < 255) t.waterBlock[i]++;
     if (extra.bridge && t.bridge && t.bridge[i] < 255) t.bridge[i]++;
+    if (extra.pontoon && t.pontoon && t.pontoon[i] < 255) t.pontoon[i]++;
     if (extra.tunnel && t.tunnel && t.tunnel[i] < 255) t.tunnel[i]++;
     if (extra.road && t.roadBuilt && t.roadBuilt[i] < 255) { t.roadBuilt[i]++; t.roadDirty = true; }
     if (terraform) applyHeightDelta(t, i, terraform, true);
@@ -1132,6 +1134,7 @@ export function unstampFortification(t, tx, ty, size, cover, blocks, waterBlocks
     if (blocks && t.block[i] > 0) t.block[i]--;
     if (waterBlocks && t.waterBlock[i] > 0) t.waterBlock[i]--;
     if (extra.bridge && t.bridge && t.bridge[i] > 0) t.bridge[i]--;
+    if (extra.pontoon && t.pontoon && t.pontoon[i] > 0) t.pontoon[i]--;
     if (extra.tunnel && t.tunnel && t.tunnel[i] > 0) t.tunnel[i]--;
     if (extra.road && t.roadBuilt && t.roadBuilt[i] > 0) { t.roadBuilt[i]--; t.roadDirty = true; }
     if (terraform) applyHeightDelta(t, i, terraform, false);

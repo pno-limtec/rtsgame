@@ -92,6 +92,7 @@ export const EDGE_SEA = 0.085;                 // Anteil der Kartenbreite, der z
 // --- Straßen & Fahrzeugphysik (Phase 15) ---
 export const ROAD_RECALC_TICKS = 50;           // Straßennetz alle 5 s neu verbinden
 export const ROAD_MAX_DIST = 20;               // max. Tile-Distanz für automatische Straßen zwischen Gebäuden
+export const PONTOON_SPEED = 0.4;              // Pontonbrücken sind nur langsam befahrbar (wackelig/improvisiert)
 export const ROAD_SPEED = 1.5;                 // Tempobonus auf Straßen (Infanterie zu Fuß)
 export const ROAD_SPEED_VEHICLE = 6;           // Fahrzeuge fahren auf Straßen 6× so schnell wie im Gelände
 export const ROAD_SPEED_HEAVY = 6;             // (Alt-Name, = Fahrzeug-Bonus)

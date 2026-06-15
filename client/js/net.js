@@ -8,6 +8,7 @@ const KIND_TABLE = [
   'solar_plant', 'water_pump', 'pipe', 'bridge', 'tunnel', 'road',
   'ore_depot', 'material_depot', 'water_tower', 'oil_depot', 'truck', 'earth_pile', 'tractor', 'ore_pile',
   'aa_soldier', 'rocket_launcher', 'underwater_drone', 'mg_turret', 'flak_turret',
+  'bridgelayer', 'pontoon',
 ];
 const ROLE_TABLE = [null, 'ore', 'build', 'earth'];
 // Flugeinheiten brauchen client-seitig die Domäne, damit Picking (entityToScreen/pickRadius) sie an
@@ -172,6 +173,7 @@ export class Net {
         size: isUnit ? 1 : e[8], buildProgress: isUnit ? 1 : e[9] / 100, queue: isUnit ? 0 : e[10],
         powered: isUnit ? true : e[11] !== 0,   // Lastabwurf: Licht aus + Produktion steht
         pile: isUnit ? 0 : (e[12] || 0),
+        warn: isUnit ? false : e[13] === 1,     // kann seine Funktion nicht erfüllen → Warndreieck
       });
     }
     return out;

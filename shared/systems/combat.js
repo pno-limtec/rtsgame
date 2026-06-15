@@ -1,7 +1,7 @@
 // Kampfsystem: Zielerfassung, Feuern, Projektile, Flächenschaden.
 import { DT, SUB_EXPOSE_TIME } from '../constants.js';
 import { nearestEnemy, applyDamage, targetClass, dist, isDetectable } from '../world.js';
-import { inBounds, tIdx, worldToTile } from '../terrain.js';
+import { inBounds, tIdx, worldToTile, applyHeightDelta, TT } from '../terrain.js';
 import { setMoveGoal } from './movement.js';
 import { addRainCloud } from './environment.js';
 
@@ -146,12 +146,31 @@ function stepProjectiles(world) {
   world.projectiles = live;
 }
 
+// Kleiner Krater: senkt weiches Gelände (Land/Hügel, kein Wasser) am Einschlag minimal ab. Bewusst
+// flach (kein Wasserloch/keine Pfadsperre), nur sichtbare Geländenarbe; wird via terra an den Client
+// gestreamt → echte Geländeverformung. Deterministisch (kein Zufall).
+function craterTerrain(t, gx, gy, splash) {
+  if (!t || !t.type) return;
+  const [cx, cy] = worldToTile(gx, gy);
+  const depth = Math.min(0.03, 0.012 * splash);
+  for (const [dx, dy, f] of [[0, 0, 1], [1, 0, 0.5], [-1, 0, 0.5], [0, 1, 0.5], [0, -1, 0.5]]) {
+    const x = cx + dx, y = cy + dy;
+    if (!inBounds(t, x, y)) continue;
+    const i = tIdx(t, x, y);
+    if (t.type[i] !== TT.LAND && t.type[i] !== TT.HILL) continue;   // nur weiches Gelände
+    if ((t.water[i] || 0) > 0.02 || (t.bridge && t.bridge[i] > 0)) continue;
+    applyHeightDelta(t, i, depth * f, false);                       // Gelände absenken
+  }
+}
+
 function detonate(world, pr, tgt) {
   if (pr.weatherCloud) {
     addRainCloud(world, pr.gx, pr.gy, { ...pr.weatherCloud, owner: pr.owner });
     return;
   }
   world.events.push({ type: 'explosion', x: pr.gx, y: pr.gy, splash: pr.splash });
+  // Explosivtreffer (Artillerie/Raketen/Bomben) graben einen kleinen Krater ins weiche Gelände.
+  if (pr.splash >= 1.2) craterTerrain(world.terrain, pr.gx, pr.gy, pr.splash);
   const attacker = pr.attackerId != null ? world.entities.get(pr.attackerId) : null; // für Veteranen-XP
   if (pr.splash > 0) {
     for (const o of world.entities.values()) {

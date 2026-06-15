@@ -2784,7 +2784,7 @@ export class Renderer {
         g.position.set(e.x, targetY, e.y);
       }
       const renderY = g.position.y - lift;
-      if (e.etype === 'building') { this._updateBuildingAmbientFx(g, e); this._updateBuildingWarn(g, e); }
+      if (e.etype === 'building') { this._updateBuildingAmbientFx(g, e); this._updateBuildingWarn(g, e); this._updateBuildingProduction(g, e); }
       if (e.kind === 'pipe') this._orientPipe(g, e);
       if (e.etype === 'unit' && !e.abandoned && g.userData.vehicleLight) {
         const front = 1.15, side = 0.36;
@@ -4085,6 +4085,44 @@ export class Renderer {
     s.scale.set(sc, sc, sc);
   }
 
+  // Sichtbare Produktion: solange ein Gebäude eine Warteschlange hat, sprühen Schweißfunken und ein
+  // Lichtschein pulsiert über dem Dach — man sieht, dass drin gearbeitet wird.
+  _updateBuildingProduction(g, e) {
+    const busy = (e.queue || 0) > 0 && (e.buildProgress ?? 1) >= 1 && e.powered !== false;
+    let glow = g.userData.prodGlow;
+    if (busy && !glow) {
+      glow = new THREE.Sprite(new THREE.SpriteMaterial({ map: this.tex.puff, color: 0x8fd8ff, transparent: true, opacity: 0, depthWrite: false }));
+      glow.position.set(0, 2.2 + (e.size || 1) * 1.4, 0);
+      g.add(glow); g.userData.prodGlow = glow;
+    }
+    if (glow) {
+      const target = busy ? 0.5 + 0.3 * Math.sin(this.time * 5) : 0;
+      glow.material.opacity += (target - glow.material.opacity) * Math.min(1, this._lastDt * 6);
+      const sc = 1.6 + (e.size || 1) * 0.7;
+      glow.scale.set(sc, sc, sc);
+      glow.visible = glow.material.opacity > 0.02;
+    }
+    if (!busy || !this._particlesVisible() || !this._canSpawnEffect()) return;
+    if (g.userData._nextProdSpark == null) g.userData._nextProdSpark = this.time;
+    if (this.time < g.userData._nextProdSpark) return;
+    g.userData._nextProdSpark = this.time + 0.18 + Math.random() * 0.16;
+    const sz = (e.size || 1) * TILE;
+    const bx = e.x + (Math.random() - 0.5) * sz * 0.7, bz = e.y + (Math.random() - 0.5) * sz * 0.7;
+    const by = this.heightAt(e.x, e.y) + 0.6 + Math.random() * 1.2;
+    this._sprite(0xffd27a, bx, by, bz, 0.12, 0.22, { additive: true, vy: 0.4, vx: (Math.random() - 0.5) * 1.4, vz: (Math.random() - 0.5) * 1.4, opacity: 0.9 });
+  }
+
+  // Fertigstellungs-Blitz, wenn eine Einheit das Gebäude verlässt.
+  spawnProduceFx(x, y) {
+    if (!this._particlesVisible()) return;
+    const yy = this.heightAt(x, y) + 0.9;
+    this._sprite(0xbfe9ff, x, yy, y, 1.4, 0.4, { additive: true, grow: 1.6, opacity: 0.8 });
+    for (let i = 0; i < 5 && this._canSpawnEffect(); i++) {
+      const a = Math.random() * Math.PI * 2;
+      this._sprite(0xffe2a8, x, yy, y, 0.16, 0.3, { additive: true, vx: Math.cos(a) * 2.4, vz: Math.sin(a) * 2.4, vy: 0.8, opacity: 0.9 });
+    }
+  }
+
   _updateBuildingAmbientFx(g, e) {
     const stacks = g.userData.smokeStacks;
     if (!stacks || !stacks.length) return;
@@ -4844,6 +4882,7 @@ export class Renderer {
         else if (ev.kind === 'water_pump') this._waterFlowT = this.time;
       } else if (ev.type === 'produced') {
         if (audio && ev.owner === seat) audio.ready_(1);
+        this.spawnProduceFx(ev.x, ev.y);
       } else if (ev.type === 'recover') {
         if (audio && ev.owner === seat) audio.ready_(1);
         this._sprite(0xd8f4ff, ev.x, this.heightAt(ev.x, ev.y) + 1.0, ev.y, 0.8, 0.45, { opacity: 0.55, grow: 0.8 });

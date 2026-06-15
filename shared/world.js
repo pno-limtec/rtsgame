@@ -668,7 +668,7 @@ export function applyFortification(world, e) {
   const def = e.def;
   if (!def || (!def.cover && !def.blocks && !def.waterBlocks && !def.terraform && !def.bridges && !def.tunnels && !def.roadBuilt) || e._fortified) return;
   stampFortification(world.terrain, e.tx, e.ty, e.size, def.cover || 0, !!def.blocks, !!def.waterBlocks, def.terraform || 0,
-    { bridge: !!def.bridges, tunnel: !!def.tunnels, road: !!def.roadBuilt });
+    { bridge: !!def.bridges, pontoon: !!def.pontoon, tunnel: !!def.tunnels, road: !!def.roadBuilt });
   e._fortified = true;
   grantEarthYield(world, e);
 }
@@ -676,7 +676,7 @@ export function removeFortification(world, e) {
   if (!e._fortified) return;
   const def = e.def || world.data.buildings[e.kind];
   unstampFortification(world.terrain, e.tx, e.ty, e.size, def.cover || 0, !!def.blocks, !!def.waterBlocks, def.terraform || 0,
-    { bridge: !!def.bridges, tunnel: !!def.tunnels, road: !!def.roadBuilt });
+    { bridge: !!def.bridges, pontoon: !!def.pontoon, tunnel: !!def.tunnels, road: !!def.roadBuilt });
   e._fortified = false;
 }
 

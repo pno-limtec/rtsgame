@@ -111,6 +111,7 @@
     },
     "buildTime": 5,
     "weapon": "chain_gun",
+    "turret": true,
     "upkeep": {
       "fuel": 0.4
     },
@@ -130,6 +131,7 @@
     },
     "buildTime": 11,
     "weapon": "tank_cannon",
+    "turret": true,
     "upkeep": {
       "fuel": 0.6
     },
@@ -150,6 +152,7 @@
     },
     "buildTime": 13,
     "weapon": "artillery",
+    "turret": true,
     "upkeep": {
       "fuel": 0.5
     },
@@ -204,13 +207,14 @@
     "speed": 3,
     "sight": 5,
     "cost": {
-      "ore": 600,
+      "ore": 420,
       "fuel": 20
     },
     "buildTime": 10,
     "abilities": [
       "harvest"
     ],
+    "_costNote": "Erz-LKW war 600 (teurer als ein Panzer!) → bei Erz~0 unbezahlbar, Miner-Zahl bleibt klein, Einkommen stagniert, Fahrzeuge/Belagerung kommen nie (coverage 2026-06-15: Erz hängt bei ~0, tank/artillery fehlen). 420 (< Panzer 460) bricht die Einkommensfalle.",
     "harvestRate": 25,
     "harvestCap": 200,
     "upkeep": {
@@ -460,6 +464,28 @@
       "fuel": 0.5
     },
     "desc": "Trägt Landeinheiten über Wasser."
+  },
+  "bridgelayer": {
+    "label": "Brückenleger",
+    "category": "vehicle",
+    "domain": "land",
+    "armor": "light",
+    "hp": 240,
+    "speed": 3.4,
+    "sight": 6,
+    "cost": {
+      "ore": 420,
+      "fuel": 15
+    },
+    "buildTime": 8,
+    "abilities": [
+      "construct"
+    ],
+    "upkeep": {
+      "fuel": 0.3
+    },
+    "pontoon": true,
+    "desc": "Brückenverlegefahrzeug: legt per Linie schnelle Pontonbrücken übers Wasser. Sie sind leicht zerstörbar und nur langsam befahrbar — improvisierte Querung statt fester Brücke."
   },
   "sea_builder": {
     "label": "Wasserbau-Einheit",

@@ -145,6 +145,13 @@ export function makeBuildingMesh(kind, size, mats) {
       // Brückendecks werden als zusammenhängendes Mesh aus allen Brückenzellen gerendert.
       break;
     }
+    case 'pontoon': {
+      // Pontonbrücke: flaches Floß-Segment knapp über der Wasseroberfläche (improvisiert, niedrig).
+      g.add(box(s * 0.92, 0.18, s * 0.92, dark, 0, 0.12, 0));               // Deck
+      g.add(box(s * 0.96, 0.22, s * 0.16, metal, 0, 0.05, -s * 0.4));       // Schwimmkörper vorn
+      g.add(box(s * 0.96, 0.22, s * 0.16, metal, 0, 0.05, s * 0.4));        // Schwimmkörper hinten
+      break;
+    }
     case 'tunnel': {
       g.add(box(0.5, 1.9, s * 0.95, dark, -s * 0.38, 0.95, 0));              // Portalwangen
       g.add(box(0.5, 1.9, s * 0.95, dark, s * 0.38, 0.95, 0));

@@ -3,7 +3,7 @@
 import { findPath } from '../pathfinding.js';
 import { worldToTile, tileToWorld, tileType, TT, inBounds, tIdx, isPassable, slopeOk, roadAtIdx, forestBlocks, waterBlocksLand } from '../terrain.js';
 import {
-  BUILDER_WADE_DEPTH, BUILDER_WADE_TIME, DT, FLOOD_DEPTH, WET_DEPTH, ROAD_SPEED, ROAD_SPEED_VEHICLE, MUD_SPEED_HEAVY,
+  BUILDER_WADE_DEPTH, BUILDER_WADE_TIME, DT, FLOOD_DEPTH, WET_DEPTH, ROAD_SPEED, ROAD_SPEED_VEHICLE, PONTOON_SPEED, MUD_SPEED_HEAVY,
   TURN_RATE_VEHICLE, TURN_RATE_NAVAL, VEHICLE_ACCEL, SLOPE_ON_ROAD, CONSTRUCT_RANGE, STEEP_BUILD_SLOPE,
   RAIN_AIR_SLOW, STORM_NAVAL_SLOW, FOG_NAVAL_SLOW, FOG_NAVAL_DRIFT, FOG_NAVAL_CRASH_DMG,
   TRACK_GAIN_LIGHT, TRACK_GAIN_HEAVY, MUD_GAIN_HEAVY, MUD_IMPASSABLE, MUD_SPEED_MIN,
@@ -123,11 +123,14 @@ export function stepMovement(world) {
     // Fahrzeuge bei Regen im Matsch stecken (sehr langsam).
     const weather = world.env ? world.env.weather : 'clear';
     if (e.domain === 'land' && inBounds(terrain, ctx, cty)) {
-      const onRoad = roadAtIdx(terrain, tIdx(terrain, ctx, cty));
+      const ci = tIdx(terrain, ctx, cty);
+      const onRoad = roadAtIdx(terrain, ci);
       const raining = weather === 'rain' || weather === 'storm';
       // Fahrzeuge fahren auf Straßen 6× so schnell wie im Gelände; Infanterie nur leicht schneller.
       if (onRoad) speed *= e.category === 'infantry' ? ROAD_SPEED : ROAD_SPEED_VEHICLE;
       else if (raining && e.heavy) speed *= MUD_SPEED_HEAVY;
+      // Pontonbrücke: nur langsam befahrbar (wackelige, improvisierte Querung).
+      if (terrain.pontoon && terrain.pontoon[ci] > 0) speed *= PONTOON_SPEED;
       if (terrain.mud && !onRoad) {
         const mud = terrain.mud[tIdx(terrain, ctx, cty)];
         if (e.heavy && mud >= MUD_IMPASSABLE) speed = 0;

@@ -1090,6 +1090,12 @@ export class UI {
       const armed = this.input.buildMode === '_canal_';
       html += `<div class="rolebar"><button class="rolebtn ${armed ? 'active' : ''}" data-canal="1" title="Kanal ausheben\nLinie von Wasser durch Land zu Wasser ziehen — das Schiff gräbt einen schiffbaren Kanal.">${iconSvg('down', 'roleicon')} Kanal ziehen</button></div>`;
     }
+    // Brückenleger: Knopf zum Verlegen einer Pontonbrücke (Linie übers Wasser ziehen).
+    const layers = ents.filter(e => e.owner === this.net.seat && (this.data.units[e.kind]?.pontoon));
+    if (layers.length) {
+      const armed = this.input.buildMode === '_pontoon_';
+      html += `<div class="rolebar"><button class="rolebtn ${armed ? 'active' : ''}" data-pontoon="1" title="Ponton verlegen\nLinie über das Wasser ziehen — der Brückenleger legt eine schnelle, leicht zerstörbare Pontonbrücke (langsam befahrbar).">${iconSvg('builder', 'roleicon')} Ponton verlegen</button></div>`;
+    }
     grid.innerHTML = html;
     grid.querySelectorAll('[data-role]').forEach(b => b.onclick = () => {
       const units = ents.filter(e => e.kind === 'builder' && e.owner === this.net.seat).map(e => e.id);

@@ -166,7 +166,8 @@ export function serializeSnapshot(world) {
       ents.push([e.id, 1, kindId(e.kind), e.owner, r1(e.x), r1(e.y),
         Math.max(0, Math.round(e.hp)), e.maxHp, e.size, Math.round(e.buildProgress * 100),
         (e.kind === 'earth_pile' || e.kind === 'ore_pile') ? Math.round(e.amount || 0) : e.queue.length,
-        e._powered === false ? 0 : 1, e.earthPileId || 0]);
+        e._powered === false ? 0 : 1, e.earthPileId || 0,
+        buildingWarn(e) ? 1 : 0]);  // Index 13: Warn-Markierung (kann nicht produzieren/fördern)
     }
   }
   const t = world.terrain;
@@ -234,6 +235,7 @@ const KINDS = [
   'solar_plant', 'water_pump', 'pipe', 'bridge', 'tunnel', 'road',
   'ore_depot', 'material_depot', 'water_tower', 'oil_depot', 'truck', 'earth_pile', 'tractor', 'ore_pile',
   'aa_soldier', 'rocket_launcher', 'underwater_drone', 'mg_turret', 'flak_turret',
+  'bridgelayer', 'pontoon',
 ];
 const KIND_INDEX = Object.fromEntries(KINDS.map((k, i) => [k, i]));
 export function kindId(k) { return KIND_INDEX[k] ?? -1; }
@@ -242,6 +244,20 @@ export const KIND_TABLE = KINDS;
 const ROLES = [null, 'ore', 'build', 'earth'];
 const ROLE_INDEX = new Map(ROLES.map((r, i) => [r, i]));
 function roleId(r) { return ROLE_INDEX.get(r === 'materials' ? 'build' : r) || 0; }
+
+// Warn-Markierung: Gebäude steht, kann aber seine Funktion NICHT erfüllen → Client zeigt ein
+// Warndreieck. Fälle: Produktionsgebäude ohne Strom; Pumpe/Bohrturm ohne Leitung ODER ohne Rohstoff
+// (kein Wasser/Öl); Öldepot/Wasserturm ohne angeschlossene Förderkette.
+function buildingWarn(e) {
+  const def = e.def;
+  if (!def || e.dead || e.buildProgress < 1) return false;
+  if ((def.produces_units || def.produces_category) && e._powered === false) return true;
+  if (def.pump) return e._wConnected !== true || e._inWater === false;
+  if (def.pipelineResource) return e._pipelineConnected !== true || e._oilDry === true;
+  const dres = def.resourceDepot;
+  if (dres === 'oil' || dres === 'water') return e._fed !== true;
+  return false;
+}
 function unitFlags(world, e) {
   return (e.submerged ? 1 : 0)
     | (e._exposeUntil != null && world.time < e._exposeUntil ? 2 : 0)

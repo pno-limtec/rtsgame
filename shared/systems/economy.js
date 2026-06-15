@@ -32,6 +32,7 @@ export function stepEconomy(world) {
       let producedAny = false;
       for (const [k, v] of Object.entries(def.produces)) {
         const amount = k === 'oil' ? extractOil(world, e, v * DT) : v * DT;
+        if (k === 'oil') e._oilDry = amount <= 0;   // für die Warn-Markierung „Bohrturm ohne Öl"
         if (amount > 0) { addResource(world, p, k, amount); producedAny = true; }
       }
       if (producedAny && e.kind === 'oil_derrick' && ((world.tick + e.id) % 20) === 0) {
@@ -52,6 +53,7 @@ export function stepEconomy(world) {
           if (isFreshWater(world.terrain, e.tx + xx, e.ty + yy)) inWater = true;
         }
       }
+      e._inWater = inWater;   // für die Warn-Markierung „Pumpwerk ohne Wasser"
       if (e._wConnected === true && inWater) {
         let rate = PUMP_RATE_WATER;
         if (raining) rate += PUMP_RAIN_BONUS;
@@ -81,6 +83,7 @@ function stepPipes(world) {
       for (const res of resources) {
         let list = g.depots.get(res); if (!list) g.depots.set(res, list = []);
         list.push(e);
+        e._fed = false;   // wird unten true, wenn ein angeschlossener Produzent dieses Netz speist
       }
       if (!resources.length && producerResource(e)) g.producers.push(e);
     }
@@ -103,6 +106,7 @@ function stepPipes(world) {
       }
       prod._pipelineConnected = connected;
       if (prod.def.pump) prod._wConnected = connected;
+      if (connected) for (const s of sinks) s._fed = true;   // dieses Lager-Netz ist versorgt
     }
   }
 }
