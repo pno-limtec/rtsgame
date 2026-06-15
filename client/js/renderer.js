@@ -26,17 +26,17 @@ const WATER_SHOW_DEPTH = 0.05;
 const WATER_HIDE_DEPTH = 0.032;
 // Wasser-Glättung: die sichtbare Tiefe gleitet in kleinen Schritten zur Snapshot-Zieltiefe,
 // statt alle 250 ms ruckartig zu springen (staccato). Reine Optik, keine Simulationswirkung.
-const WATER_EASE_RATE = 5.0;        // Annäherungsrate pro Sekunde (exponentielles Gleiten)
+const WATER_EASE_RATE = 3.2;        // Annäherungsrate pro Sekunde — niedriger = der Pegel steigt/fällt sanfter
 const WATER_EASE_SNAP = 5e-4;       // unter dieser Restdifferenz auf den Zielwert einrasten
 const WATER_ANIM_INTERVAL = 1 / 30; // Glättung mit ~30 Hz auffrischen (begrenzt Mesh-Neuaufbau)
-const FLOOD_RUNOFF_DEPTH = 0.055;
-const FLOOD_SURFACE_DEPTH = 0.058;
-const WET_GROUND_MIN_DEPTH = 0.008;
+const FLOOD_RUNOFF_DEPTH = 0.022;   // schon dünner Abfluss zählt als Wasser (zeigt Textur, wo es abläuft)
+const FLOOD_SURFACE_DEPTH = 0.024;  // ab dieser Tiefe bekommt auch dünnes Ablaufwasser eine Wasseroberfläche
+const WET_GROUND_MIN_DEPTH = 0.004;     // schon hauchdünnes Ablaufwasser färbt den Boden nass (entlang der Partikelströme)
 const WET_GROUND_FULL_DEPTH = 0.036;
-const WET_GROUND_NEIGHBOR_DEPTH = 0.010;
+const WET_GROUND_NEIGHBOR_DEPTH = 0.008;
 const WATER_EDGE_THRESHOLD = 0.46;
-const FLOOD_VIS_SHOW = 0.58;
-const FLOOD_VIS_HIDE = 0.36;
+const FLOOD_VIS_SHOW = 0.42;   // niedriger → Ablaufwasser blendet früher und weicher ein (smoother)
+const FLOOD_VIS_HIDE = 0.22;
 const WATER_SURFACE_CLEAR = 0.075;
 const WATER_EDGE_CLOSE_MAX_LIFT = 0.05;  // wie hoch Wasser eine Trockenlücke überbrücken darf — niedriger = weniger Wasserflächen, die durchs Ufer/Felsen stechen (Clipping)
 const WATER_PLANE_LINK_EPS = 0.42;     // world units: Zellen mit ähnlichem Pegel bilden eine ebene Fläche
@@ -44,12 +44,12 @@ const WATER_PLANE_QUANT = 0;           // 0 = kein Pegel-Raster; Pegel steigt/si
 const WATER_PLANE_DEADBAND = 0.018;    // nur winziges CA-Rauschen ignorieren
 const WATER_PLANE_RISE_SMOOTH = 0.070; // Regenpegel weich, aber sichtbar nachführen
 const WATER_PLANE_FALL_SMOOTH = 0.045; // Abfluss trocknet langsamer aus als er flutet
-const FLOOD_CHANNEL_DEPTH = 0.052;
+const FLOOD_CHANNEL_DEPTH = 0.026;  // dünne Abflussrinnen bekommen schon früh eine Wasseroberfläche
 const WATER_DARK_DEPTH_START = 0.085;
 const WATER_DARK_DEPTH_RANGE = 0.34;
 const WATER_EDGE_TUCK_Y = 0.026;
 const WATER_NIGHT_COLOR_MIN = 0.16;
-const WATER_NIGHT_OPACITY_MIN = 0.40;
+const WATER_NIGHT_OPACITY_MIN = 0.28;   // transparenteres Wasser (Grund scheint mehr durch); Himmelsspiegelung am Streifwinkel macht es trotzdem plastisch
 const WATER_STANDING_FLOW_MAX = 0.13;
 const WATER_STANDING_LEVEL_QUANTILE = 0.68;
 
@@ -542,6 +542,7 @@ export class Renderer {
     this._waterAnimAccum = 0;
     this._floodMaskSettled = false;
     this._waterShown = new Uint8Array(cellCount); // Hysterese-Flag gegen Ufer-Flackern
+    this._wetCov = new Float32Array(cellCount);    // zeitlich geglättete Zell-Deckung 0..1 (Anti-Ping-Pong)
     this._floodShown = new Uint8Array(cellCount);
     this._floodVisual = new Float32Array(cellCount);
     this._floodGoal = new Float32Array(cellCount);
@@ -1309,6 +1310,9 @@ export class Renderer {
     if (!w || !h) return;
 
     const visible = new Uint8Array(n);
+    // Weiche Zell-Deckung 0..1 (statt binär): eine gerade auftauchende Flut-/Abflusszelle wächst
+    // mit ihrer Tiefe von 0 auf voll ein → die Wasserkante gleitet, statt dass Dreiecke aufpoppen.
+    const cellCov = new Float32Array(n);
     const surface = new Float32Array(n);
     const flowX = new Float32Array(n);
     const flowZ = new Float32Array(n);
@@ -1316,15 +1320,38 @@ export class Renderer {
     const seaVis = new Float32Array(n);
 
     let visibleCount = 0;
+    let covMoving = false;
+    const covState = this._wetCov;
     for (let i = 0; i < n; i++) {
-      const renderDepth = this._renderWaterDepth(i, this.waterDepth[i] || 0);
-      if (renderDepth <= 0.012) continue;
+      const depth = this.waterDepth[i] || 0;
+      const renderDepth = this._renderWaterDepth(i, depth);
+      const permanent = this._isPermanentWaterCell(i);
+      // ZIEL-Deckung: permanentes Wasser voll; transientes blendet über die Tiefe ein; nicht
+      // sichtbar/zu flach → 0.
+      const target = renderDepth <= 0.012 ? 0
+        : permanent ? 1
+          : smoothstep(0.024, 0.090, depth);
+      // ANTI-PING-PONG: die Deckung wird ZEITLICH geglättet — schnell rein, aber LANGSAM raus.
+      // Dadurch verschwindet ein Polygon nicht abrupt, wenn die Sim-Tiefe kurz unter die Schwelle
+      // wackelt, und taucht nicht sofort wieder auf (kein Flackern). Es blendet weich aus/ein.
+      const prev = covState[i] || 0;
+      let cov = target > prev ? prev + (target - prev) * 0.34 : prev + (target - prev) * 0.085;
+      if (cov < 0.012) cov = 0;
+      else if (cov > 0.992) cov = 1;
+      covState[i] = cov;
+      if (cov <= 0) continue;
+      // Auch eine ausblendende Zelle (Sim-Tiefe schon unter der Render-Schwelle) bleibt im Mesh,
+      // solange ihre Deckung noch ausläuft — mit ihrer tatsächlichen (sinkenden) Tiefe.
+      const dv = Math.max(renderDepth, depth, FLOOD_SURFACE_DEPTH * 0.5);
       visible[i] = 1;
       visibleCount++;
-      depthVis[i] = renderDepth;
-      seaVis[i] = this._isSeaWaterCell(i, renderDepth) ? 1 : 0;
-      this._writeWaterCellData(i, renderDepth, surface, flowX, flowZ);
+      depthVis[i] = dv;
+      seaVis[i] = this._isSeaWaterCell(i, dv) ? 1 : 0;
+      cellCov[i] = cov;
+      if (Math.abs(cov - target) > 0.004) covMoving = true; // Deckung noch im Übergang → weiter animieren
+      this._writeWaterCellData(i, dv, surface, flowX, flowZ);
     }
+    this._covAnimating = covMoving;
 
     // Optische Schließung: schmale, einzelne Trockenlücken zwischen nassen Zellen werden als
     // Wasserhaut überbrückt. Das ändert nicht die Simulation, verhindert aber das blau-schwarze
@@ -1362,6 +1389,7 @@ export class Renderer {
         const avgSurf = surfSum / count;
         if (this.height[i] * HEIGHT_SCALE + WATER_SURFACE_CLEAR > avgSurf + WATER_EDGE_CLOSE_MAX_LIFT) continue;
         visible[i] = 1;
+        cellCov[i] = 1; // überbrückte Lückenfüllung = Innenfläche, volle Deckung
         visibleCount++;
         surface[i] = Math.max(avgSurf, this.height[i] * HEIGHT_SCALE + WATER_SURFACE_CLEAR);
         flowX[i] = flowSumX / count;
@@ -1406,13 +1434,15 @@ export class Renderer {
           totalWeight += weight;
           const idx = yy * w + xx;
           if (!visible[idx]) continue;
-          waterWeight += weight;
-          surfSum += surface[idx] * weight;
+          const wc = weight * cellCov[idx]; // weiche Deckung → Kante gleitet statt zu poppen
+          if (wc <= 0) continue;
+          waterWeight += wc;
+          surfSum += surface[idx] * wc;
           surfaceFloor = Math.max(surfaceFloor, this.height[idx] * HEIGHT_SCALE + WATER_SURFACE_CLEAR);
-          flowSumX += flowX[idx] * weight;
-          flowSumZ += flowZ[idx] * weight;
-          depthSum += depthVis[idx] * weight;
-          seaSum += seaVis[idx] * weight;
+          flowSumX += flowX[idx] * wc;
+          flowSumZ += flowZ[idx] * wc;
+          depthSum += depthVis[idx] * wc;
+          seaSum += seaVis[idx] * wc;
         }
       }
       const key = cy * fw + cx;
@@ -1617,11 +1647,11 @@ export class Renderer {
     const channel = depth >= FLOOD_CHANNEL_DEPTH
       && wetWide >= (dug ? 1 : 2)
       && (dug || higherGroundNear >= 2 || maxUphill > 0.024);
-    const runoff = depth >= 0.135
+    const runoff = depth >= 0.030     // schon dünnes Ablaufwasser zeigen, solange es WIRKLICH abläuft
       && wetNear >= 2
       && nearPermanent
-      && maxDownhill > 0.014
-      && slope > 0.024;
+      && maxDownhill > 0.012
+      && slope > 0.020;
     if (!basin && !overflow && !deepPool && !channel && !runoff) return 0;
     const strength = channel
       ? (depth - FLOOD_RUNOFF_DEPTH) / 0.09 + Math.min(0.38, maxUphill * 10) + (dug ? 0.22 : 0)
@@ -1705,9 +1735,11 @@ export class Renderer {
         if (this._isPermanentWaterCell(j)) nearPermanent = true;
         else if ((this.waterDepth[j] || 0) > WET_GROUND_NEIGHBOR_DEPTH) wetN++;
       }
-      const visual = Math.min(1, wetDepth * 0.68 + flowMag * 0.42 + (this._floodVisual?.[i] || 0) * 0.36);
-      if (visual <= 0.025) continue;
-      if (!nearPermanent && wetN < 1 && flowMag < 0.08 && visual < 0.18) continue;
+      // Strömung stark gewichten: entlang der Abfluss-/Partikelströme wird der Boden deutlich nass
+      // eingefärbt, auch wo das Wasser zu dünn für eine eigene Oberfläche ist.
+      const visual = Math.min(1, wetDepth * 0.62 + flowMag * 0.85 + (this._floodVisual?.[i] || 0) * 0.36);
+      if (visual <= 0.02) continue;
+      if (!nearPermanent && wetN < 1 && flowMag < 0.05 && visual < 0.14) continue;
       scratch[i] = Math.max(scratch[i], visual);
     }
     let changed = false;
@@ -1827,7 +1859,7 @@ export class Renderer {
   // die Flut-Overlay-Maske weich ein. Kostet nichts, sobald alles eingerastet ist.
   animateWater(dt) {
     if (!this.waterMesh || !this.waterDepth || !this._waterEasing) return;
-    if (!this._waterEasing.size && this._floodMaskSettled) return;
+    if (!this._waterEasing.size && this._floodMaskSettled && !this._covAnimating) return;
     this._waterAnimAccum += dt;
     if (this._waterAnimAccum < WATER_ANIM_INTERVAL) return;
     const step = this._waterAnimAccum;
@@ -1847,8 +1879,8 @@ export class Renderer {
     }
     const maskChanged = this._refreshFloodVisualMask(false);
     this._floodMaskSettled = !maskChanged;
-    if (depthChanged || maskChanged) {
-      this._rebuildWaterMesh();
+    if (depthChanged || maskChanged || this._covAnimating) {
+      this._rebuildWaterMesh();   // setzt _covAnimating neu (läuft, bis alle Deckungen ausgeglichen sind)
       this._updateRockWaterTint();
       this._refreshWetGroundOverlay();
       this._refreshFloodOverlay();
@@ -2292,12 +2324,13 @@ export class Renderer {
           const nx = x + dx, ny = y + dy;
           if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
           const d = Math.hypot(dx, dy);
-          const weight = d < 0.1 ? 1 : d < 1.1 ? 0.38 : 0.14;
-          const f = Math.min(0.50, wet * 0.58 * weight);
+          const weight = d < 0.1 ? 1 : d < 1.1 ? 0.42 : 0.16;
+          // Nass-Färbung in Richtung Wasserton (dunkles Türkis) — entlang der Abflussströme deutlich sichtbar.
+          const f = Math.min(0.66, wet * 0.78 * weight);
           const o = (ny * w + nx) * 3;
-          base[o] = base[o] * (1 - f) + 0.14 * f;
-          base[o + 1] = base[o + 1] * (1 - f) + 0.24 * f;
-          base[o + 2] = base[o + 2] * (1 - f) + 0.21 * f;
+          base[o] = base[o] * (1 - f) + 0.10 * f;
+          base[o + 1] = base[o + 1] * (1 - f) + 0.26 * f;
+          base[o + 2] = base[o + 2] * (1 - f) + 0.28 * f;
         }
       }
     }
@@ -3054,17 +3087,24 @@ export class Renderer {
     group.position.sub(center);
     group.rotation.y = -0.55;
     scene.add(group);
+    group.updateMatrixWorld(true);
 
+    // Auf die TATSÄCHLICHE Box-Mitte (nach der Drehung) zielen — sonst sitzt das Modell in der Ecke.
     box = new THREE.Box3().setFromObject(group);
+    const ctr = box.getCenter(new THREE.Vector3());
     const size = box.getSize(new THREE.Vector3());
     const maxDim = Math.max(1, size.x, size.y, size.z);
-    const target = new THREE.Vector3(0, Math.min(0.45, size.y * 0.06), 0);
     camera.aspect = width / height;
     camera.near = 0.1;
-    camera.far = Math.max(60, maxDim * 8);
-    // Näher heran, damit das Modell die Thumbnail-Kachel gut füllt (vorher zu klein/viel Leerraum).
-    camera.position.set(maxDim * 0.8, maxDim * 0.56, maxDim * 1.12);
-    camera.lookAt(target);
+    camera.far = Math.max(80, maxDim * 10);
+    // Abstand so wählen, dass das Modell die Kachel FÜLLT (FOV 36°; bei breiter als hoher Kachel das
+    // Seitenverhältnis einrechnen, damit auch breite Modelle ganz hineinpassen), mit etwas Rand.
+    const fov = 36 * Math.PI / 180;
+    const fitH = (maxDim * 0.5) / Math.tan(fov / 2);
+    const dist = Math.max(fitH, fitH / Math.max(1, camera.aspect)) * 1.12;
+    const dir = new THREE.Vector3(0.55, 0.42, 1).normalize();
+    camera.position.copy(ctr).addScaledVector(dir, dist);
+    camera.lookAt(ctr);
     camera.updateProjectionMatrix();
 
     renderer.setSize(width, height, false);
@@ -4817,7 +4857,8 @@ export class Renderer {
     const visible = this._particlesVisible();
     // Pipeline-Flussanimation: leuchtet/pulsiert, solange Öl- oder Wasserförderung aktiv ist.
     if (this.pipeMat) {
-      const flowActive = (this.time - (this._oilFlowT ?? -9) < 1.5) || (this.time - (this._waterFlowT ?? -9) < 1.5);
+      // Fenster > Intervall der industry-Events (alle 2 s), damit der Durchfluss durchgehend leuchtet.
+      const flowActive = (this.time - (this._oilFlowT ?? -9) < 2.6) || (this.time - (this._waterFlowT ?? -9) < 2.6);
       const target = flowActive ? 0.28 + 0.16 * Math.sin(this.time * 6) : 0;
       this.pipeMat.emissiveIntensity += (target - this.pipeMat.emissiveIntensity) * Math.min(1, dt * 6);
       // wandernde Durchfluss-Bänder
@@ -4955,18 +4996,17 @@ export class Renderer {
       const wz = cy * TILE + fz * TILE * 0.5 + (Math.random() - 0.5) * TILE * 0.6;
       const depth = this.waterDepth[ci] || 0;
       const y = (depth > 0.02 ? this.waterSurfaceAt(wx, wz) : this.height[ci] * HEIGHT_SCALE) + 0.08;
-      const fade = 0.55 + 0.45 * (1 - step / (maxLen + 2)); // Lauf bleibt bis zum Meer gut sichtbar
-      // Kräftigere, hellere, länger sichtbare Strömungspartikel — der Bach soll deutlich auffallen.
-      this._sprite(surge > 0.4 ? 0xeaffff : 0xbfeeff, wx, y, wz, 0.30 + surge * 0.36, 0.7 + surge * 0.4, {
-        vx: fx * (1.1 + surge * 1.1), vz: fz * (1.1 + surge * 1.1), vy: 0.10 + surge * 0.18,
-        grow: 1.2 + surge * 0.5, opacity: (0.45 + surge * 0.40) * fade,
+      const fade = 0.6 + 0.4 * (1 - step / (maxLen + 2)); // Lauf bleibt bis zum Meer gut sichtbar
+      // Kräftiger, blauer Wasserkörper (mal heller, mal tiefer) — der Bach ist deutlich blau.
+      const blue = surge > 0.45 ? 0x4fc3f7 : 0x2f9fe0;
+      this._sprite(blue, wx, y, wz, 0.42 + surge * 0.46, 0.9 + surge * 0.5, {
+        vx: fx * (1.25 + surge * 1.25), vz: fz * (1.25 + surge * 1.25), vy: 0.10 + surge * 0.18,
+        grow: 1.25 + surge * 0.55, opacity: (0.6 + surge * 0.38) * fade,
       });
-      // Schaumkrone: heller, additiver Glanzpunkt obenauf — gibt dem Lauf sichtbares Funkeln.
-      if (this._canSpawnEffect(1) && (surge > 0.25 || step % 2 === 0)) {
-        this._sprite(0xffffff, wx + (Math.random() - 0.5) * 0.5, y + 0.12, wz + (Math.random() - 0.5) * 0.5,
-          0.16 + surge * 0.2, 0.5 + surge * 0.3,
-          { vx: fx * 0.8, vz: fz * 0.8, vy: 0.14 + surge * 0.12, grow: 1.3, opacity: (0.4 + surge * 0.35) * fade, additive: true });
-      }
+      // Weiße Schaumkrone obenauf: heller, additiver Glanzpunkt → Funkeln/Gischt über dem Blau.
+      this._sprite(0xffffff, wx + (Math.random() - 0.5) * 0.55, y + 0.13, wz + (Math.random() - 0.5) * 0.55,
+        0.20 + surge * 0.24, 0.55 + surge * 0.35,
+        { vx: fx * 0.85, vz: fz * 0.85, vy: 0.16 + surge * 0.14, grow: 1.35, opacity: (0.45 + surge * 0.4) * fade, additive: true });
       cx = bx; cy = by;
       if (this.terrainType?.[by * W + bx] === 3) break; // Meer erreicht
     }
@@ -5092,7 +5132,10 @@ export class Renderer {
       if (env.w === 'fog') this.waterMat.color.lerp(new THREE.Color(0x7aa5b0), 0.22);
       else if (stormTarget > 0) this.waterMat.color.lerp(new THREE.Color(0x2b78a5), 0.18 + stormTarget * 0.16);
       this.waterMat.color.multiplyScalar(waterLight);
-      this.waterMat.opacity = WATER_NIGHT_OPACITY_MIN + d * 0.34 + this._waterStorm * 0.04;
+      this.waterMat.opacity = WATER_NIGHT_OPACITY_MIN + d * 0.28 + this._waterStorm * 0.04;
+      // Himmelsspiegelung im Wasser-Shader nachführen: Himmelsfarbe + Stärke (tagsüber mehr).
+      if (this.waterMat.userData.uSky) this.waterMat.userData.uSky.value.copy(sky);
+      if (this.waterMat.userData.uSkyAmt) this.waterMat.userData.uSkyAmt.value = 0.30 + d * 0.55;
     }
     if (this.floodWaterMat) {
       const farFloodFade = this.camDist <= 150 ? 1 : Math.max(0, 1 - (this.camDist - 150) / 95);
@@ -5485,7 +5528,7 @@ function makeWaterMaterial() {
     color: 0x55c8f2,
     map: flowTexture,
     transparent: true,
-    opacity: 0.76,
+    opacity: 0.56,
     vertexColors: true,
     depthWrite: false,
     side: THREE.DoubleSide,
@@ -5495,6 +5538,27 @@ function makeWaterMaterial() {
   });
   mat.userData.flowTexture = flowTexture;
   mat.userData.baseColor = new THREE.Color(0x55c8f2);
+  // Himmelsspiegelung: am streifenden Blickwinkel spiegelt die Wasseroberfläche den Himmel (Fresnel),
+  // beim Blick von oben bleibt sie transparent (Grund scheint durch). uSky/uSkyAmt werden pro Frame
+  // aus der Szenen-Himmelsfarbe nachgeführt.
+  mat.userData.uSky = { value: new THREE.Color(0x9ec8e8) };
+  mat.userData.uSkyAmt = { value: 0.8 };
+  mat.onBeforeCompile = (shader) => {
+    shader.uniforms.uSky = mat.userData.uSky;
+    shader.uniforms.uSkyAmt = mat.userData.uSkyAmt;
+    shader.vertexShader = 'varying vec3 vWaterWPos;\n' + shader.vertexShader.replace(
+      '#include <begin_vertex>',
+      '#include <begin_vertex>\n  vWaterWPos = (modelMatrix * vec4(transformed, 1.0)).xyz;',
+    );
+    shader.fragmentShader = 'uniform vec3 uSky;\nuniform float uSkyAmt;\nvarying vec3 vWaterWPos;\n' + shader.fragmentShader.replace(
+      '#include <dithering_fragment>',
+      `#include <dithering_fragment>
+      vec3 vDir = normalize(cameraPosition - vWaterWPos);
+      float fres = pow(1.0 - clamp(vDir.y, 0.0, 1.0), 3.2);   // 0 = von oben, 1 = streifend
+      gl_FragColor.rgb = mix(gl_FragColor.rgb, uSky, fres * uSkyAmt);
+      gl_FragColor.a = clamp(gl_FragColor.a + fres * 0.5 * uSkyAmt, 0.0, 0.96);`,
+    );
+  };
   return mat;
 }
 
