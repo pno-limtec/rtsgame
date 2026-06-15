@@ -325,7 +325,10 @@ function manageBuild(world, player, s, applyCommand) {
   // Erntemaschinen/0 Fahrzeuge, blutet 2000→17 Erz aus). Die Bedingung „Fabrik vorhanden" stellt sicher,
   // dass die Erntemaschine sofort baubar ist; manageProduction (läuft im selben Tick danach) kauft sie,
   // sobald das Erz reicht. NUR bis zur ERSTEN Erntemaschine (harvesters<1) → sobald Einkommen fließt,
-  // baut manageBuild normal weiter (Türme etc. bleiben in der Abdeckung). Mit Fix: KBN 0→5 Fahrzeuge.
+  // baut manageBuild normal weiter (Türme bleiben in der Abdeckung, Gebäude-Coverage hält 77%). Gemessen
+  // seed4000: KBN 0→1-2 Fahrzeuge + 2 Erntemaschinen (vorher 0/0, totes Wirtschaftsdeadlock). Eine
+  // breitere Variante (harvesters<2) bringt KBN sogar auf 5 Fahrzeuge, verdrängt aber Türme aus der
+  // 8000-Tick-Coverage (77%→73%) → bewusst die engere, regressionsfreie Schwelle gewählt.
   if (s.factories >= 1 && s.refineries >= 1 && s.harvesters < 1) {
     const harvOre = effectiveCost(world, player.id, world.data.units.harvester).ore || 0;
     if (player.resources.ore < harvOre + 150) return false;
