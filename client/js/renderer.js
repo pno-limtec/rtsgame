@@ -2784,7 +2784,7 @@ export class Renderer {
         g.position.set(e.x, targetY, e.y);
       }
       const renderY = g.position.y - lift;
-      if (e.etype === 'building') this._updateBuildingAmbientFx(g, e);
+      if (e.etype === 'building') { this._updateBuildingAmbientFx(g, e); this._updateBuildingWarn(g, e); }
       if (e.kind === 'pipe') this._orientPipe(g, e);
       if (e.etype === 'unit' && !e.abandoned && g.userData.vehicleLight) {
         const front = 1.15, side = 0.36;
@@ -3556,7 +3556,10 @@ export class Renderer {
         if (body.userData.smokeStacks) g.userData.smokeStacks = body.userData.smokeStacks;
       }
       g.userData.lift = 0; g.userData.big = e.size >= 3;
-      const low = ['wall', 'trench', 'levee', 'pipe', 'bridge', 'road', 'tunnel', 'earth_pile', 'ore_pile'].includes(e.kind);
+      // Schwimmende Wasserbauten (Pumpwerk/Werft/Ponton) bekommen KEIN Betonfundament — sie sitzen auf
+      // der Wasseroberfläche; ein tief reichender Sockel würde unter Wasser herausstechen.
+      const low = ['wall', 'trench', 'levee', 'pipe', 'bridge', 'road', 'tunnel', 'earth_pile', 'ore_pile'].includes(e.kind)
+        || WATER_BUILDINGS.has(e.kind);
       // Fundament: Gebäude stehen gerade (Gruppe auf höchster Ecke), der Betonsockel
       // reicht tief nach unten und schließt am Hang den Spalt zum Gelände.
       if (!low) {
@@ -4052,6 +4055,36 @@ export class Renderer {
     }
   }
 
+  // Warndreieck über Gebäuden, die ihre Funktion nicht erfüllen können (kein Strom/keine Leitung/
+  // kein Rohstoff). Gelbes „⚠" als billboardendes Sprite, das sanft pulsiert.
+  _warnTexture() {
+    if (this._warnTex) return this._warnTex;
+    const c = document.createElement('canvas'); c.width = c.height = 64;
+    const x = c.getContext('2d');
+    x.beginPath(); x.moveTo(32, 6); x.lineTo(60, 56); x.lineTo(4, 56); x.closePath();
+    x.fillStyle = '#ffcf33'; x.fill(); x.lineWidth = 5; x.strokeStyle = '#3a2a00'; x.stroke();
+    x.fillStyle = '#3a2a00'; x.font = 'bold 36px sans-serif'; x.textAlign = 'center'; x.fillText('!', 32, 50);
+    this._warnTex = new THREE.CanvasTexture(c);
+    return this._warnTex;
+  }
+
+  _updateBuildingWarn(g, e) {
+    const on = !!e.warn && (e.buildProgress ?? 1) >= 1;
+    let s = g.userData.warnSprite;
+    if (!on) { if (s) s.visible = false; return; }
+    if (!s) {
+      s = new THREE.Sprite(new THREE.SpriteMaterial({ map: this._warnTexture(), transparent: true, depthTest: false }));
+      s.renderOrder = 9;
+      const h = 2.4 + (e.size || 1) * 2.2;   // über dem Dach schweben
+      s.position.set(0, h, 0);
+      g.add(s); g.userData.warnSprite = s;
+    }
+    s.visible = true;
+    const pulse = 0.85 + 0.25 * Math.sin(this.time * 4);
+    const sc = (1.1 + (e.size || 1) * 0.35) * pulse;
+    s.scale.set(sc, sc, sc);
+  }
+
   _updateBuildingAmbientFx(g, e) {
     const stacks = g.userData.smokeStacks;
     if (!stacks || !stacks.length) return;
@@ -4083,13 +4116,14 @@ export class Renderer {
   _sprite(color, x, y, z, size, life, opts = {}) {
     if (!this._particlesVisible()) return;
     if (!this._canSpawnEffect()) return; // Backstop gegen Effekt-Flut in Großschlachten
-    const mat = new THREE.SpriteMaterial({ map: this.tex.puff, color, transparent: true, opacity: opts.opacity ?? 0.9,
+    // Mit fadeIn startet das Partikel UNSICHTBAR (kein 1-Frame-Aufblitzen) und blendet dann weich ein.
+    const mat = new THREE.SpriteMaterial({ map: this.tex.puff, color, transparent: true, opacity: opts.fadeIn ? 0 : (opts.opacity ?? 0.9),
       blending: opts.additive ? THREE.AdditiveBlending : THREE.NormalBlending, depthWrite: false });
     const sp = new THREE.Sprite(mat);
     sp.position.set(x, y, z); sp.scale.set(size, size, size);
     this.scene.add(sp);
     this._addEffect({ mesh: sp, life: 0, max: life, base: size, grow: opts.grow || 0, vy: opts.vy || 0,
-      vx: opts.vx || 0, vz: opts.vz || 0, opacity: opts.opacity ?? 0.9 });
+      vx: opts.vx || 0, vz: opts.vz || 0, opacity: opts.opacity ?? 0.9, fadeIn: opts.fadeIn || 0 });
   }
 
   _particlesVisible() {
@@ -4924,7 +4958,12 @@ export class Renderer {
         if (f.grow) { const s = 1 + t * f.grow; f.mesh.scale.set(s, s, s); }
         if (f.sinkPart) f.mesh.position.y -= 0.16 * dt;
       }
-      if (!f.noFade && !f.sink && f.mesh.material) f.mesh.material.opacity = Math.max(0, (f.opacity ?? 0.9) * (1 - t));
+      if (!f.noFade && !f.sink && f.mesh.material) {
+        // fadeIn (Anteil der Lebenszeit) → das Partikel blendet langsam EIN statt plötzlich aufzutauchen,
+        // danach normales Ausblenden über (1 - t). Ohne fadeIn unverändert (sofort voll sichtbar).
+        const fin = f.fadeIn > 0 ? Math.min(1, t / f.fadeIn) : 1;
+        f.mesh.material.opacity = Math.max(0, (f.opacity ?? 0.9) * fin * (1 - t));
+      }
       // Material freigeben (geteilte Materialien/Texturen NICHT disposen — noFade nutzt envMats).
       if (f.life >= f.max) {
         this._disposeEffectMesh(f);
@@ -5006,18 +5045,21 @@ export class Renderer {
         const wx = sx + (ex - sx) * t + (Math.random() - 0.5) * 0.3;
         const wz = sz + (ez - sz) * t + (Math.random() - 0.5) * 0.3;
         const y = (depth > 0.02 ? this.waterSurfaceAt(wx, wz) : this.height[ci] * HEIGHT_SCALE) + 0.07;
-        this._sprite(blue, wx, y, wz, bandSize, 1.1 + surge * 0.5, {
-          vx: fx * (0.55 + surge * 0.6), vz: fz * (0.55 + surge * 0.6), vy: 0.04 + surge * 0.08,
-          grow: 1.06 + surge * 0.28, opacity: (0.52 + surge * 0.34) * fade,
+        // fadeIn 0.5 + längere Lebensdauer: jedes Band-Partikel blendet GANZ LANGSAM ein (statt
+        // plötzlich aufzutauchen), bleibt sichtbar und blendet dann wieder aus. opacity angehoben,
+        // weil das Hüllkurven-Maximum (fadeIn·fadeOut) sonst niedriger liegt.
+        this._sprite(blue, wx, y, wz, bandSize, 2.0 + surge * 0.7, {
+          vx: fx * (0.45 + surge * 0.5), vz: fz * (0.45 + surge * 0.5), vy: 0.03 + surge * 0.06,
+          grow: 1.04 + surge * 0.22, opacity: (0.78 + surge * 0.3) * fade, fadeIn: 0.5,
         });
       }
-      // Weiße Schaumkrone obenauf (Funkeln/Gischt), sparsam — nur jeden 2. Schritt.
+      // Weiße Schaumkrone obenauf (Funkeln/Gischt), sparsam — nur jeden 2. Schritt; blendet ebenfalls weich ein.
       if (this._canSpawnEffect(1) && (step % 2 === 0 || surge > 0.5)) {
         const wx = sx + (ex - sx) * 0.5, wz = sz + (ez - sz) * 0.5;
         const y = (depth > 0.02 ? this.waterSurfaceAt(wx, wz) : this.height[ci] * HEIGHT_SCALE) + 0.16;
         this._sprite(0xffffff, wx + (Math.random() - 0.5) * 0.5, y, wz + (Math.random() - 0.5) * 0.5,
-          0.24 + surge * 0.22, 0.55 + surge * 0.3,
-          { vx: fx * 0.7, vz: fz * 0.7, vy: 0.14 + surge * 0.12, grow: 1.3, opacity: (0.42 + surge * 0.38) * fade, additive: true });
+          0.24 + surge * 0.22, 0.9 + surge * 0.4,
+          { vx: fx * 0.6, vz: fz * 0.6, vy: 0.12 + surge * 0.1, grow: 1.25, opacity: (0.55 + surge * 0.4) * fade, fadeIn: 0.45, additive: true });
       }
       cx = bx; cy = by;
       if (this.terrainType?.[by * W + bx] === 3) break; // Meer erreicht
