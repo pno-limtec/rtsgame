@@ -5304,6 +5304,31 @@ export class Renderer {
           0.16 + surge * 0.18, 0.9 + surge * 0.4,
           { vx: fx * 0.6, vz: fz * 0.6, vy: 0.12 + surge * 0.1, grow: 1.2, opacity: (0.38 + surge * 0.3) * fade, fadeIn: 0.45, additive: true });
       }
+      // WASSERFALL/STROMSCHNELLE: fällt das Wasser über eine STEILE Kante (großer Höhenabfall zum
+      // tieferen Nachbarn), kräftige Gischt erzeugen — aufsteigender Sprühnebel an der Lippe und
+      // aufspritzende Tropfen am Fuß. Stärke skaliert mit Fallhöhe und Strömung. Energisch (kurzes
+      // fadeIn), da ein Überfall dauerhaft und schnell sprüht.
+      const dropH = g0 - bg; // Höhenabfall zum tieferen Nachbarn (Höheneinheiten)
+      if (dropH > 0.026 && this._canSpawnEffect(2)) {
+        const power = Math.min(1, (dropH - 0.026) * 14) * (0.55 + surge * 0.6);
+        const lipx = sx + (ex - sx) * 0.5, lipz = sz + (ez - sz) * 0.5;
+        const topY = (depth > 0.02 ? this.waterSurfaceAt(lipx, lipz) : this.height[ci] * HEIGHT_SCALE) + 0.10;
+        const footY = this.height[by * W + bx] * HEIGHT_SCALE + 0.12;
+        const cnt = this.quality === 'low' ? 1 : this.quality === 'medium' ? 2 : 3;
+        for (let s = 0; s < cnt && this._canSpawnEffect(1); s++) {
+          // Sprühnebel an der Lippe: spritzt nach oben und in Fallrichtung auseinander.
+          this._sprite(0xeaf6ff, lipx + (Math.random() - 0.5) * 0.7, topY + Math.random() * 0.3, lipz + (Math.random() - 0.5) * 0.7,
+            0.22 + power * 0.32, 0.6 + power * 0.6,
+            { vx: fx * (0.5 + power) + (Math.random() - 0.5) * 1.0, vz: fz * (0.5 + power) + (Math.random() - 0.5) * 1.0,
+              vy: 0.9 + power * 1.8, grow: 1.6, opacity: 0.45 + power * 0.4, fadeIn: 0.08, additive: true });
+        }
+        // Aufspritzende Gischt am Fuß des Falls.
+        if (this._canSpawnEffect(1)) {
+          this._sprite(0xffffff, ex + (Math.random() - 0.5) * 0.7, footY + Math.random() * 0.4, ez + (Math.random() - 0.5) * 0.7,
+            0.3 + power * 0.4, 0.7 + power * 0.5,
+            { vx: (Math.random() - 0.5) * 1.2, vz: (Math.random() - 0.5) * 1.2, vy: 0.6 + power * 1.2, grow: 1.9, opacity: 0.45 + power * 0.4, fadeIn: 0.1, additive: true });
+        }
+      }
       cx = bx; cy = by;
       if (this.terrainType?.[by * W + bx] === 3) break; // Meer erreicht
     }
