@@ -4865,12 +4865,29 @@ export class Renderer {
       }
     }
   }
-  spawnTracer(x1, y1, z1, x2, y2, z2) {
-    const geo = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(x1, y1 + 1, z1), new THREE.Vector3(x2, y2 + 1, z2)]);
-    const line = new THREE.Line(geo, new THREE.LineBasicMaterial({ color: 0xffe08a, transparent: true, opacity: 0.9 }));
-    this.scene.add(line); this._addEffect({ mesh: line, life: 0, max: 0.12, opacity: 0.9 });
-    // Mündungsblitz am Ursprung
-    this._sprite(0xfff0b0, x1, y1 + 1, z1, 1.3, 0.1, { additive: true, opacity: 0.95 });
+  // Leuchtspur je Waffenklasse unterscheidbar (Ziel E): leichte Schnellfeuerwaffen = dünn/blassgelb/kurz
+  // (wie bisher), schwere Direktgeschütze = heiß-orange + Glüh-Beads (gefühlte Dicke; WebGL ignoriert
+  // Line-linewidth, daher additive Sprites entlang der Spur), Lenkwaffen/Raketen = kühl-weißblau + längere
+  // Standzeit. `kind` ist der Waffenname aus dem 'fire'-Event (wie in spawnShotParticles).
+  spawnTracer(x1, y1, z1, x2, y2, z2, kind = '') {
+    const missile = /missile|launcher|rocket|torpedo|sam/.test(kind);
+    const heavy = /cannon|naval_gun|artillery/.test(kind);
+    const color = missile ? 0xbfe6ff : heavy ? 0xff9a30 : 0xffe08a;
+    const opacity = (missile || heavy) ? 1.0 : 0.8;
+    const max = missile ? 0.18 : heavy ? 0.16 : 0.10;
+    const ay1 = y1 + 1, ay2 = y2 + 1;
+    const geo = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(x1, ay1, z1), new THREE.Vector3(x2, ay2, z2)]);
+    const line = new THREE.Line(geo, new THREE.LineBasicMaterial({ color, transparent: true, opacity }));
+    this.scene.add(line); this._addEffect({ mesh: line, life: 0, max, opacity });
+    // Mündungsblitz am Ursprung — schwere/Lenkwaffen greller.
+    this._sprite(0xfff0b0, x1, ay1, z1, (missile || heavy) ? 1.7 : 1.2, 0.1, { additive: true, opacity: 0.95 });
+    // Glüh-Beads entlang der Spur faken die Dicke schwerer/Lenkwaffen-Leuchtspuren (Line ist immer 1px).
+    if (missile || heavy) {
+      for (const t of [0.34, 0.67]) {
+        this._sprite(color, x1 + (x2 - x1) * t, ay1 + (ay2 - ay1) * t, z1 + (z2 - z1) * t,
+          missile ? 0.7 : 0.55, max, { additive: true, opacity: 0.85 });
+      }
+    }
   }
 
   spawnShotParticles(x1, z1, x2, z2, kind = '') {
@@ -4928,7 +4945,7 @@ export class Renderer {
           this.spawnImpact(ev.x, this.heightAt(ev.x, ev.y), ev.y, 1);
         }
       } else if (ev.type === 'fire') {
-        this.spawnTracer(ev.x, this.heightAt(ev.x, ev.y), ev.y, ev.tx, this.heightAt(ev.tx, ev.ty), ev.ty);
+        this.spawnTracer(ev.x, this.heightAt(ev.x, ev.y), ev.y, ev.tx, this.heightAt(ev.tx, ev.ty), ev.ty, ev.kind);
         this.spawnShotParticles(ev.x, ev.y, ev.tx, ev.ty, ev.kind);
         if (audio) audio.fire(ev.kind, vol);
       } else if (ev.type === 'rain_cloud') {
