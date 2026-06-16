@@ -363,6 +363,7 @@ export class Renderer {
     this.waterV2Enabled = this.graphics.wasserv2;
     if (this.waterMesh) this.waterMesh.visible = !this.waterV2Enabled;
     if (this.waterMeshV2) this.waterMeshV2.visible = this.waterV2Enabled;
+    if (this.waterHorizonV2) this.waterHorizonV2.visible = this.waterV2Enabled;
     this.renderer.shadowMap.enabled = this.graphics.shadows;
     if (!this.graphics.shadows) {
       this.sun.castShadow = false;
@@ -405,7 +406,7 @@ export class Renderer {
     for (const mist of this._fowEnemyMist.values()) remove(mist);
     this._fowEnemyMist.clear();
     for (const obj of [
-      this.terrainMesh, this.fowMesh, this.waterMesh, this.skirtMesh, this.floodMesh,
+      this.terrainMesh, this.fowMesh, this.waterMesh, this.waterMeshV2, this.waterHorizonV2, this.skirtMesh, this.floodMesh,
       this.wetGroundMesh, this.trackMesh, this.mudMesh, this.roadMesh, this.bridgeMesh, this.pipeMesh, this.oilMesh, this.rockInst, this.grassInst,
       ...(this.oreMeshes || []),
       ...Object.values(this.treeInst || {}),
@@ -413,7 +414,7 @@ export class Renderer {
       ...(this.fish || []).map(f => f.group),
       ...(this.birds || []).map(b => b.group),
     ]) remove(obj);
-    this.terrainMesh = this.fowMesh = this.waterMesh = this.skirtMesh = this.floodMesh = null;
+    this.terrainMesh = this.fowMesh = this.waterMesh = this.waterMeshV2 = this.waterHorizonV2 = this.skirtMesh = this.floodMesh = null;
     this.wetGroundMesh = null;
     this.trackMesh = this.mudMesh = this.roadMesh = this.bridgeMesh = this.pipeMesh = this.oilMesh = null;
     this.rockInst = this.grassInst = null;
@@ -596,6 +597,8 @@ export class Renderer {
     waterV2.visible = !!this.waterV2Enabled;
     this.scene.add(waterV2);
     this.waterMeshV2 = waterV2;
+    this.waterHorizonV2 = this._makeWaterV2Horizon(w, h, waterY);
+    this.scene.add(this.waterHorizonV2);
     if (this.waterV2Enabled) water.visible = false;
     this.seaLevel = waterLevel;
     this.seaY = waterY;
@@ -1214,8 +1217,52 @@ export class Renderer {
     geo.setAttribute('color', new THREE.Float32BufferAttribute([], 3));
     geo.setAttribute('aSea', new THREE.Float32BufferAttribute([], 1));
     geo.setAttribute('aFlow', new THREE.Float32BufferAttribute([], 1));
+    geo.setAttribute('aDepth', new THREE.Float32BufferAttribute([], 1));
     geo.setIndex([]);
     return geo;
+  }
+
+  _makeWaterV2Horizon(w, h, y) {
+    const maxX = (w - 1) * TILE;
+    const maxZ = (h - 1) * TILE;
+    const pad = Math.max(maxX, maxZ) * 3.0;
+    const waterY = y - 0.04;
+    const c = this._waterColorForDepth
+      ? this._waterColorForDepth(0.70, 1, 1, 1)
+      : new THREE.Color(0x0b5875);
+    const positions = [], uvs = [], colors = [], seaVals = [], flowVals = [], depthVals = [], indices = [];
+    const addVertex = (x, z) => {
+      const i = positions.length / 3;
+      positions.push(x, waterY, z);
+      uvs.push(x * 0.085, z * 0.085);
+      colors.push(c.r, c.g, c.b);
+      seaVals.push(1);
+      flowVals.push(0);
+      depthVals.push(0.70);
+      return i;
+    };
+    const addRect = (x0, z0, x1, z1) => {
+      const a = addVertex(x0, z0), b = addVertex(x1, z0), c_ = addVertex(x1, z1), d = addVertex(x0, z1);
+      indices.push(a, b, c_, a, c_, d);
+    };
+    addRect(-pad, -pad, 0, maxZ + pad);          // links
+    addRect(maxX, -pad, maxX + pad, maxZ + pad); // rechts
+    addRect(0, -pad, maxX, 0);                   // oben
+    addRect(0, maxZ, maxX, maxZ + pad);          // unten
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+    geo.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+    geo.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+    geo.setAttribute('aSea', new THREE.Float32BufferAttribute(seaVals, 1));
+    geo.setAttribute('aFlow', new THREE.Float32BufferAttribute(flowVals, 1));
+    geo.setAttribute('aDepth', new THREE.Float32BufferAttribute(depthVals, 1));
+    geo.setIndex(indices);
+    geo.computeBoundingSphere();
+    const mesh = new THREE.Mesh(geo, this.waterMatV2);
+    mesh.renderOrder = 0.9;
+    mesh.frustumCulled = false;
+    mesh.visible = !!this.waterV2Enabled;
+    return mesh;
   }
 
   _setWaterGeometryRefs(geo, seaIndices = []) {
@@ -1467,7 +1514,7 @@ export class Renderer {
       return;
     }
 
-    const positions = [], uvs = [], colors = [], seaVals = [], flowVals = [], indices = [];
+    const positions = [], uvs = [], colors = [], seaVals = [], flowVals = [], depthVals = [], indices = [];
     const seaIndices = [];
     const fw = w + 1, fh = h + 1, fn = fw * fh;
     const cover = new Float32Array(fn);
@@ -1613,6 +1660,7 @@ export class Renderer {
       const seaVal = Math.max(0, Math.min(1, p.sea));
       seaVals.push(seaVal);
       flowVals.push(Math.min(1, fl)); // Strömungsstärke pro Vertex (für Wasser V2: gerichtete Strömungslinien)
+      depthVals.push(Math.max(0, p.depth || 0)); // echte Tiefe für V2: Schaum/Transparenz/ruhige Seen
       if (seaVal > 0.35) seaIndices.push(vx);
       return vx;
     };
@@ -1658,6 +1706,7 @@ export class Renderer {
     geo.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
     geo.setAttribute('aSea', new THREE.Float32BufferAttribute(seaVals, 1));
     geo.setAttribute('aFlow', new THREE.Float32BufferAttribute(flowVals, 1));
+    geo.setAttribute('aDepth', new THREE.Float32BufferAttribute(depthVals, 1));
     geo.setIndex(indices);
     geo.computeBoundingSphere();
     const old = this.waterMesh.geometry;

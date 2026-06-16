@@ -14,11 +14,13 @@ const VERT = /* glsl */`
   uniform float uWaveAmp;      // Wellen-Amplitude (Welt-Einheiten) für offenes Meer
   attribute float aSea;        // 0..1 Meeresanteil (steuert Wellenstärke)
   attribute float aFlow;       // 0..1 Strömungsstärke (für gerichtete Strömungslinien)
+  attribute float aDepth;      // echte Wassertiefe (Sim-Einheiten)
   attribute vec3 color;        // tiefenabhängige Grundfarbe (vom Renderer)
   varying vec3 vWorld;
   varying vec3 vNormalW;
   varying float vSea;
   varying float vFlow;
+  varying float vDepth;
   varying vec3 vColor;
   varying float vCrest;        // normierte Wellenhöhe (für Schaumkronen)
   varying vec2 vUv;
@@ -40,6 +42,7 @@ const VERT = /* glsl */`
     vColor = color;
     vSea = aSea;
     vFlow = aFlow;
+    vDepth = aDepth;
     vUv = uv;
     vec4 wpos = modelMatrix * vec4(position, 1.0);
     float amp = uWaveAmp * mix(0.12, 1.0, clamp(aSea, 0.0, 1.0)); // Binnenwasser ruhiger
@@ -65,18 +68,53 @@ const FRAG = /* glsl */`
   varying vec3 vNormalW;
   varying float vSea;
   varying float vFlow;
+  varying float vDepth;
   varying vec3 vColor;
   varying float vCrest;
   varying vec2 vUv;
 
   float luma(vec3 c) { return dot(c, vec3(0.299, 0.587, 0.114)); }
 
+  float hash12(vec2 p) {
+    vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+    p3 += dot(p3, p3.yzx + 33.33);
+    return fract((p3.x + p3.y) * p3.z);
+  }
+
+  float noise2(vec2 p) {
+    vec2 i = floor(p);
+    vec2 f = fract(p);
+    f = f * f * (3.0 - 2.0 * f);
+    float a = hash12(i);
+    float b = hash12(i + vec2(1.0, 0.0));
+    float c = hash12(i + vec2(0.0, 1.0));
+    float d = hash12(i + vec2(1.0, 1.0));
+    return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+  }
+
+  float fbm(vec2 p) {
+    float v = 0.0;
+    float a = 0.5;
+    mat2 m = mat2(1.62, 1.18, -1.18, 1.62);
+    for (int i = 0; i < 4; i++) {
+      v += a * noise2(p);
+      p = m * p + vec2(11.7, -7.3);
+      a *= 0.5;
+    }
+    return v;
+  }
+
   // Feine Detail-Normale aus mehreren hochfrequenten Wellen (analytische Ableitung) → sichtbare
   // Kräuselung + Glitzern. Domain-Warping (eine langsame Welle versetzt die Abtastposition) bricht
   // die Regelmäßigkeit auf, sodass kein gitterartiges Muster entsteht. Frequenzen nicht-harmonisch.
   vec3 detailNormal(vec2 p, float t, float strength) {
-    // langsamer Versatz → organischeres, weniger regelmäßiges Muster
-    p += 0.7 * vec2(sin(p.y * 0.21 + t * 0.5), cos(p.x * 0.19 - t * 0.4));
+    // langsamer Versatz → organischeres, weniger regelmäßiges Muster. Der Noise-Warp bricht
+    // besonders die langen, gleichmäßigen Glitzerketten auf offener See.
+    vec2 warp = vec2(
+      noise2(p * 0.19 + vec2(t * 0.07, 4.1)),
+      noise2(p * 0.23 + vec2(-3.4, -t * 0.06))
+    ) - 0.5;
+    p += 0.7 * vec2(sin(p.y * 0.21 + t * 0.5), cos(p.x * 0.19 - t * 0.4)) + warp * 3.1;
     vec2 g = vec2(0.0);
     vec2 e1 = normalize(vec2(0.92, 0.18));  float k1 = 1.07, s1 = 2.3, a1 = 1.0;
     g += e1 * cos(dot(p, e1) * k1 + t * s1) * a1 * k1;
@@ -91,14 +129,20 @@ const FRAG = /* glsl */`
 
   void main() {
     float sea = clamp(vSea, 0.0, 1.0);
+    float depthF = smoothstep(0.025, 0.42, vDepth);
     // Basis-Normale (Grundwellen) mit kräftiger Detail-Normale mischen — Detail beim Meer stärker.
-    vec3 nd = detailNormal(vWorld.xz, uTime, 0.16 + sea * 0.22);
-    vec3 N = normalize(vNormalW * 0.5 + nd * 0.5);
+    vec3 nd = detailNormal(vWorld.xz, uTime, 0.09 + sea * 0.13);
+    vec3 N = normalize(vNormalW * 0.68 + nd * 0.32);
+    vec2 micro = vec2(
+      noise2(vWorld.xz * 0.74 + vec2(uTime * 0.17, -2.0)),
+      noise2(vWorld.xz * 0.68 + vec2(5.0, -uTime * 0.15))
+    ) - 0.5;
+    N = normalize(N + vec3(micro.x, 0.0, micro.y) * (0.015 + sea * 0.035));
     vec3 V = normalize(cameraPosition - vWorld);
     float fres = pow(1.0 - max(dot(N, V), 0.0), 4.0);
 
     // Grundfarbe; ganz flaches Wasser nur SEHR dezent aufhellen (Untergrund schimmert durch).
-    float shallowTint = smoothstep(0.40, 0.60, luma(vColor));
+    float shallowTint = (1.0 - depthF) * smoothstep(0.42, 0.62, luma(vColor));
     vec3 col = vColor + shallowTint * vec3(0.01, 0.025, 0.03);
 
     // Sichtbare Kräuselung: dezente diffuse Helligkeitsmodulation nach Sonnenstand — geneigte
@@ -114,6 +158,8 @@ const FRAG = /* glsl */`
     vec3 Hh = normalize(uSunDir + V);
     float ndh = max(dot(N, Hh), 0.0);
     float spec = pow(ndh, 240.0) * 3.4 + pow(ndh, 30.0) * 0.40;
+    float glitterMask = smoothstep(0.38, 0.92, fbm(vWorld.xz * (0.24 + sea * 0.26) + vec2(uTime * 0.08, -uTime * 0.06)));
+    spec *= mix(0.38, 1.55, glitterMask);
     col += uSunColor * spec * uDaylight;
 
     // STRÖMUNG (Flow-Sim-Visualisierung): die UVs sind strömungsausgerichtet (uv.y = Fließrichtung).
@@ -121,23 +167,28 @@ const FRAG = /* glsl */`
     // Strömung talwärts — Tempo und Stärke skalieren mit der Strömungsstärke. So sieht man, WO und
     // WIE SCHNELL Wasser fließt (abläuft/zuläuft).
     float flowStr = clamp(vFlow, 0.0, 1.0);
-    float scroll = vUv.y * 22.0 - uTime * (1.6 + flowStr * 3.5);
+    // Offene See bekommt keine harten Flow-Streifen; dort lebt die Oberfläche durch Wellen/Glitzern.
+    // Flüsse, Kanäle und Abflusskanten behalten die gerichtete Strömungszeichnung.
+    float visibleFlow = smoothstep(0.10, 0.55, flowStr) * (1.0 - smoothstep(0.35, 0.90, sea));
+    float flowNoise = fbm(vec2(vUv.x * 2.2, vUv.y * 0.85) + vWorld.xz * 0.018 + vec2(0.0, uTime * 0.18));
+    float scroll = vUv.y * 22.0 - uTime * (1.6 + visibleFlow * 3.5) + (flowNoise - 0.5) * 5.5;
     float streak = sin(scroll) * 0.5 + 0.5;
-    streak = smoothstep(0.62, 1.0, streak) * pow(flowStr, 0.6);
+    streak = smoothstep(0.62, 1.0, streak) * pow(visibleFlow, 0.6) * smoothstep(0.18, 0.95, flowNoise);
     // feinere zweite Lage gegen Regelmäßigkeit
-    float streak2 = smoothstep(0.7, 1.0, sin(vUv.y * 41.0 - uTime * (2.4 + flowStr * 4.0) + vUv.x * 6.0) * 0.5 + 0.5);
-    float current = clamp(streak * 0.7 + streak2 * 0.3, 0.0, 1.0) * flowStr;
-    col = mix(col, vec3(0.86, 0.93, 0.98), current * 0.5);
+    float streak2 = smoothstep(0.7, 1.0, sin(vUv.y * 41.0 - uTime * (2.4 + visibleFlow * 4.0) + vUv.x * 6.0 + flowNoise * 4.0) * 0.5 + 0.5);
+    float current = clamp(streak * 0.7 + streak2 * 0.3, 0.0, 1.0) * visibleFlow;
+    col = mix(col, vec3(0.86, 0.93, 0.98), current * 0.32);
 
     // Uferschaum: NUR an der echten Wasserlinie (dünnstes/hellstes Wasser) + Meereskämme. Sonst
     // würde flaches Wasser (Flüsse) flächig weiß ausbleichen.
-    float shoreEdge = smoothstep(0.52, 0.66, luma(vColor));
+    float shoreEdge = (1.0 - smoothstep(0.035, 0.16, vDepth)) * smoothstep(0.52, 0.68, luma(vColor));
     float crestFoam = smoothstep(0.5, 1.0, vCrest);
-    float foam = max(shoreEdge * (0.4 + 0.6 * crestFoam) * 0.8,
-                     smoothstep(0.80, 1.0, vCrest) * smoothstep(0.55, 0.92, sea) * 0.45);
-    col = mix(col, vec3(0.92, 0.97, 1.0), clamp(foam, 0.0, 0.8));
+    float foam = max(shoreEdge * (0.18 + 0.34 * crestFoam),
+                     smoothstep(0.80, 1.0, vCrest) * smoothstep(0.55, 0.92, sea) * 0.28);
+    col = mix(col, vec3(0.92, 0.97, 1.0), clamp(foam, 0.0, 0.55));
 
-    float a = clamp(uOpacity + fres * 0.18 + foam * 0.3 + current * 0.2, 0.0, 0.99);
+    float baseAlpha = mix(0.56, uOpacity, depthF);
+    float a = clamp(baseAlpha + fres * 0.16 + foam * 0.22 + current * 0.12, 0.0, 0.99);
     gl_FragColor = vec4(col, a);
   }
 `;
