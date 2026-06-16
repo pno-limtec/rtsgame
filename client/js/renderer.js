@@ -47,7 +47,7 @@ const WATER_PLANE_FALL_SMOOTH = 0.045; // Abfluss trocknet langsamer aus als er 
 const FLOOD_CHANNEL_DEPTH = 0.026;  // dünne Abflussrinnen bekommen schon früh eine Wasseroberfläche
 const WATER_DARK_DEPTH_START = 0.085;
 const WATER_DARK_DEPTH_RANGE = 0.34;
-const WATER_EDGE_TUCK_Y = 0.026;
+const WATER_EDGE_TUCK_Y = -0.012;  // Uferkante leicht ins Gelände eingraben, statt darüber zu schweben
 const WATER_NIGHT_COLOR_MIN = 0.16;
 const WATER_NIGHT_OPACITY_MIN = 0.28;   // transparenteres Wasser (Grund scheint mehr durch); Himmelsspiegelung am Streifwinkel macht es trotzdem plastisch
 const WATER_STANDING_FLOW_MAX = 0.13;
@@ -1476,16 +1476,17 @@ export class Renderer {
       const span = b.v - a.v;
       const t = clamp01(Math.abs(span) > 1e-6 ? (WATER_EDGE_THRESHOLD - a.v) / span : 0.5);
       const waterSide = a.v >= WATER_EDGE_THRESHOLD ? a : b;
-      const drySide = a.v >= WATER_EDGE_THRESHOLD ? b : a;
       const x = a.x + (b.x - a.x) * t;
       const z = a.z + (b.z - a.z) * t;
-      const dryGround = this.heightAt(drySide.x, drySide.z);
-      const ground = Math.max(this.heightAt(x, z), Math.min(waterSide.y, dryGround));
+      // Die Uferkante exakt auf das Gelände am Übergangspunkt setzen (leicht eingegraben statt
+      // schwebend), gedeckelt durch den Wasserpegel. So sitzt der Rand auf dem Boden auf und
+      // schwebt nicht als Lippe darüber; an Gefällen folgt er der Hangoberfläche nach unten.
+      const edgeGround = this.heightAt(x, z);
       return {
         x,
         z,
         v: WATER_EDGE_THRESHOLD,
-        y: Math.min(waterSide.y, ground + WATER_EDGE_TUCK_Y),
+        y: Math.min(waterSide.y, edgeGround + WATER_EDGE_TUCK_Y),
         fx: a.fx + (b.fx - a.fx) * t,
         fz: a.fz + (b.fz - a.fz) * t,
         depth: a.depth + (b.depth - a.depth) * t,
