@@ -111,6 +111,26 @@ ok(Array.isArray(init.terrain.waterDepth) && init.terrain.waterDepth.length > 0,
     ok(nearSum(w.terrain.ore, hq, 16) > 0, `Leichter Start hat Erz auf dem Startplateau (Spieler ${hq.owner})`);
     ok(nearSum(w.terrain.oil, hq, 16) > 0, `Leichter Start hat Öl auf dem Startplateau (Spieler ${hq.owner})`);
   }
+  const riverContinuity = (world) => {
+    const t = world.terrain;
+    let dry = 0, shallow = 0, maxDryRun = 0;
+    for (const path of t.riverPaths || []) {
+      let run = 0;
+      for (const i of path) {
+        if (t.water[i] <= WET_DEPTH) { dry++; run++; }
+        else { maxDryRun = Math.max(maxDryRun, run); run = 0; }
+        if (t.water[i] < NAVIGABLE_DEPTH) shallow++;
+      }
+      maxDryRun = Math.max(maxDryRun, run);
+    }
+    return { dry, shallow, maxDryRun };
+  };
+  for (const seed of [1, 2, 17, 25, 31]) {
+    const fw = createWorld({ data, seed, players, controls: { insanity: 1 } });
+    const rs = riverContinuity(fw);
+    ok(rs.dry === 0 && rs.shallow === 0,
+      `4-Spieler-Startplateaus unterbrechen Hauptflüsse nicht (Seed ${seed}, trocken=${rs.dry}, flach=${rs.shallow}, maxRun=${rs.maxDryRun})`);
+  }
 }
 {
   const { initEnv, normalizeInsanityLevel, insanityProfile } = await import('../shared/systems/environment.js');
@@ -1557,13 +1577,17 @@ ok(match.player(0).controller === 'ai', 'Sitz fällt nach Disconnect-Timeout an 
   t.ore[oreIdx] = 180; t.oreList.push(oreIdx);
   const digger = spawnUnit(w, 0, 'builder', 12 * 2 + 1, 12 * 2 + 1);
   digger.resourceRole = 'ore';
-  const truck = spawnUnit(w, 0, 'truck', 6 * 2 + 1, 6 * 2 + 1);
-  truck.order = { type: 'idle' };
   for (let k = 0; k < 20; k++) step(w);
   const pile = [...w.entities.values()].find(e => e.kind === 'ore_pile');
-  ok(pile && ((pile.amount || 0) > 0 || truck.cargoResource === 'ore' || truck.order.type === 'haul_pile'),
+  ok(pile && (pile.amount || 0) > 0,
     'Erzabbau legt einen Erzhaufen am Abbauort an');
   ok(P.resources.ore === 0, 'Erzabbau bucht Erz nicht mehr direkt ins Lager');
+  for (let i = 0; i < t.water.length; i++) {
+    t.water[i] = 0; t.baseWater[i] = 0;
+    if (t.mud) t.mud[i] = 0;
+  }
+  const truck = spawnUnit(w, 0, 'truck', 6 * 2 + 1, 6 * 2 + 1);
+  truck.order = { type: 'idle' };
   for (let k = 0; k < 600 && P.resources.ore <= 0; k++) step(w);
   ok(P.resources.ore > 0, 'LKW holt Erzhaufen ab und liefert Erz ins Erzlager');
 }
@@ -1824,6 +1848,7 @@ ok(match.player(0).controller === 'ai', 'Sitz fällt nach Disconnect-Timeout an 
   const terraJob = w.terraJobs[0];
   const terraPile = terraJob ? w.entities.get(terraJob.earthPileId) : null;
   ok(terraPile && terraPile.kind === 'earth_pile', 'Abgrab-Auftrag weist automatisch einen Erdhügelplatz zu');
+  ok(Math.abs(t.height[ji] - jh0) < 1e-9, 'Terraform-Auftrag veraendert die physikalische Hoehe erst nach Abschluss');
   for (let k = 0; k < 600 && w.terraJobs.length; k++) step(w);
   ok(w.terraJobs.length === 0, 'Abgrab-Auftrag wurde von einem Bagger erledigt');
   ok(t.height[ji] < jh0 - 0.05, `Zelle wurde abgegraben (${jh0.toFixed(2)} → ${t.height[ji].toFixed(2)})`);

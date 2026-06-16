@@ -14,11 +14,6 @@ const REGISTRY = {
   // der Renderer baut stattdessen ein stimmiges Low-Poly-Komposit (renderer.makeMesh).
   // Bodenfahrzeuge bleiben prozedural: simple Low-Poly-Silhouetten sind besser lesbar
   // und vermeiden Front-/Pivot-Probleme externer Modelle.
-  gunship:         { file: 'helicopter.glb', size: 4.2, yaw: Math.PI / 2, tint: 0.30, lift: 9 },
-  patrol_boat:     { file: 'boat.glb',       size: 3.8, yaw: Math.PI / 2, tint: 0.30 },
-  destroyer:       { file: 'boat.glb',       size: 5.2, yaw: Math.PI / 2, tint: 0.30 },
-  amphib_transport:{ file: 'boat.glb',       size: 4.2, yaw: Math.PI / 2, tint: 0.30 },
-  sea_builder:     { file: 'boat.glb',       size: 3.6, yaw: Math.PI / 2, tint: 0.30 },
 };
 
 export class ModelLibrary {

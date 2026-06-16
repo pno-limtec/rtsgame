@@ -57,7 +57,7 @@ export function setMoveGoal(world, ent, wx, wy) {
     if (site && (site.def?.pipe || site.def?.bridges)) maxSlope = Math.max(maxSlope, STEEP_BUILD_SLOPE);
   }
   const path = findPath(world.terrain, ent.domain, sx, sy, gx, gy, 48000, maxSlope,
-    { heavy: !!ent.heavy, category: ent.category, mudCrawler: ent.kind === 'builder', builderWade: builderWadeOrder(ent), terraCrawler: ent.kind === 'builder' }); // große Karte → mehr Iterationen
+    { heavy: !!ent.heavy, category: ent.category, mudCrawler: ent.kind === 'builder', builderWade: builderWadeOrder(ent), terraCrawler: ent.kind === 'builder', roughCrawler: ent.kind === 'tractor' }); // große Karte → mehr Iterationen
   ent.pathGoal = path?.goal || [gx, gy];
   if (path?.goal && (path.goal[0] !== gx || path.goal[1] !== gy)) {
     const [tx, ty] = tileToWorld(path.goal[0], path.goal[1]);
@@ -222,7 +222,7 @@ export function stepMovement(world) {
     const blockedByWater = e.domain === 'land' && inBounds(terrain, ntx, nty)
       && waterBlocksLand(terrain, nxtI) && !(terrain.bridge && terrain.bridge[nxtI] > 0)
       && !canTraverseMuddyWet(terrain, e, nxtI);
-    const blockedByForest = forestBlocks(terrain, e.domain, ntx, nty, { category: e.category });
+    const blockedByForest = forestBlocks(terrain, e.domain, ntx, nty, { category: e.category, roughCrawler: e.kind === 'tractor' });
     const tooSteep = (e.domain === 'land' || e.domain === 'amphibious') && nxtI !== curI
       && inBounds(terrain, ntx, nty)
       && !slopeOk(terrain, curI, nxtI, e.maxSlope ?? Infinity, SLOPE_ON_ROAD, e.kind === 'builder' ? SLOPE_TERRAFORM_BUILDER : null);
@@ -490,7 +490,7 @@ function separation(world) {
       const step = Math.min(isVeh ? 0.1 : 0.28, mag * strength);
       const nx = e.x + (px / mag) * step, ny = e.y + (py / mag) * step;
       const [stx, sty] = worldToTile(nx, ny);
-      if (isPassable(world.terrain, e.domain, stx, sty, e.category) && !forestBlocks(world.terrain, e.domain, stx, sty, { category: e.category })) { e.x = nx; e.y = ny; }
+      if (isPassable(world.terrain, e.domain, stx, sty, e.category) && !forestBlocks(world.terrain, e.domain, stx, sty, { category: e.category, roughCrawler: e.kind === 'tractor' })) { e.x = nx; e.y = ny; }
     }
   }
 }

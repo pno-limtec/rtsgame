@@ -1102,7 +1102,7 @@ export function coverAt(t, tx, ty) {
 }
 
 export function forestBlocks(t, domain, tx, ty, opts = null) {
-  if ((domain !== 'land' && domain !== 'amphibious') || (opts && opts.category === 'infantry')) return false;
+  if ((domain !== 'land' && domain !== 'amphibious') || opts?.category === 'infantry' || opts?.roughCrawler) return false;
   if (!inBounds(t, tx, ty)) return false;
   const i = tIdx(t, tx, ty);
   const inTunnel = t.tunnel && t.tunnel[i] > 0;

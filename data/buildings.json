@@ -36,19 +36,19 @@
     "hp": 900, "cost": { "ore": 800 }, "buildTime": 14,
     "power": -30, "size": 3, "sight": 7,
     "storage": { "ore": 1000 },
-    "desc": "Verhüttet Erz aus dem Erzlager zu Stahl/Credits. Erz wird von Erz-LKWs angeliefert."
+    "desc": "Verhüttet Erz aus dem Erzlager zu Stahl/Credits. Erz wird von LKWs angeliefert."
   },
   "ore_depot": {
     "label": "Erzlager", "role": "logistics",
     "hp": 650, "cost": { "ore": 350, "materials": 20 }, "buildTime": 8,
     "power": -5, "size": 2, "sight": 5, "resourceDepot": "ore", "storage": { "ore": 2500 },
-    "desc": "Annahmestelle für Erz-LKWs. Von hier verhüttet das Stahlwerk Erz zu Credits."
+    "desc": "Annahmestelle für LKWs mit Erzladung. Von hier verhüttet das Stahlwerk Erz zu Credits."
   },
   "material_depot": {
     "label": "Baumateriallager", "role": "logistics",
     "hp": 650, "cost": { "ore": 300, "materials": 15 }, "buildTime": 8,
     "power": -5, "size": 2, "sight": 5, "resourceDepot": "materials", "storage": { "materials": 2200 },
-    "desc": "Lager fuer Erde und Baumaterial aus Gräben, Tunneln und Abgrabungen. Baustellen und Fabriken ziehen Material von hier."
+    "desc": "Lager fuer Erde und Baumaterial aus Tunneln, Abgrabungen und Aufschüttungen. Baustellen und Fabriken ziehen Material von hier."
   },
   "water_tower": {
     "label": "Wasserturm", "role": "logistics",
@@ -86,9 +86,9 @@
   "airbase": {
     "label": "Luftbasis", "role": "production",
     "hp": 800, "cost": { "ore": 1200 }, "buildTime": 20,
-    "power": -80, "size": 3, "sight": 7,
+    "power": -80, "size": 5, "sight": 7,
     "produces_category": "air",
-    "desc": "Teure Spezialproduktion: baut und betankt Luftfahrzeuge."
+    "desc": "Teure Spezialproduktion mit eigener Landebahn und großem Platzbedarf: baut und betankt Luftfahrzeuge."
   },
   "shipyard": {
     "label": "Werft", "role": "production",
@@ -134,6 +134,12 @@
     "power": -20, "size": 1, "sight": 8, "requiresWater": true, "sonarRange": 22,
     "desc": "Ortet getauchte U-Boote im Umkreis und macht sie für die eigene Flotte angreifbar."
   },
+  "spotlight": {
+    "label": "Scheinwerfer", "role": "defense",
+    "hp": 420, "cost": { "ore": 320, "materials": 18 }, "buildTime": 7,
+    "power": -18, "size": 1, "sight": 14,
+    "desc": "Leuchtet nachts ein großes Areal aus. Fällt bei Strommangel aus und hilft, die Basis in der Dunkelheit lesbar zu halten."
+  },
   "road": {
     "label": "Straße", "role": "infrastructure",
     "hp": 250, "cost": { "ore": 20, "materials": 4 }, "buildTime": 1,
@@ -169,7 +175,7 @@
   "trench": {
     "label": "Graben", "role": "fortification",
     "hp": 300, "cost": { "ore": 80 }, "buildTime": 3,
-    "power": 0, "size": 1, "sight": 3, "cover": 0.5, "garrison": 4, "terraform": -0.16, "earthYield": 40, "buildRadius": 2, "remoteBuild": true,
+    "power": 0, "size": 1, "sight": 3, "cover": 0.5, "garrison": 4, "terraform": -0.16, "earthYield": 40, "buildRadius": 2, "remoteBuild": true, "hidden": true,
     "blocks": true,
     "desc": "Tiefer, steiler Graben — der Aushub liefert Erde. Sperrt den Durchgang für ALLE Bodeneinheiten (nur per Brücke/Tunnel passierbar); eigene Infanterie kann sich darin eingraben. Leitet Wasser (Kanal), kann Hochseen anstechen."
   },
@@ -190,6 +196,6 @@
     "label": "Erzhaufen", "role": "terrain",
     "hp": 180, "cost": { "ore": 0 }, "buildTime": 0,
     "power": 0, "size": 1, "sight": 1,
-    "desc": "Blockierender Erzhaufen am Abbauort. LKWs und Erz-LKWs fahren ihn ins Erzlager."
+    "desc": "Blockierender Erzhaufen am Abbauort. LKWs fahren ihn ins Erzlager."
   }
 }

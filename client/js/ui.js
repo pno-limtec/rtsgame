@@ -23,7 +23,7 @@ const BUILD_ICONS = {
   power_plant: 'gear', solar_plant: 'sun', water_pump: 'water', pipe: 'pipe', refinery: 'refinery',
   oil_derrick: 'oil', barracks: 'barracks', factory: 'factory', airbase: 'air', shipyard: 'ship',
   depot: 'depot', ore_depot: 'ore', material_depot: 'materials', water_tower: 'tower', oil_depot: 'tank',
-  mg_turret: 'target', turret: 'target', flak_turret: 'missile', sam_site: 'missile', sonar: 'sonar', road: 'road', bridge: 'bridge', tunnel: 'tunnel',
+  mg_turret: 'target', turret: 'target', flak_turret: 'missile', sam_site: 'missile', sonar: 'sonar', spotlight: 'spotlight', road: 'road', bridge: 'bridge', tunnel: 'tunnel',
   wall: 'wall', trench: 'trench', dam: 'dam',
 };
 const UNIT_ICONS = {
@@ -67,12 +67,12 @@ const BUILD_TABS = [
   ['buildings', 'Gebäude', 'factory'],
   ['units', 'Einheiten', 'infantry'],
 ];
-const BUILD_TERRAIN_KINDS = ['road', 'bridge', 'tunnel', 'wall', 'trench', 'dam'];
+const BUILD_TERRAIN_KINDS = ['road', 'bridge', 'tunnel', 'wall', 'dam'];
 const BUILDING_GROUPS = [
   ['Versorgung', ['power_plant', 'solar_plant', 'water_pump', 'pipe', 'refinery', 'oil_derrick']],
   ['Lager & Logistik', ['ore_depot', 'material_depot', 'water_tower', 'oil_depot', 'depot']],
   ['Produktion', ['barracks', 'factory', 'airbase', 'shipyard']],
-  ['Verteidigung', ['mg_turret', 'turret', 'flak_turret', 'sam_site', 'sonar']],
+  ['Verteidigung', ['mg_turret', 'turret', 'flak_turret', 'sam_site', 'sonar', 'spotlight']],
 ];
 const BUILDING_KINDS = BUILDING_GROUPS.flatMap(([, kinds]) => kinds);
 const TECH_TREE_GROUPS = [
@@ -81,12 +81,12 @@ const TECH_TREE_GROUPS = [
     ['Energie & Rohstoffe', ['power_plant', 'solar_plant', 'water_pump', 'pipe', 'water_tower', 'oil_derrick', 'oil_depot', 'refinery']],
     ['Lager & Logistik', ['ore_depot', 'material_depot', 'depot']],
     ['Produktion', ['barracks', 'factory', 'airbase', 'shipyard']],
-    ['Verteidigung', ['mg_turret', 'turret', 'flak_turret', 'sam_site', 'sonar']],
-    ['Wege & Gelände', ['road', 'bridge', 'tunnel', 'wall', 'trench', 'dam']],
+    ['Verteidigung', ['mg_turret', 'turret', 'flak_turret', 'sam_site', 'sonar', 'spotlight']],
+    ['Wege & Gelände', ['road', 'bridge', 'tunnel', 'wall', 'dam']],
   ]],
   ['Einheiten', [
     ['Infanterie', ['engineer', 'rifleman', 'at_soldier', 'aa_soldier']],
-    ['Fahrzeuge', ['builder', 'harvester', 'truck', 'tractor', 'scout', 'tank', 'flak_track', 'rocket_launcher', 'artillery']],
+    ['Fahrzeuge', ['builder', 'truck', 'tractor', 'scout', 'tank', 'flak_track', 'rocket_launcher', 'artillery']],
     ['Luft', ['recon_drone', 'gunship', 'bomber', 'cloud_seeder', 'transport_air']],
     ['Marine', ['patrol_boat', 'destroyer', 'submarine', 'underwater_drone', 'amphib_transport', 'sea_builder']],
   ]],
@@ -140,6 +140,7 @@ function iconSvg(name, cls = '') {
     case 'fuel': return p(`<path d="M6 3h9v18H6Z" ${stroke}/><path d="M9 7h3M15 8l3 3v7a2 2 0 0 0 4 0v-5l-3-3" ${stroke}/>`);
     case 'ammo': return p(`<path d="M7 20V8l3-4h4l3 4v12Z" ${stroke}/><path d="M7 16h10M10 8h4" ${stroke}/>`);
     case 'sun': return p(`<circle cx="12" cy="12" r="4" ${stroke}/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M19.1 4.9l-1.4 1.4M6.3 17.7l-1.4 1.4" ${stroke}/>`);
+    case 'spotlight': return p(`<path d="M5 20h14M9 20l1.2-6h3.6L15 20M7 14h10l2-7H5Z" ${stroke}/><path d="M16 8h6M15 5l4-3M15 11l4 3" ${stroke}/>`);
     case 'moon': return p(`<path d="M20 15.5A8 8 0 0 1 8.5 4 7 7 0 1 0 20 15.5Z" fill="currentColor"/>`);
     case 'rain': return p(`<path d="M7 15a5 5 0 0 1 2-9 6 6 0 0 1 11 3 4 4 0 0 1-1 8H7Z" ${stroke}/><path d="M8 20l1-2M13 21l1-3M18 20l1-2" ${stroke}/>`);
     case 'storm': return p(`<path d="M7 14a5 5 0 0 1 2-9 6 6 0 0 1 11 3 4 4 0 0 1-1 8H7Z" ${stroke}/><path d="m12 14-2 5h3l-1 3 5-7h-3l1-1Z" fill="currentColor"/>`);
@@ -200,9 +201,9 @@ function techObjectText(obj) {
 }
 
 function techCostHtml(cost) {
-  const parts = Object.entries(cost || {}).filter(([, v]) => v)
-    .map(([k, v]) => `<span class="costitem">${resIcon(k, 'costicon')}${escAttr(v)}</span>`);
-  return parts.length ? parts.join(' ') : `<span class="costitem">${resIcon('ore', 'costicon')}0</span>`;
+  const parts = RES_ORDER.filter(k => cost?.[k])
+    .map(k => `<span class="costitem" style="color:${RES_COLOR[k] || '#eaf6ff'}">${resIcon(k, 'costicon')}${escAttr(cost[k])}</span>`);
+  return parts.length ? parts.join(' ') : `<span class="costitem" style="color:${RES_COLOR.ore}">${resIcon('ore', 'costicon')}0</span>`;
 }
 
 function techProducedBy(data, kind, def) {
@@ -218,6 +219,7 @@ function techProducedBy(data, kind, def) {
 function techProducedUnits(data, bdef) {
   const units = [];
   for (const [kind, def] of Object.entries(data.units || {})) {
+    if (def.hidden) continue;
     if ((bdef.produces_units || []).includes(kind) || (bdef.produces_category && bdef.produces_category === def.category)) {
       units.push(def.label || kind);
     }
@@ -591,7 +593,7 @@ export class UI {
 
   validTechSelection(sel) {
     if (sel?.type === 'unit' && this.data.units?.[sel.kind]) return sel;
-    if (sel?.type === 'building' && this.data.buildings?.[sel.kind]) return sel;
+    if (sel?.type === 'building' && this.data.buildings?.[sel.kind] && !this.data.buildings[sel.kind].hidden) return sel;
     const firstUnit = Object.keys(this.data.units || {})[0];
     return this.data.buildings?.hq ? { type: 'building', kind: 'hq' } : { type: 'unit', kind: firstUnit };
   }
@@ -623,7 +625,7 @@ export class UI {
 
   techNodeHtml(type, kind) {
     const def = type === 'unit' ? this.data.units?.[kind] : this.data.buildings?.[kind];
-    if (!def) return '';
+    if (!def || def.hidden) return '';
     const selected = this.techSelected?.type === type && this.techSelected?.kind === kind;
     const icon = type === 'unit' ? (UNIT_ICONS[kind] || 'box') : (BUILD_ICONS[kind] || 'box');
     const meta = type === 'unit'
@@ -1028,7 +1030,7 @@ export class UI {
 
   readyProducerForUnit(kind, readyBuildings) {
     const udef = this.data.units?.[kind];
-    if (!udef) return null;
+    if (!udef || udef.hidden) return null;
     return readyBuildings.find(b => {
       const bdef = this.data.buildings?.[b.kind];
       return (bdef?.produces_units || []).includes(kind) || (!!bdef?.produces_category && bdef.produces_category === udef.category);
@@ -1037,7 +1039,7 @@ export class UI {
 
   firstProducerKindForUnit(kind) {
     const udef = this.data.units?.[kind];
-    if (!udef) return null;
+    if (!udef || udef.hidden) return null;
     for (const [bkind, bdef] of Object.entries(this.data.buildings || {})) {
       if ((bdef.produces_units || []).includes(kind) || (!!bdef.produces_category && bdef.produces_category === udef.category)) return bkind;
     }
@@ -1061,9 +1063,12 @@ export class UI {
       .filter(e => e.etype === 'building' && e.owner === owner && !e.dead && (e.buildProgress ?? 1) >= 1);
     // Kosten-Label inkl. Erde/Baumaterial; Verfügbarkeit prüft beide Ressourcen.
     const costHtml = (cost) => {
-      const parts = [];
-      for (const k of ['ore', 'materials', 'ore', 'water', 'oil', 'fuel']) if (cost[k]) parts.push(`<span class="costitem">${resIcon(k, 'costicon')}${cost[k]}</span>`);
-      return parts.length ? parts.join(' ') : `<span class="costitem">${resIcon('ore', 'costicon')}0</span>`;
+      const parts = RES_ORDER.filter(k => cost?.[k])
+        .map(k => `<span class="costitem cost-${k}" style="color:${RES_COLOR[k] || '#eaf6ff'}">${resIcon(k, 'costicon')}${cost[k]}</span>`);
+      const cls = parts.length > 1 ? ' multi' : '';
+      return parts.length
+        ? `<span class="costlist${cls}">${parts.join('')}</span>`
+        : `<span class="costlist"><span class="costitem cost-ore" style="color:${RES_COLOR.ore}">${resIcon('ore', 'costicon')}0</span></span>`;
     };
     const costText = (cost) => Object.entries(cost || {})
       .filter(([, v]) => v)
@@ -1088,14 +1093,13 @@ export class UI {
       + `</button>`;
     const canPay = (cost) => (me.res?.ore ?? 0) >= (cost.ore || 0)
       && (me.res?.materials ?? 0) >= (cost.materials || 0)
-      && (me.res?.ore ?? 0) >= (cost.ore || 0)
       && (me.res?.oil ?? 0) >= (cost.oil || 0)
       && (me.res?.water ?? 0) >= (cost.water || 0)
       && (me.res?.fuel ?? 0) >= (cost.fuel || 0);
     if (!BUILD_TABS.some(([id]) => id === this.buildTab)) this.buildTab = 'terrain';
     const buildButtonHtml = (kind) => {
       const def = this.data.buildings[kind];
-      if (!def) return '';
+      if (!def || def.hidden) return '';
       const armed = this.input.buildMode === kind;
       return buttonHtml({
         cls: armed ? 'armed' : '',

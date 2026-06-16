@@ -181,10 +181,8 @@ export function stepConstruction(world) {
         const t = world.terrain;
         if (!inBounds(t, j.tx, j.ty)) { finishJob(world, jobs, j, w); continue; }
         const stepAmt = Math.min(TERRA_JOB_RATE * DT, TERRA_JOB_DELTA - Math.abs(j.applied));
-        applyHeightDelta(t, tIdx(t, j.tx, j.ty), stepAmt * j.dir, true);
         j.applied += stepAmt * j.dir;
         world.events.push({ type: 'dig', x: w.x, y: w.y, owner: w.owner });
-        wakeWaterAround(t, j.tx, j.ty, 1);  // Wasser reagiert sofort (Graben läuft voll, Wall staut)
         if (Math.abs(j.applied) >= TERRA_JOB_DELTA - 1e-6) finishJob(world, jobs, j, w);
       } else if (!w.moveTarget) setMoveGoal(world, w, jx, jy);
     } else if (w.order.type === 'haul_pile') {
@@ -196,6 +194,11 @@ export function stepConstruction(world) {
 function finishJob(world, jobs, j, worker) {
   jobs.splice(jobs.indexOf(j), 1);
   worker.order = { type: 'idle' };
+  const t = world.terrain;
+  if (inBounds(t, j.tx, j.ty)) {
+    applyHeightDelta(t, tIdx(t, j.tx, j.ty), TERRA_JOB_DELTA * j.dir, true);
+    wakeWaterAround(t, j.tx, j.ty, 1);  // Erst der fertige Auftrag beeinflusst Wasser, Pathing und Kollision.
+  }
   // Abgraben fördert Erde (Baumaterial) zutage.
   if (j.dir < 0) {
     fillPile(world, j.earthPileId, TERRA_LOWER_YIELD);

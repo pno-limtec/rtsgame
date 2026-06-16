@@ -202,6 +202,7 @@
   },
   "harvester": {
     "label": "Erz-LKW",
+    "hidden": true,
     "category": "vehicle",
     "domain": "land",
     "armor": "heavy",
@@ -244,28 +245,31 @@
     "upkeep": {
       "fuel": 0.2
     },
-    "desc": "Allgemeiner Lastwagen für Baustellen-, Erd- und Erzlogistik. Ergänzt Bagger und Erz-LKW in der Rohstoffkette."
+    "desc": "Allgemeiner Lastwagen für Baustellen-, Erd- und Erzlogistik. Er holt Erzhaufen und Aushub ab."
   },
   "tractor": {
-    "label": "Traktor",
+    "label": "Bergefahrzeug",
     "category": "vehicle",
-    "domain": "land",
+    "domain": "amphibious",
     "armor": "light",
-    "hp": 260,
-    "speed": 3.2,
-    "sight": 6,
+    "hp": 340,
+    "speed": 3.1,
+    "sight": 7,
     "cost": {
-      "ore": 350,
-      "fuel": 15
+      "ore": 420,
+      "fuel": 20
     },
-    "buildTime": 8,
+    "buildTime": 9,
     "abilities": [
-      "tow"
+      "tow",
+      "transport"
     ],
+    "capacity": 10,
+    "maxSlope": 0.24,
     "upkeep": {
-      "fuel": 0.25
+      "fuel": 0.35
     },
-    "desc": "Bergungsfahrzeug. Zieht verlassene Fahrzeuge aus Matsch, Wasser und Hangblockaden; danach gehören sie dem Besitzer des Traktors."
+    "desc": "Schwer geländegängiges Bergefahrzeug. Transportiert bis zu 10 Einheiten, fährt durch Wasser und zieht verlassene Fahrzeuge aus Matsch, Wasser und Hangblockaden."
   },
   "recon_drone": {
     "label": "Aufklärungsdrohne",

@@ -15,7 +15,7 @@ async function boot() {
   const audio = new Audio();
   const rawCmd = net.cmd.bind(net);
   const INFANTRY = new Set(['rifleman', 'at_soldier', 'engineer']);
-  const WORK_VEHICLES = new Set(['builder', 'truck', 'harvester', 'tractor']);
+  const WORK_VEHICLES = new Set(['builder', 'truck', 'tractor']);
   net.cmd = (cmd) => {
     if (cmd.type === 'move' || cmd.type === 'attack' || cmd.type === 'load' || cmd.type === 'unload') {
       const ids = new Set(cmd.units || []);

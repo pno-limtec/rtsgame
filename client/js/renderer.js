@@ -87,9 +87,10 @@ const SKY_RAIN = new THREE.Color(0x5d6b78);
 const SKY_DROUGHT = new THREE.Color(0xd2b77a);
 const WEATHER_FOG_DAY = new THREE.Color(0x9faab0);
 const WEATHER_FOG_NIGHT = new THREE.Color(0x111821);
-const WATER_KINDS = new Set(['patrol_boat', 'destroyer', 'amphib_transport', 'sea_builder', 'submarine', 'underwater_drone']);
+const WATER_KINDS = new Set(['patrol_boat', 'destroyer', 'amphib_transport', 'sea_builder', 'submarine', 'underwater_drone', 'tractor']);
 // Wasserbauten schwimmen auf der Oberfläche (Werft, Pumpwerk) statt auf dem Seegrund zu stehen.
 const WATER_BUILDINGS = new Set(['shipyard', 'water_pump', 'pontoon']);
+const GROUND_WIREFRAME_BUILD_KINDS = new Set(['road', 'pipe', 'bridge', 'pontoon', 'tunnel', 'wall', 'trench', 'dam', 'levee']);
 const SURFACE_SHIP_KINDS = new Set(['patrol_boat', 'destroyer', 'amphib_transport', 'sea_builder']);
 // Bauten, die ans Pipeline-Netz andocken (für die optische Rohrverbindung).
 const PIPE_CONNECT = new Set(['pipe', 'water_pump', 'water_tower', 'oil_derrick', 'oil_depot']);
@@ -291,6 +292,9 @@ export class Renderer {
     this._terraformDragPreview = [];
     this._terraformPreviewSig = '';
     this.terraformPreviewMesh = null;
+    this._terraLiveHeights = new Map();
+    this._terraPreviewDeltas = new Map();
+    this._terraVisualIdx = new Set();
     this.oreMats = null;
     this.oreMeshes = [];
     this.oilMesh = null;
@@ -440,6 +444,9 @@ export class Renderer {
     this._terraformJobPreview = [];
     this._terraformDragPreview = [];
     this._terraformPreviewSig = '';
+    this._terraLiveHeights?.clear?.();
+    this._terraPreviewDeltas?.clear?.();
+    this._terraVisualIdx?.clear?.();
     for (const mist of this._fowEnemyMist.values()) remove(mist);
     this._fowEnemyMist.clear();
     for (const obj of [
@@ -519,7 +526,7 @@ export class Renderer {
   buildTerrain(init) {
     this.mapW = init.map.w; this.mapH = init.map.h;
     const { w, h, height, type } = { w: init.map.w, h: init.map.h, height: init.terrain.height, type: init.terrain.type };
-    this.height = height; this.terrainType = type;
+    this.height = Float64Array.from(height); this.terrainType = type;
     this.coverMap = init.terrain.cover || null;   // Wald-Deckung je Zelle (für Wald-Tarnung der Infanterie)
     this.treeCells = new Map();
     this.treeFallen = new Set();
@@ -527,8 +534,11 @@ export class Renderer {
     this._treeAnim = null;
     // Unverfälschte Ausgangshöhen behalten: Terraforming-Deltas (snap.terra) werden darauf angewandt
     // und beim Verschwinden eines Deltas (Wall zerstört, Graben zu) exakt zurückgesetzt.
-    this.height0 = Float64Array.from(height);
+    this.height0 = Float64Array.from(this.height);
     this._terraIdx = new Set();
+    this._terraLiveHeights = new Map();
+    this._terraPreviewDeltas = new Map();
+    this._terraVisualIdx = new Set();
     const waterLevel = init.terrain.seaLevel ?? 0.32;
     this.seaLevel = waterLevel;
     this._seaMask = this._buildSeaMask(height, type, waterLevel);
@@ -2614,6 +2624,33 @@ export class Renderer {
     return this._pipeBuildMaterial;
   }
 
+  _makeGroundBuildWire(size = 1) {
+    const half = Math.max(0.36, size * TILE * 0.44);
+    const inner = half * 0.52;
+    const y = 0.08;
+    const pts = [
+      -half, y, -half, half, y, -half,
+      half, y, -half, half, y, half,
+      half, y, half, -half, y, half,
+      -half, y, half, -half, y, -half,
+      -inner, y, 0, inner, y, 0,
+      0, y, -inner, 0, y, inner,
+    ];
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(pts, 3));
+    const mat = new THREE.LineBasicMaterial({
+      color: 0x44bcff,
+      transparent: true,
+      opacity: 0.86,
+      depthWrite: false,
+      depthTest: false,
+    });
+    const line = new THREE.LineSegments(geo, mat);
+    line.renderOrder = 8;
+    line.visible = false;
+    return line;
+  }
+
   _makeRibbonGeometry(cells, opts = {}) {
     const width = opts.width ?? TILE * 0.72;
     const offset = opts.offset ?? 0.08;
@@ -3100,39 +3137,68 @@ export class Renderer {
     const sig = delta ? delta.length + ':' + (delta.length ? delta[delta.length - 1] : 0) : '0';
     if (sig === this._terraSig) return;       // unverändert → kein teures Normalen-Update
     this._terraSig = sig;
-    const pos = this.terrainMesh.geometry.attributes.position;
-    const fowPos = this.fowMesh?.geometry.attributes.position;
     // Neue Delta-Menge aufbauen; Zellen, deren Delta verschwunden ist (Wall zerstört, Graben
     // verfüllt), exakt auf die Ausgangshöhe zurücksetzen — vorher blieben sie fälschlich verformt.
+    const prev = new Set(this._terraIdx || []);
     const cur = new Set();
     if (delta) for (let n = 0; n < delta.length; n += 2) {
       const idx = delta[n], hh = delta[n + 1] / 1000;
       cur.add(idx);
-      this.height[idx] = hh;                  // lokale Höhenkarte mitführen (Picking/heightAt/Wasser)
-      pos.setY(idx, hh * HEIGHT_SCALE);
-      if (fowPos) fowPos.setY(idx, hh * HEIGHT_SCALE + 0.32);
+      this._terraLiveHeights.set(idx, hh);
     }
-    for (const idx of this._terraIdx) {
-      if (cur.has(idx)) continue;
-      this.height[idx] = this.height0[idx];
-      pos.setY(idx, this.height0[idx] * HEIGHT_SCALE);
-      if (fowPos) fowPos.setY(idx, this.height0[idx] * HEIGHT_SCALE + 0.32);
+    for (const idx of prev) {
+      if (!cur.has(idx)) this._terraLiveHeights.delete(idx);
     }
     this._terraIdx = cur;
-    if (this.waterDepth) {
-      this._refreshFloodVisualMask(true);
-      this._rebuildWaterMesh();
-      this._refreshWetGroundOverlay();
-      this._refreshFloodOverlay();
-    }
-    if (this.oilMesh) this._refreshOilOverlay();
-    pos.needsUpdate = true;
-    if (fowPos) { fowPos.needsUpdate = true; this.fowMesh.geometry.computeVertexNormals(); }
-    this.terrainMesh.geometry.computeVertexNormals();
+    const touch = new Set([...prev, ...cur, ...(this._terraVisualIdx || [])]);
+    this._applyTerrainVisualHeights(touch, true);
     if ((this._terraformJobPreview?.length || 0) + (this._terraformDragPreview?.length || 0) > 0) {
       this._terraformPreviewSig = '';
       this._updateTerraformPreviewMesh();
     }
+  }
+
+  _liveTerrainHeight(idx) {
+    return this._terraLiveHeights?.get(idx) ?? this.height0?.[idx] ?? this.height?.[idx] ?? 0;
+  }
+
+  _visualTerrainHeight(idx) {
+    const base = this._liveTerrainHeight(idx);
+    const delta = this._terraPreviewDeltas?.get(idx) || 0;
+    return Math.max(TERRA_PREVIEW_MIN_HEIGHT, Math.min(TERRA_PREVIEW_MAX_HEIGHT, base + delta));
+  }
+
+  _setTerraformPreviewDeltas(deltas) {
+    const prev = this._terraPreviewDeltas || new Map();
+    const touch = new Set([...prev.keys(), ...deltas.keys()]);
+    this._terraPreviewDeltas = deltas;
+    this._terraVisualIdx = new Set(deltas.keys());
+    this._applyTerrainVisualHeights(touch, false);
+  }
+
+  _applyTerrainVisualHeights(indices, refreshWater = false) {
+    if (!this.terrainMesh || !this.height || !indices || !indices.size) return;
+    const pos = this.terrainMesh.geometry.attributes.position;
+    const fowPos = this.fowMesh?.geometry.attributes.position;
+    for (const idx of indices) {
+      if (idx < 0 || idx >= this.height.length) continue;
+      const h = this._visualTerrainHeight(idx);
+      this.height[idx] = h;
+      pos.setY(idx, h * HEIGHT_SCALE);
+      if (fowPos) fowPos.setY(idx, h * HEIGHT_SCALE + 0.32);
+    }
+    if (this.waterDepth) {
+      if (refreshWater) {
+        this._refreshFloodVisualMask(true);
+        this._rebuildWaterMesh();
+        this._refreshWetGroundOverlay();
+        this._refreshFloodOverlay();
+      }
+    }
+    pos.needsUpdate = true;
+    if (fowPos) { fowPos.needsUpdate = true; this.fowMesh.geometry.computeVertexNormals(); }
+    this.terrainMesh.geometry.computeVertexNormals();
+    if (refreshWater && this.oilMesh) this._refreshOilOverlay();
     this._markShadowsDirty(false);
   }
 
@@ -3472,7 +3538,7 @@ export class Renderer {
           for (const wm of g.userData.winMeshes) wm.material = e.powered ? this.winMat : this.winOffMat;
         }
         if (!g.userData.noLamp) {
-          this._lampSpots.push({ x: e.x, z: e.y, y, on: e.powered !== false && e.buildProgress >= 1, disco: e.kind === 'hq' });
+          this._lampSpots.push({ x: e.x, z: e.y, y, on: e.powered !== false && e.buildProgress >= 1, disco: e.kind === 'hq', spotlight: e.kind === 'spotlight' });
         }
         // Beschädigte Gebäude brennen: ab <55% HP Rauchsäule, ab <30% züngeln Flammen.
         if (e.buildProgress >= 1 && e.hp < e.maxHp * 0.55 && this._canSpawnEffect(3) && Math.random() < 0.12) {
@@ -3668,10 +3734,15 @@ export class Renderer {
         g.userData.bar.visible = showHp;
         if (g.userData.barBack) g.userData.barBack.visible = showHp;
       }
-      // Pipelines im Bau NICHT als klotziges Baugerüst zeigen — das wirkt wie einzelne Blöcke. Stattdessen
-      // bleibt das (ausgerichtete) Rohrsegment sichtbar und wird blau eingefärbt → durchgehendes blaues Rohr.
-      if (g.userData.build && e.etype === 'building') g.userData.build.visible = e.buildProgress < 1 && e.kind !== 'pipe' && e.kind !== 'bridge';
-      if (e.kind === 'pipe' && g.userData.body && !g.userData._pipeTinted) {
+      // Lineare Infrastruktur im Bau bleibt ein flaches blaues Wireframe auf dem Boden.
+      const groundWireBuild = e.etype === 'building' && g.userData.groundBuildWire && e.buildProgress < 1;
+      if (g.userData.build && e.etype === 'building') {
+        g.userData.build.visible = e.buildProgress < 1;
+        if (g.userData.groundBuildWire && g.userData.build.material) {
+          g.userData.build.material.opacity = 0.62 + 0.24 * Math.sin(this.time * 5 + e.id) ** 2;
+        }
+      }
+      if (e.kind === 'pipe' && g.userData.body && !g.userData._pipeTinted && !g.userData.groundBuildWire) {
         const building = e.buildProgress < 1;
         g.userData.body.traverse?.((o) => {
           if (!o.isMesh || !o.material) return;
@@ -3682,7 +3753,9 @@ export class Renderer {
       }
       if (e.etype === 'building' && g.userData.body) {
         const p = Math.max(0.03, Math.min(1, e.buildProgress ?? 1));
-        if (e.kind === 'bridge') {
+        if (groundWireBuild) {
+          g.userData.body.visible = false;
+        } else if (e.kind === 'bridge') {
           g.userData.body.visible = false;
           if (g.userData.build) g.userData.build.visible = false;
         } else if (p < 1) {
@@ -3875,7 +3948,7 @@ export class Renderer {
     // Seitenverhältnis einrechnen, damit auch breite Modelle ganz hineinpassen), mit etwas Rand.
     const fov = 36 * Math.PI / 180;
     const fitH = (maxDim * 0.5) / Math.tan(fov / 2);
-    const dist = Math.max(fitH, fitH / Math.max(1, camera.aspect)) * 1.12;
+    const dist = Math.max(fitH, fitH / Math.max(1, camera.aspect)) * 0.96;
     const dir = new THREE.Vector3(0.55, 0.42, 1).normalize();
     camera.position.copy(ctr).addScaledVector(dir, dist);
     camera.lookAt(ctr);
@@ -3959,9 +4032,8 @@ export class Renderer {
     const live = new Set();
     const terraPreview = [];
     for (const j of jobs || []) {
-      const [id, , tx, ty, dir, px, py, appliedRaw = 0] = j;
-      const remaining = Math.max(0, TERRA_PREVIEW_DELTA - Math.abs((appliedRaw || 0) / 1000));
-      if (remaining > 0.0005) terraPreview.push({ tx, ty, dir: dir > 0 ? 1 : -1, amount: remaining });
+      const [id, , tx, ty, dir, px, py] = j;
+      terraPreview.push({ tx, ty, dir: dir > 0 ? 1 : -1, amount: TERRA_PREVIEW_DELTA });
       if (px >= 0 && py >= 0) {
         const pkey = 'p' + id; live.add(pkey);
         let pile = this.jobGhosts.get(pkey);
@@ -4353,6 +4425,7 @@ export class Renderer {
           g.userData.spinSpeed = body.userData.spinSpeed || 1.2;
         }
         if (body.userData.anims) g.userData.buildingAnims = body.userData.anims;
+        if (body.userData.prodDoors) g.userData.productionDoors = body.userData.prodDoors;
         if (body.userData.smokeStacks) g.userData.smokeStacks = body.userData.smokeStacks;
         if (body.userData.turretHead) g.userData.turretHead = body.userData.turretHead;
       }
@@ -4381,10 +4454,14 @@ export class Renderer {
       body.traverse?.((o) => { if (o.isMesh && o.material === this.winMat) winMeshes.push(o); });
       g.userData.winMeshes = winMeshes;
       g.userData.poweredState = true;
-      // Bau-Indikator (Gerüst)
-      const bm = new THREE.Mesh(new THREE.BoxGeometry(sz * 1.05, low ? 1.4 : hgt * 1.05, sz * 1.05),
-        new THREE.MeshBasicMaterial({ color: 0x5cc7ff, transparent: true, opacity: 0.55, wireframe: true }));
-      bm.position.y = low ? 0.7 : hgt / 2; bm.visible = false; g.add(bm); g.userData.build = bm;
+      // Bau-Indikator: lineare Infrastruktur bleibt bis zur Fertigstellung nur eine flache Bodenlinie.
+      const bm = GROUND_WIREFRAME_BUILD_KINDS.has(e.kind)
+        ? this._makeGroundBuildWire(e.size)
+        : new THREE.Mesh(new THREE.BoxGeometry(sz * 1.05, low ? 1.4 : hgt * 1.05, sz * 1.05),
+          new THREE.MeshBasicMaterial({ color: 0x5cc7ff, transparent: true, opacity: 0.55, wireframe: true }));
+      if (!GROUND_WIREFRAME_BUILD_KINDS.has(e.kind)) bm.position.y = low ? 0.7 : hgt / 2;
+      bm.visible = false; g.add(bm); g.userData.build = bm;
+      g.userData.groundBuildWire = GROUND_WIREFRAME_BUILD_KINDS.has(e.kind);
       addRing(g, e.size * (low ? 1.1 : 1.4), col);
     } else {
       // Echtes CC0-Modell, falls geladen; sonst prozedurales Platzhalter-Mesh.
@@ -4610,6 +4687,22 @@ export class Renderer {
         body.add(artTurret); g.userData.turretMesh = artTurret;
         body.add(boxMesh(1.9, 0.3, 0.5, dark, 0, 0.2, -1.3));               // Erdsporn
         g.userData.lift = 0;
+      } else if (e.kind === 'gunship') {
+        // Kampfhubschrauber: länglicher Rumpf, Heckausleger, Waffenpylone und große Rotoren.
+        body = new THREE.Group();
+        const fus = new THREE.Mesh(new THREE.CapsuleGeometry(0.42, 1.9, 4, 10), m);
+        fus.rotation.x = Math.PI / 2; fus.position.set(0, 0.15, 0.25); body.add(fus);
+        body.add(boxMesh(0.7, 0.42, 0.72, this.envMats.glass, 0, 0.32, 0.95));
+        body.add(boxMesh(0.18, 0.18, 1.65, dark, 0, 0.18, -1.32));
+        body.add(boxMesh(1.95, 0.12, 0.26, dark, 0, 0.06, 0.15));
+        for (const sx of [-0.82, 0.82]) {
+          const pod = cylMesh(0.08, 0.1, 0.82, metal, sx, -0.05, 0.18, 7);
+          pod.rotation.x = Math.PI / 2; body.add(pod);
+        }
+        body.add(boxMesh(0.75, 0.08, 0.34, dark, 0, 0.24, -2.05));
+        body.add(boxMesh(0.08, 0.62, 0.3, dark, 0, 0.45, -2.03));
+        g.userData.lift = 9;
+        this._addHeliRotors(g, body);
       } else if (e.kind === 'bomber' || e.kind === 'transport_air' || e.kind === 'cloud_seeder') {
         // Starrflügler: Rumpf, Tragflächen, Leitwerk, Triebwerksgondeln.
         body = new THREE.Group();
@@ -4665,11 +4758,54 @@ export class Renderer {
         body.add(cylMesh(0.04, 0.04, 0.8, metal, 0.1, 1.5, 0.1, 6));        // Periskop
         body.add(boxMesh(1.6, 0.08, 0.5, dark, 0, 0.3, -1.2));              // Heckruder
         g.userData.lift = 0;
-      } else if (['recon_drone', 'gunship', 'bomber', 'cloud_seeder', 'transport_air'].includes(e.kind)) {
+      } else if (['recon_drone', 'bomber', 'cloud_seeder', 'transport_air'].includes(e.kind)) {
         body = new THREE.Mesh(new THREE.ConeGeometry(0.8, 2.2, 6), m); body.rotation.x = Math.PI / 2; body.position.y = 0; g.userData.lift = 9;
-        if (e.kind === 'gunship') this._addHeliRotors(g, body);
       } else if (['patrol_boat', 'destroyer', 'amphib_transport', 'sea_builder'].includes(e.kind)) {
-        body = new THREE.Mesh(new THREE.BoxGeometry(1.4, 0.9, 3.2), m); body.position.y = 0.4; g.userData.lift = 0;
+        body = new THREE.Group();
+        if (e.kind === 'patrol_boat') {
+          body.add(boxMesh(1.0, 0.34, 2.8, m, 0, 0.34, 0));
+          body.add(boxMesh(0.72, 0.42, 0.72, this.envMats.glass, 0, 0.78, 0.35));
+          const gun = new THREE.Group(); gun.position.set(0, 0.98, 0.98);
+          gun.add(cylMesh(0.12, 0.16, 0.16, dark, 0, 0, 0, 8));
+          const barrel = cylMesh(0.035, 0.045, 0.72, metal, 0, 0.05, 0.4, 6);
+          barrel.rotation.x = Math.PI / 2; gun.add(barrel);
+          body.add(gun); g.userData.turretMesh = gun;
+          body.add(cylMesh(0.025, 0.025, 0.95, metal, -0.32, 1.22, -0.18, 5));
+        } else if (e.kind === 'destroyer') {
+          body.add(boxMesh(1.55, 0.46, 4.35, m, 0, 0.38, 0));
+          body.add(boxMesh(1.15, 0.55, 1.1, dark, 0, 0.92, -0.1));
+          body.add(boxMesh(0.86, 0.55, 0.72, this.envMats.glass, 0, 1.28, 0.42));
+          for (const z of [1.55, -1.55]) {
+            const turret = new THREE.Group(); turret.position.set(0, 1.08, z);
+            turret.add(cylMesh(0.22, 0.28, 0.22, dark, 0, 0, 0, 9));
+            const barrel = cylMesh(0.055, 0.075, 1.1, metal, 0, 0.05, 0.58, 8);
+            barrel.rotation.x = Math.PI / 2 - 0.12; turret.add(barrel);
+            body.add(turret);
+            if (z > 0) g.userData.turretMesh = turret;
+          }
+          body.add(cylMesh(0.08, 0.08, 1.15, metal, -0.42, 1.55, -0.35, 6));
+        } else if (e.kind === 'amphib_transport') {
+          body.add(boxMesh(1.7, 0.48, 3.35, m, 0, 0.38, 0));
+          body.add(boxMesh(1.28, 0.58, 1.18, dark, 0, 0.9, -0.45));
+          const ramp = boxMesh(1.48, 0.1, 0.72, this.envMats.hazard, 0, 0.42, 1.88);
+          ramp.rotation.x = -0.28; body.add(ramp);
+          body.add(boxMesh(0.72, 0.34, 0.08, this.envMats.glass, 0, 1.04, 0.18));
+          for (const sx of [-0.86, 0.86]) {
+            const pontoon = cylMesh(0.16, 0.16, 2.6, dark, sx, 0.28, -0.1, 10);
+            pontoon.rotation.x = Math.PI / 2; body.add(pontoon);
+          }
+        } else {
+          body.add(boxMesh(1.35, 0.42, 3.25, m, 0, 0.36, 0));
+          body.add(boxMesh(0.9, 0.62, 0.85, this.envMats.glass, -0.18, 0.88, 0.48));
+          const crane = new THREE.Group(); crane.position.set(0.35, 1.05, -0.65);
+          crane.add(cylMesh(0.055, 0.07, 1.25, metal, 0, 0.45, 0, 6));
+          const boom = boxMesh(0.1, 0.1, 1.35, this.envMats.hazard, 0, 1.04, 0.5);
+          boom.rotation.x = -0.72; crane.add(boom);
+          crane.add(cylMesh(0.025, 0.025, 0.62, dark, 0, 0.58, 1.06, 5));
+          body.add(crane);
+          body.add(boxMesh(1.0, 0.16, 0.7, dark, 0, 0.68, -1.3));
+        }
+        g.userData.lift = 0;
       } else { // Fahrzeuge
         body = new THREE.Group();
         body.add(boxMesh(1.8, 0.9, 2.6, m, 0, 0.65, 0));
@@ -4904,10 +5040,43 @@ export class Renderer {
     s.scale.set(sc, sc, sc);
   }
 
+  _updateProductionDoors(g, busy) {
+    const doors = g.userData.productionDoors;
+    if (!doors || !doors.length) return;
+    const pulse = (g.userData.prodPulseUntil || 0) > this.time;
+    const target = (busy || pulse) ? 1 : 0;
+    const alpha = smoothAlpha(this._lastDt, doors[0].speed || 7);
+    g.userData._prodDoorOpen = (g.userData._prodDoorOpen || 0) + (target - (g.userData._prodDoorOpen || 0)) * alpha;
+    const k = Math.max(0, Math.min(1, g.userData._prodDoorOpen));
+    for (const d of doors) {
+      const o = d.obj;
+      if (!o) continue;
+      if (d.mode === 'rollY') {
+        o.position.set(d.baseX, d.baseY + (d.open || 0.7) * k, d.baseZ);
+        const minScale = d.minScale ?? 0.18;
+        o.scale.set(d.baseSX, d.baseSY * (1 - (1 - minScale) * k), d.baseSZ);
+      } else if (d.mode === 'swingY') {
+        o.position.set(d.baseX, d.baseY, d.baseZ);
+        o.rotation.set(d.baseRX, d.baseRY + (d.open || -1.2) * k, d.baseRZ);
+      }
+    }
+  }
+
+  _pulseProductionDoorNear(x, z) {
+    let best = null, bestD2 = Infinity;
+    for (const g of this.meshes.values()) {
+      if (!g.userData.productionDoors?.length) continue;
+      const d2 = (g.position.x - x) ** 2 + (g.position.z - z) ** 2;
+      if (d2 < bestD2) { best = g; bestD2 = d2; }
+    }
+    if (best && bestD2 < 10 * 10) best.userData.prodPulseUntil = Math.max(best.userData.prodPulseUntil || 0, this.time + 1.4);
+  }
+
   // Sichtbare Produktion: solange ein Gebäude eine Warteschlange hat, sprühen Schweißfunken und ein
   // Lichtschein pulsiert über dem Dach — man sieht, dass drin gearbeitet wird.
   _updateBuildingProduction(g, e) {
     const busy = (e.queue || 0) > 0 && (e.buildProgress ?? 1) >= 1 && e.powered !== false;
+    this._updateProductionDoors(g, busy);
     let glow = g.userData.prodGlow;
     if (busy && !glow) {
       glow = new THREE.Sprite(new THREE.SpriteMaterial({ map: this.tex.puff, color: 0x8fd8ff, transparent: true, opacity: 0, depthWrite: false }));
@@ -5567,8 +5736,16 @@ export class Renderer {
   // Bau-Linienvorschau (Wall/Graben/Straße/Leitung/Damm per Start→Endpunkt ziehen).
   showBuildLine(cells) {
     if (!this.lineGhost) {
-      const geo = new THREE.BoxGeometry(TILE * 0.88, 0.7, TILE * 0.88);
-      const mat = new THREE.MeshBasicMaterial({ color: 0x6cd2ff, transparent: true, opacity: 0.35, depthWrite: false });
+      const geo = new THREE.PlaneGeometry(TILE * 0.88, TILE * 0.88);
+      geo.rotateX(-Math.PI / 2);
+      const mat = new THREE.MeshBasicMaterial({
+        color: 0x6cd2ff,
+        transparent: true,
+        opacity: 0.82,
+        depthWrite: false,
+        wireframe: true,
+        side: THREE.DoubleSide,
+      });
       this.lineGhost = new THREE.InstancedMesh(geo, mat, 256);
       this.lineGhost.renderOrder = 5;
       this.lineGhost.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
@@ -5579,7 +5756,7 @@ export class Renderer {
     for (const [tx, ty] of cells) {
       if (k >= 256) break;
       const wx = (tx + 0.5) * TILE, wz = (ty + 0.5) * TILE;
-      d.position.set(wx, this.heightAt(wx, wz) + 0.4, wz);
+      d.position.set(wx, this.heightAt(wx, wz) + 0.09, wz);
       d.updateMatrix();
       this.lineGhost.setMatrixAt(k++, d.matrix);
     }
@@ -5606,9 +5783,10 @@ export class Renderer {
     const mat = new THREE.MeshBasicMaterial({
       color: 0x35b7ff,
       transparent: true,
-      opacity: 0.42,
+      opacity: 0.78,
       depthWrite: false,
       side: THREE.DoubleSide,
+      wireframe: true,
       polygonOffset: true,
       polygonOffsetFactor: -1,
       polygonOffsetUnits: -1,
@@ -5623,6 +5801,7 @@ export class Renderer {
   _updateTerraformPreviewMesh() {
     const items = [...(this._terraformJobPreview || []), ...(this._terraformDragPreview || [])];
     if (!items.length || !this.height || !this.mapW || !this.mapH) {
+      this._setTerraformPreviewDeltas(new Map());
       if (this.terraformPreviewMesh) this.terraformPreviewMesh.visible = false;
       this._terraformPreviewSig = '';
       return;
@@ -5636,13 +5815,15 @@ export class Renderer {
       deltas.set(idx, (deltas.get(idx) || 0) + (item.dir > 0 ? 1 : -1) * amount);
     }
     if (!deltas.size) {
+      this._setTerraformPreviewDeltas(new Map());
       if (this.terraformPreviewMesh) this.terraformPreviewMesh.visible = false;
       this._terraformPreviewSig = '';
       return;
     }
+    this._setTerraformPreviewDeltas(deltas);
     const sig = [...deltas.entries()]
       .sort((a, b) => a[0] - b[0])
-      .map(([idx, delta]) => `${idx}:${delta.toFixed(4)}:${this.height[idx].toFixed(4)}`)
+      .map(([idx, delta]) => `${idx}:${delta.toFixed(4)}:${this._liveTerrainHeight(idx).toFixed(4)}`)
       .join('|');
     const mesh = this._ensureTerraformPreviewMesh();
     if (sig === this._terraformPreviewSig) {
@@ -5662,7 +5843,7 @@ export class Renderer {
       const gx = idx % this.mapW, gy = (idx / this.mapW) | 0;
       const targetH = Math.max(
         TERRA_PREVIEW_MIN_HEIGHT,
-        Math.min(TERRA_PREVIEW_MAX_HEIGHT, this.height[idx] + (deltas.get(idx) || 0)),
+        Math.min(TERRA_PREVIEW_MAX_HEIGHT, this._liveTerrainHeight(idx) + (deltas.get(idx) || 0)),
       );
       verts.push(gx * TILE, targetH * HEIGHT_SCALE + 0.04, gy * TILE);
     };
@@ -5769,6 +5950,11 @@ export class Renderer {
   // Line-linewidth, daher additive Sprites entlang der Spur), Lenkwaffen/Raketen = kühl-weißblau + längere
   // Standzeit. `kind` ist der Waffenname aus dem 'fire'-Event (wie in spawnShotParticles).
   spawnTracer(x1, y1, z1, x2, y2, z2, kind = '') {
+    const ballistic = /missile|launcher|rocket|sam|at_launcher|micro_missile/.test(kind) && !/torpedo/.test(kind);
+    if (ballistic) {
+      this.spawnBallisticRocket(x1, y1, z1, x2, y2, z2, kind);
+      return;
+    }
     const missile = /missile|launcher|rocket|torpedo|sam/.test(kind);
     const heavy = /cannon|naval_gun|artillery/.test(kind);
     const color = missile ? 0xbfe6ff : heavy ? 0xff9a30 : 0xffe08a;
@@ -5790,6 +5976,32 @@ export class Renderer {
       this._sprite(color, x1 + (x2 - x1) * t, ay1 + (ay2 - ay1) * t, z1 + (z2 - z1) * t,
         beadSize, max, { additive: true, opacity: 0.85 });
     }
+  }
+
+  spawnBallisticRocket(x1, y1, z1, x2, y2, z2, kind = '') {
+    const ay1 = y1 + 1.15, ay2 = y2 + 1.05;
+    const dist = Math.max(1, Math.hypot(x2 - x1, z2 - z1));
+    const group = new THREE.Group();
+    const casing = new THREE.MeshStandardMaterial({ color: 0xd8e8f0, roughness: 0.45, metalness: 0.2 });
+    const hot = new THREE.MeshBasicMaterial({ color: 0xfff0bd });
+    const body = cylMesh(0.055, 0.075, 0.42, casing, 0, 0, 0, 8);
+    body.rotation.x = Math.PI / 2; group.add(body);
+    const nose = cylMesh(0.0, 0.075, 0.16, hot, 0, 0, 0.29, 8);
+    nose.rotation.x = Math.PI / 2; group.add(nose);
+    const flame = new THREE.Mesh(new THREE.ConeGeometry(0.12, 0.38, 8),
+      new THREE.MeshBasicMaterial({ color: 0xff7d2a, transparent: true, opacity: 0.85 }));
+    flame.position.z = -0.34; flame.rotation.x = -Math.PI / 2; group.add(flame);
+    group.position.set(x1, ay1, z1);
+    this.scene.add(group);
+    this._addEffect({
+      mesh: group,
+      life: 0,
+      max: Math.max(0.58, Math.min(1.25, dist / 45)),
+      opacity: 1,
+      ballistic: { sx: x1, sy: ay1, sz: z1, ex: x2, ey: ay2, ez: z2, arc: Math.max(1.2, Math.min(8.5, dist * 0.12)), kind },
+      alwaysVisible: true,
+    });
+    this._sprite(0xfff0b0, x1, ay1, z1, 1.5, 0.1, { additive: true, opacity: 0.95 });
   }
 
   spawnShotParticles(x1, z1, x2, z2, kind = '') {
@@ -5885,6 +6097,7 @@ export class Renderer {
         else if (ev.kind === 'water_pump') this._waterFlowT = this.time;
       } else if (ev.type === 'produced') {
         if (audio && ev.owner === seat) audio.ready_(1);
+        this._pulseProductionDoorNear(ev.x, ev.y);
         this.spawnProduceFx(ev.x, ev.y);
       } else if (ev.type === 'recover') {
         if (audio && ev.owner === seat) audio.ready_(1);
@@ -5982,6 +6195,31 @@ export class Renderer {
         const gx = Math.round(f.mesh.position.x / TILE), gy = Math.round(f.mesh.position.z / TILE);
         if (gx < 1 || gy < 1 || gx >= this.mapW - 1 || gy >= this.mapH - 1 || this._waterInfoAt(f.mesh.position.x, f.mesh.position.z).depth > 0.05) {
           f.life = Math.max(f.life, f.max * 0.85);
+        }
+      } else if (f.ballistic) {
+        const b = f.ballistic;
+        const p = Math.max(0, Math.min(1, t));
+        const ease = p * p * (3 - 2 * p);
+        const x = b.sx + (b.ex - b.sx) * ease;
+        const z = b.sz + (b.ez - b.sz) * ease;
+        const baseY = b.sy + (b.ey - b.sy) * ease;
+        const y = baseY + Math.sin(Math.PI * p) * b.arc;
+        const px = f.mesh.position.x, py = f.mesh.position.y, pz = f.mesh.position.z;
+        f.mesh.position.set(x, y, z);
+        if (Math.hypot(x - px, y - py, z - pz) > 0.001) f.mesh.lookAt(px, py, pz);
+        f.mesh.rotation.z += dt * 11;
+        f.trailCd = (f.trailCd || 0) - dt;
+        if (f.trailCd <= 0 && this._canSpawnEffect(1)) {
+          f.trailCd = this.quality === 'low' ? 0.06 : 0.035;
+          this._sprite(0x9aa7b0, x, y, z, 0.38, 0.45, {
+            grow: 1.4,
+            vy: 0.18,
+            vx: (Math.random() - 0.5) * 0.35,
+            vz: (Math.random() - 0.5) * 0.35,
+            opacity: 0.42,
+            fadeIn: 0.08,
+          });
+          this._sprite(0xffd37a, x, y, z, 0.16, 0.16, { additive: true, opacity: 0.8 });
         }
       } else if (f.mesh.isSprite) {
         if (f.grow) {
@@ -6368,7 +6606,7 @@ export class Renderer {
       this._lightRefreshT = this.perf.lightRefresh;
       this._cachedLampSpots = this._lampSpots.filter(s => s.on && !s.vehicle)
         .map(s => ({ s, d: (s.x - c.x) ** 2 + (s.z - c.z) ** 2 }))
-        .sort((a, b) => a.d - b.d)
+        .sort((a, b) => (a.s.spotlight === b.s.spotlight ? a.d - b.d : a.s.spotlight ? -1 : 1))
         .slice(0, this.lightPool.length);
       this._cachedBeamSpots = this._lampSpots.filter(s => s.on && s.vehicle)
         .map(s => ({ s, d: (s.x - c.x) ** 2 + (s.z - c.z) ** 2 }))
@@ -6386,13 +6624,18 @@ export class Renderer {
         if (i < spots.length) {
           const s = spots[i].s;
           const beat = Math.max(0, Math.min(1, this.musicBeat || 0));
-          const py = s.y + (s.vehicle ? 1.0 : s.disco ? 5.2 : 3.4);
+          const py = s.y + (s.vehicle ? 1.0 : s.disco ? 5.2 : s.spotlight ? 5.8 : 3.4);
           pl.position.set(s.x, py, s.z);
           if (s.disco) {
             pl.color.setHSL((this.time * 0.12 + beat * 0.28) % 1, 0.95, 0.58);
             pl.distance = 42 + beat * 18;
             pl.decay = 1.35;
             pl.intensity = night * (18 + beat * 42);
+          } else if (s.spotlight) {
+            pl.color.setHex(0xfff2b8);
+            pl.distance = 76;
+            pl.decay = 1.28;
+            pl.intensity = night * 46;
           } else {
             pl.color.setHex(0xffd9a0);
             pl.distance = 34;

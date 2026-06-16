@@ -41,7 +41,6 @@ const BUILD_ORDER = [
   // Tagstrom, entlastet das treibstoffhungrige Ölkraftwerk und kam in der regulären Liste (#49,
   // credits>1000) real fast nie vor (Coverage-Ziel C). Wirtschafts-positiv → kein Risiko für den Siegpfad.
   { kind: 'solar_plant', want: (s) => s.solars < 1 && s.powerPlants >= 1 && s.barracks >= 1 },
-  { kind: 'trench',      want: (s) => s.trenches < 1 && s.barracks >= 1 && s.credits > 280 },
   { kind: 'wall',        want: (s) => s.walls < 3 && s.barracks >= 1 && s.credits > 360 },
   { kind: 'refinery',    want: (s) => s.refineries < 2 },
   // 3) Verteidigung & Logistik ausbauen
@@ -52,7 +51,6 @@ const BUILD_ORDER = [
   { kind: 'sam_site',    want: (s) => s.samSites < 1 && s.enemyAir },
   { kind: 'sonar',       want: (s) => s.coastal && s.sonars < 1 && s.shipyards >= 1 && s.enemySubs },
   { kind: 'depot',       want: (s) => s.depots < 1 && s.army.length >= 8 },
-  { kind: 'trench',      want: (s) => s.trenches < 4 && s.barracks >= 1 && s.credits > 500 },
   { kind: 'factory',     want: (s) => s.factories < 2 && s.credits > 1500 },
   { kind: 'power_plant', want: (s) => s.energyRatio < 1 },
   { kind: 'oil_derrick', want: (s) => s.oilDerricks < 2 && s.oilDepots >= 1 && s.credits > 1200 },
@@ -67,11 +65,11 @@ const COVERAGE_BUILD_ORDER = [
   'barracks', 'factory', 'airbase', 'shipyard', 'depot',
   'water_pump', 'pipe', 'oil_derrick', 'solar_plant',
   'mg_turret', 'turret', 'flak_turret', 'sam_site', 'sonar',
-  'road', 'bridge', 'tunnel', 'wall', 'trench', 'dam',
+  'road', 'bridge', 'tunnel', 'wall', 'dam',
 ];
 const COVERAGE_UNIT_ORDER = [
   'builder', 'engineer', 'rifleman', 'at_soldier', 'aa_soldier',
-  'truck', 'harvester', 'tractor', 'scout', 'tank', 'flak_track', 'rocket_launcher', 'artillery',
+  'truck', 'tractor', 'scout', 'tank', 'flak_track', 'rocket_launcher', 'artillery',
   'recon_drone', 'gunship', 'bomber', 'cloud_seeder', 'transport_air',
   'patrol_boat', 'destroyer', 'submarine', 'underwater_drone', 'amphib_transport', 'sea_builder',
 ];
@@ -88,10 +86,9 @@ const AI_ROUTE_MAX_CELLS = 24;             // Straße in EINEM Zug bis hierher l
 const INFRA_KINDS = new Set(['road', 'bridge', 'tunnel', 'pipe']); // zählen nicht als Bau-Throttle
 const AI_ROUTE_PATH_ITER = 30000;
 const AI_CHEAT_STUCK_TICKS = 900;       // 90s ohne Aufbaufortschritt = Deadlock → KI darf cheaten (früh genug, bevor der Director sie aufgibt)
-const AI_SECONDARY_TICKS = 240;         // Sekundärziele (Wasserwall/Fluten) nur alle ~24s einen Schritt → kein Überbau
+const AI_SECONDARY_TICKS = 240;         // Sekundärziele nur alle ~24s einen Schritt → kein Überbau
 const AI_MOAT_RADIUS = 7;               // Wallring-Radius um das HQ
 const AI_MOAT_MAX = 16;                 // Höchstzahl Ring-Wälle (Schutzwall, nicht endlos)
-const AI_FLOOD_CHANNEL_MAX = 10;        // Höchstlänge eines Flutkanals Richtung Feind
 
 export function initAi(player) {
   player.ai = { phase: 'expand', attackTimer: 0, airTimer: 0, lastBuild: 0, waveSize: 5, airWave: 2, navyTimer: 0, navyWave: 2, doctrine: 'combined', doctrineUntil: 0 };
@@ -234,21 +231,13 @@ function manageDeadlockCheat(world, player, s) {
   if (cheated) world.events?.push({ type: 'ai_cheat', player: player.id, x: s.hq?.x || 0, y: s.hq?.y || 0 });
 }
 
-// Sekundärziele jenseits des reinen „Armee bauen und angreifen": ein STABILER Schutzwall (Wasserwall/
-// Deich) um die eigene Basis sowie — unter der Flut-Doktrin — ein Kanalgraben, der Wasser zum Gegner
-// leitet, um dessen Basis zu fluten. Beide Routinen sind streng gegated (nur bei wirtschaftlichem
-// Überschuss bzw. passender Doktrin und nur EIN Schritt pro Kadenz), damit sie das Militär nie aushungern
-// und KI-Partien nicht destabilisieren.
+// Sekundärziel jenseits des reinen „Armee bauen und angreifen": ein STABILER Schutzwall (Wasserwall/
+// Deich) um die eigene Basis. Streng gegated, damit er das Militär nie aushungert.
 function manageSecondaryObjective(world, player, s, applyCommand) {
   if (world.aiCoverageTest || !s.hq) return;
   const a = player.ai;
   if (world.tick - (a._secTick || 0) < AI_SECONDARY_TICKS) return;
   const pressure = world.aiDirector?.pressure || 0;
-  const doc = a.doctrine || 'combined';
-  // Flut-Offensive: nur unter 'flood'-Doktrin und mit etwas Erzpuffer.
-  if (doc === 'flood' && s.credits > 300 && planFloodChannel(world, player, s, applyCommand)) {
-    a._secTick = world.tick; return;
-  }
   // Wasserwall/Schutzring: nur wenn wirtschaftlich bequem (viel Erz übrig), eine stehende Armee da ist
   // und gerade kein Endspieldruck herrscht — reiner Bonus, der das Militär nicht verdrängt.
   if (pressure === 0 && s.credits > 1200 && s.army.length >= 8 && s.walls < AI_MOAT_MAX
@@ -272,36 +261,6 @@ function buildMoatRing(world, player, s, applyCommand) {
     if (existingOrPendingBuilding(world, player.id, 'wall', tx, ty)) continue;
     if (!placeable(world, tx, ty, 1, def, player.id)) continue;
     applyCommand(world, { type: 'build', building: 'wall', tx, ty }, player.id);
-    return true;
-  }
-  return false;
-}
-
-// Flutkanal: vom nächstgelegenen Wasser eine Grabenlinie Richtung Gegner-HQ anstechen — der Graben
-// leitet Wasser (terraform −0.16) bergab, sodass die Wasser-Fluidsimulation die Flut zum Feind trägt.
-// Baut pro Aufruf EIN Grabenstück: das Wasser-nächste noch trockene Tile auf der Linie zum Gegner.
-function planFloodChannel(world, player, s, applyCommand) {
-  const def = world.data.buildings.trench;
-  if (!def || !canAfford(player, effectiveCost(world, player.id, def))) return false;
-  const t = world.terrain;
-  const enemy = pickEnemyTarget(world, player);
-  if (!enemy) return false;
-  const ex = Math.round(enemy.x / TILE - 0.5), ey = Math.round(enemy.y / TILE - 0.5);
-  const src = nearestWaterTile(t, ex, ey, 40);              // Wasserquelle möglichst nah am Feind (Tile-Koord.)
-  if (!src) return false;
-  const [sx, sy] = src;
-  // Von der Quelle aus Schritt für Schritt Richtung Feind das erste trockene, baubare Tile graben.
-  let x = sx, y = sy;
-  for (let k = 0; k < AI_FLOOD_CHANNEL_MAX; k++) {
-    const dx = Math.sign(ex - x), dy = Math.sign(ey - y);
-    if (dx === 0 && dy === 0) break;
-    x += dx; y += dy;
-    if (!inBounds(t, x, y)) break;
-    const i = tIdx(t, x, y);
-    if (t.type[i] === TT.WATER) continue;                    // schon Wasser → weiter Richtung Feind
-    if (existingOrPendingBuilding(world, player.id, 'trench', x, y)) continue;
-    if (!placeable(world, x, y, 1, def, player.id)) continue;
-    applyCommand(world, { type: 'build', building: 'trench', tx: x, ty: y }, player.id);
     return true;
   }
   return false;
@@ -429,7 +388,7 @@ function surveyEconomy(world, player) {
     pumps: count('water_pump'), powerPlants: count('power_plant'), solars: count('solar_plant'),
     walls: count('wall'), trenches: count('trench'), bridges: count('bridge'), pipes: count('pipe'),
     coastal, enemyAir, enemySubs,
-    harvesters: u.filter(e => e.abilities.includes('harvest')).length,
+    trucks: u.filter(e => e.kind === 'truck').length,
     vehicleArmy: u.filter(e => e.category === 'vehicle' && e.weapon).length,
     army: u.filter(e => e.weapon),
     units: u, buildings: b, hq,
@@ -438,21 +397,10 @@ function surveyEconomy(world, player) {
 
 function manageBuild(world, player, s, applyCommand) {
   if (!s.hq) return false;
-  // Harvester-Bootstrap schützen (Anti-Deadlock): steht eine Fabrik UND eine Raffinerie, aber noch GAR
-  // KEINE Erntemaschine und reicht das Erz nicht für die erste (600 + Puffer), dann KEINE diskretionären
-  // Gebäude bauen — sonst versickert sowohl gespartes Erz als auch der Deadlock-Cheat-Zuschuss (800) in
-  // Infrastruktur, die ERSTE Erntemaschine wird NIE bezahlt, es entsteht KEIN Erzeinkommen → die
-  // Wirtschaft verhungert und die Partie friert ein (gemessen seed4000: KBN-Spieler bleibt 0
-  // Erntemaschinen/0 Fahrzeuge, blutet 2000→17 Erz aus). Die Bedingung „Fabrik vorhanden" stellt sicher,
-  // dass die Erntemaschine sofort baubar ist; manageProduction (läuft im selben Tick danach) kauft sie,
-  // sobald das Erz reicht. NUR bis zur ERSTEN Erntemaschine (harvesters<1) → sobald Einkommen fließt,
-  // baut manageBuild normal weiter (Türme bleiben in der Abdeckung, Gebäude-Coverage hält 77%). Gemessen
-  // seed4000: KBN 0→1-2 Fahrzeuge + 2 Erntemaschinen (vorher 0/0, totes Wirtschaftsdeadlock). Eine
-  // breitere Variante (harvesters<2) bringt KBN sogar auf 5 Fahrzeuge, verdrängt aber Türme aus der
-  // 8000-Tick-Coverage (77%→73%) → bewusst die engere, regressionsfreie Schwelle gewählt.
-  if (s.factories >= 1 && s.refineries >= 1 && s.harvesters < 1) {
-    const harvOre = effectiveCost(world, player.id, world.data.units.harvester).ore || 0;
-    if (player.resources.ore < harvOre + 150) return false;
+  // Logistik-Bootstrap schützen: ohne LKW werden Erz- und Erdhaufen nicht zuverlässig abgefahren.
+  if (s.factories >= 1 && s.refineries >= 1 && s.trucks < 1) {
+    const truckOre = effectiveCost(world, player.id, world.data.units.truck).ore || 0;
+    if (player.resources.ore < truckOre + 150) return false;
   }
   const pressure = world.aiDirector?.pressure || 0;
   // Bauthrottling: höchstens 2 Baustellen gleichzeitig und nie dasselbe Gebäude doppelt im Bau.
@@ -936,15 +884,15 @@ function manageProduction(world, player, s, applyCommand) {
     return; // Baunotstand: alles andere wartet
   }
 
-  // Erz-LKW sicherstellen — bei kritischem Mangel hat Wiederaufbau Vorrang vor Armee (ohne Reserve).
-  const wantHarv = Math.min(4, 2 + s.refineries);
-  if (s.harvesters < wantHarv && s.refineries >= 1) {
-    const fac = s.buildings.find(b => b.kind === 'factory' && b.buildProgress >= 1);
-    if (fac && fac.queue.length === 0 && canAfford(player, effectiveCost(world, player.id, world.data.units.harvester)))
-      applyCommand(world, { type: 'produce', building: fac.id, kind: 'harvester' }, player.id);
-    if (s.harvesters < 2 && s.airbases < 1 && s.shipyards < 1) return; // Wirtschaftsnotstand: bis Spezialproduktion steht, Credits sparen
-  }
+  // LKW sicherstellen — bei kritischem Logistikmangel hat Wiederaufbau Vorrang vor Armee (ohne Reserve).
   const trucks = s.units.filter(u => u.kind === 'truck').length;
+  const wantTrucks = Math.min(4, 2 + s.refineries);
+  if (trucks < wantTrucks && s.refineries >= 1) {
+    const fac = s.buildings.find(b => b.kind === 'factory' && b.buildProgress >= 1);
+    if (fac && fac.queue.length === 0 && canAfford(player, effectiveCost(world, player.id, world.data.units.truck)))
+      applyCommand(world, { type: 'produce', building: fac.id, kind: 'truck' }, player.id);
+    if (trucks < 2 && s.airbases < 1 && s.shipyards < 1) return; // Wirtschaftsnotstand: bis Spezialproduktion steht, Credits sparen
+  }
   if (trucks < 2 && s.factories >= 1) {
     const fac = s.buildings.find(b => b.kind === 'factory' && b.buildProgress >= 1);
     if (fac && fac.queue.length === 0 && canAfford(player, effectiveCost(world, player.id, world.data.units.truck)))
@@ -1100,8 +1048,8 @@ function manageDefensiveCoverage(world, player, s, applyCommand) {
   }
 }
 
-// Bergungs-/Spezialdoktrin: stellt einen Bergungstraktor und einen Flugabwehrschützen bereit
-// (beide kamen real NIE vor → tote Bauoptionen; coverage.js Ziel C) und setzt den Traktor ECHT
+// Bergungs-/Spezialdoktrin: stellt ein Bergefahrzeug und einen Flugabwehrschützen bereit
+// (beide kamen real NIE vor → tote Bauoptionen; coverage.js Ziel C) und setzt das Bergefahrzeug ECHT
 // ein, um verlassene Fahrzeuge zu bergen (25%-HP-Fahrzeug gratis statt Dauerersatz). Läuft NACH
 // manageProduction, damit aa_soldier/tractor erst slotten, wenn die Hauptarmee ihr Soll erreicht
 // hat (freier Queue-Slot) → kein Verdrängen des Siegpfads. KEIN world.rng() → RNG-Stream und die
@@ -1122,14 +1070,14 @@ function manageRecovery(world, player, s, applyCommand) {
     if (bar) { applyCommand(world, { type: 'produce', building: bar.id, kind: 'aa_soldier' }, player.id); return; }
   }
 
-  // Bergungstraktor: einer, sobald die Fahrzeugarmee trägt (tractor hat kein weapon → zählt nicht
+  // Bergefahrzeug: eines, sobald die Fahrzeugarmee trägt (tractor hat kein weapon → zählt nicht
   // gegen VEHICLE_TARGET, verdrängt also keine Kampffahrzeuge).
   if (!hasKind('tractor') && s.vehicleArmy >= 4 && can('tractor')) {
     const fac = free('factory');
     if (fac) { applyCommand(world, { type: 'produce', building: fac.id, kind: 'tractor' }, player.id); return; }
   }
 
-  // Vorhandene Traktoren auf nahe verlassene Fahrzeuge ansetzen (nur im Umkreis der eigenen Basis,
+  // Vorhandene Bergefahrzeuge auf nahe verlassene Fahrzeuge ansetzen (nur im Umkreis der eigenen Basis,
   // kein Selbstmord-Trip ins Feindgebiet). Verlassene Fahrzeuge sind owner -1 (neutral) → frei bergbar.
   const tractors = s.units.filter(u => u.kind === 'tractor' && u.abilities?.includes('tow') && !u.abandoned);
   if (!tractors.length || !s.hq) return;
@@ -1275,7 +1223,7 @@ function pickNavalTarget(world, player) {
 }
 
 function manageHarvesters(world, player, applyCommand) {
-  // Erz-LKWs regeln sich selbst (Economy-System); hier nur ggf. anstoßen.
+  // Alte Harvester bleiben für Saves kompatibel; neue Erzlogistik läuft über LKWs.
 }
 
 function manageIdleWorkers(world, player, s, applyCommand) {

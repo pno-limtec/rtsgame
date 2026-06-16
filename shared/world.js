@@ -3,13 +3,13 @@ import { generateTerrain, worldToTile, tileToWorld, TT, tIdx, inBounds, stampOre
 import { makeRng } from './rng.js';
 import {
   TILE, DEFAULT_MAP, SUB_DETECT_RANGE, GARRISON_DAMAGE_MULT,
-  SLOPE_INFANTRY, SLOPE_VEHICLE, SLOPE_HEAVY, SLOPE_BUILDER, FOG_SIGHT_MULT, WET_DEPTH, SEA_LEVEL, SNOW_LINE,
+  SLOPE_INFANTRY, SLOPE_VEHICLE, SLOPE_HEAVY, SLOPE_BUILDER, FOG_SIGHT_MULT, WET_DEPTH, NAVIGABLE_DEPTH, SEA_LEVEL, SNOW_LINE,
 } from './constants.js';
 import { initVet, awardXp, killValue, DEFAULT_VET } from './systems/veterancy.js';
 import { findPath } from './pathfinding.js';
 
 let _gid = 1;
-const START_RIVER_CLEARANCE = 18;
+const START_RIVER_CLEARANCE = 26;
 const START_SUPPORT_RIVER_CLEARANCE = 10;
 const BUILD_ANCHOR_RANGE = 7;
 const ANCHORED_BUILD_ROLES = new Set(['logistics', 'defense', 'production']);
@@ -63,10 +63,15 @@ export function createWorld({ data, seed = 1, map = DEFAULT_MAP, players = [], c
   placeStartBases(world);
   softenRiverBanks(terrain);
   ensureInterbaseBarriers(world); // Zwischen Basen liegen natürliche Sperren statt neutraler Abkürzungen.
+  restoreMainRiverChannels(terrain);
+  softenRiverBanks(terrain);
   stabilizeWaterTerrain(terrain.height, terrain.w, terrain.h, terrain.water, terrain.baseWater, terrain.height0, terrain.terra);
   enforceDrainageToSea(terrain);
   ensureVehicleRoute(world); // EIN fahrzeugtauglicher Viadukt-Pass Basis→Basis (Brücken über Klippen/Fluss)
   rebalanceHighLakeStarts(terrain);
+  restoreMainRiverChannels(terrain);
+  softenRiverBanks(terrain);
+  stabilizeWaterTerrain(terrain.height, terrain.w, terrain.h, terrain.water, terrain.baseWater, terrain.height0, terrain.terra);
   // Erz-Ausgangsmenge je Zelle festhalten (nach aller Anfangs-Stampfung) — Erzvorkommen füllen sich
   // im Spielverlauf langsam wieder bis zu diesem Wert auf (siehe Erz-Regeneration in economy.js).
   terrain.ore0 = terrain.ore.slice();
@@ -270,6 +275,30 @@ function stampInterbaseRiver(t, hqs, a, b, pairIndex, stamped = null) {
         t.baseWater[i] = Math.min(t.baseWater[i], WET_DEPTH * 0.5);
       }
       if (t.lakeMask) t.lakeMask[i] = 0;
+    }
+  }
+}
+
+function restoreMainRiverChannels(t) {
+  if (!t?.riverPaths || !t.water || !t.baseWater) return;
+  for (const path of t.riverPaths) for (const i of path) {
+    const x = i % t.w, y = (i / t.w) | 0;
+    for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) {
+      const nx = x + dx, ny = y + dy;
+      if (!inBounds(t, nx, ny)) continue;
+      const d = Math.hypot(dx, dy);
+      if (d > 2.25) continue;
+      const j = tIdx(t, nx, ny);
+      if (t.startSafe?.[j] || t.block?.[j] > 0) continue;
+      const core = d <= 1.55;
+      const localDepth = core
+        ? Math.max(NAVIGABLE_DEPTH * 1.22, SEA_LEVEL + 0.13 - t.height[j])
+        : Math.max(WET_DEPTH * 0.66, NAVIGABLE_DEPTH * 0.38);
+      t.water[j] = Math.max(t.water[j] || 0, localDepth);
+      t.baseWater[j] = Math.max(t.baseWater[j] || 0, core ? localDepth * 0.96 : Math.min(localDepth, WET_DEPTH * 0.82));
+      if (core) t.type[j] = TT.WATER;
+      if (t.lakeMask) t.lakeMask[j] = 0;
+      if (t.waterActive) t.waterActive.add(j);
     }
   }
 }
@@ -707,7 +736,8 @@ export function spawnUnit(world, owner, kind, x, y) {
     heavy: !!def.heavy,
     // Steigungslimit je Klasse: Infanterie klettert fast überall, schwere Fahrzeuge brauchen
     // flaches Gelände oder Straßen (Serpentinen). Luft/Marine: kein Limit (Wasser regelt).
-    maxSlope: def.domain !== 'land' ? Infinity
+    maxSlope: def.maxSlope != null ? def.maxSlope
+      : (def.domain !== 'land' && def.domain !== 'amphibious') ? Infinity
       : def.category === 'infantry' ? Infinity   // Fußsoldaten klettern über unwegsames Gelände (Klippen/Berge/Schnee)
       : kind === 'builder' ? SLOPE_BUILDER
       : def.heavy ? SLOPE_HEAVY : SLOPE_VEHICLE,

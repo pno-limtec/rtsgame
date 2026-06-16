@@ -183,7 +183,7 @@ function unitCanStopOn(world, u, tx, ty) {
     && t.mud && t.mud[i] > 0.02
     && (t.water?.[i] || 0) <= FLOOD_DEPTH;
   if (!isPassable(t, u.domain, tx, ty) && !muddyBuilder) return false;
-  if (forestBlocks(t, u.domain, tx, ty, { category: u.category })) return false;
+  if (forestBlocks(t, u.domain, tx, ty, { category: u.category, roughCrawler: u.kind === 'tractor' })) return false;
   if (u.heavy && u.domain === 'land' && t.mud && t.mud[i] >= MUD_IMPASSABLE) return false;
   return true;
 }

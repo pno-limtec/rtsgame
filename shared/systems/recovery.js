@@ -1,4 +1,4 @@
-// Bergungssystem: Traktoren ziehen verlassene Fahrzeuge aus Matsch/Wasser heraus.
+// Bergungssystem: Bergefahrzeuge ziehen verlassene Fahrzeuge aus Matsch/Wasser heraus.
 import { MUD_IMPASSABLE, WET_DEPTH } from '../constants.js';
 import { dist2 } from '../world.js';
 import { inBounds, isPassable, tIdx, tileToWorld, worldToTile } from '../terrain.js';

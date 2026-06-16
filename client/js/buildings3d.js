@@ -46,6 +46,26 @@ function addAnim(g, type, obj, opts = {}) {
   return obj;
 }
 
+function productionDoor(g, mode, obj, opts = {}) {
+  (g.userData.prodDoors || (g.userData.prodDoors = [])).push({
+    mode,
+    obj,
+    open: opts.open ?? 1,
+    speed: opts.speed ?? 7,
+    minScale: opts.minScale ?? 0.18,
+    baseX: obj.position.x,
+    baseY: obj.position.y,
+    baseZ: obj.position.z,
+    baseRX: obj.rotation.x,
+    baseRY: obj.rotation.y,
+    baseRZ: obj.rotation.z,
+    baseSX: obj.scale.x || 1,
+    baseSY: obj.scale.y || 1,
+    baseSZ: obj.scale.z || 1,
+  });
+  return obj;
+}
+
 function marker(g, list, x, y, z) {
   const o = new THREE.Object3D();
   o.position.set(x, y, z);
@@ -88,8 +108,9 @@ export function makeBuildingMesh(kind, size, mats) {
       g.add(box(s * 0.85, 1.6, s * 0.55, body, 0, 0.8, s * 0.16));           // Maschinenhalle
       g.add(cyl(0.62, 0.95, 2.9, metal, -s * 0.24, 1.45, -s * 0.24, 14));    // Kühlturm 1
       g.add(cyl(0.5, 0.78, 2.4, metal, s * 0.26, 1.2, -s * 0.26, 14));       // Kühlturm 2
-      g.add(cyl(0.12, 0.16, 3.4, dark, s * 0.05, 1.7, -s * 0.05, 8));        // Schornstein
-      marker(g, 'smokeStacks', s * 0.05, 3.55, -s * 0.05);
+      g.add(cyl(0.24, 0.34, 5.8, dark, s * 0.07, 2.9, -s * 0.06, 10));       // großer Schornstein
+      g.add(cyl(0.34, 0.28, 0.22, metal, s * 0.07, 5.9, -s * 0.06, 10));     // Schornsteinkappe
+      marker(g, 'smokeStacks', s * 0.07, 6.04, -s * 0.06);
       marker(g, 'smokeStacks', -s * 0.24, 2.95, -s * 0.24);
       const fan = new THREE.Group(); fan.position.set(s * 0.28, 2.55, -s * 0.26);
       fan.add(box(0.9, 0.06, 0.1, metal, 0, 0, 0));
@@ -113,18 +134,26 @@ export function makeBuildingMesh(kind, size, mats) {
       break;
     }
     case 'water_pump': {
-      g.add(box(s * 0.5, 1.3, s * 0.5, body, -s * 0.18, 0.65, 0));           // Pumpenhaus
-      g.add(cyl(0.55, 0.55, 1.0, water, s * 0.26, 0.5, -s * 0.2, 14));       // blauer Wassertank
-      g.add(box(0.95, 0.12, 0.16, water, s * 0.26, 1.08, -s * 0.2));         // Tank-Markierung
-      const pipe1 = cyl(0.14, 0.14, 1.6, metal, s * 0.1, 0.25, s * 0.28, 8);
+      g.add(box(s * 0.98, 0.16, s * 0.72, dark, 0, 0.26, 0));                // schwimmendes Deck
+      for (const z of [-s * 0.34, s * 0.34]) {
+        const pontoon = cyl(0.22, 0.22, s * 0.92, metal, 0, 0.04, z, 12);
+        pontoon.rotation.z = Math.PI / 2;
+        g.add(pontoon);
+      }
+      g.add(box(s * 0.44, 1.0, s * 0.36, body, -s * 0.2, 0.82, -s * 0.02));  // leichtes Pumpenhaus
+      g.add(cyl(0.5, 0.5, 0.78, water, s * 0.24, 0.78, -s * 0.16, 14));      // blauer Wassertank
+      g.add(box(0.9, 0.1, 0.14, water, s * 0.24, 1.2, -s * 0.16));           // Tank-Markierung
+      const intake = cyl(0.16, 0.16, 1.3, metal, s * 0.16, -0.28, s * 0.26, 8);
+      intake.rotation.x = Math.PI / 2; g.add(intake);                        // Ansaugrohr ins Wasser
+      const pipe1 = cyl(0.13, 0.13, 1.45, metal, s * 0.08, 0.48, s * 0.28, 8);
       pipe1.rotation.z = Math.PI / 2; g.add(pipe1);                          // liegendes Rohr
-      g.add(cyl(0.14, 0.14, 0.9, metal, s * 0.26, 0.45, s * 0.28, 8));       // Steigrohr
-      const wheel = new THREE.Group(); wheel.position.set(s * 0.02, 0.85, s * 0.26);
+      g.add(cyl(0.13, 0.13, 0.9, metal, s * 0.26, 0.66, s * 0.28, 8));       // Steigrohr
+      const wheel = new THREE.Group(); wheel.position.set(s * 0.02, 1.04, s * 0.27);
       const wh = cyl(0.34, 0.34, 0.08, metal, 0, 0, 0, 12); wh.rotation.x = Math.PI / 2; wheel.add(wh);
       wheel.add(box(0.7, 0.05, 0.06, water, 0, 0, 0));
       wheel.add(box(0.06, 0.05, 0.7, water, 0, 0, 0));
       g.add(wheel); addAnim(g, 'spinZ', wheel, { speed: 3.1 });
-      windows(g, win, 0.7, 0.4, -s * 0.18, 0.8, s * 0.25 + 0.02);
+      windows(g, win, 0.62, 0.32, -s * 0.2, 0.86, s * 0.16 + 0.02);
       break;
     }
     case 'pipe': {
@@ -138,11 +167,24 @@ export function makeBuildingMesh(kind, size, mats) {
       break;
     }
     case 'road': {
-      // Straßenflächen kommen aus dem zusammenhängenden Road-Mesh des Renderers.
+      g.add(box(s * 0.96, 0.08, s * 0.7, dark, 0, 0.05, 0));                // Fahrbahn
+      g.add(box(s * 0.96, 0.04, s * 0.1, roof, 0, 0.09, -s * 0.39));         // Bankett
+      g.add(box(s * 0.96, 0.04, s * 0.1, roof, 0, 0.09, s * 0.39));
+      for (const x of [-s * 0.3, 0, s * 0.3]) {
+        g.add(box(s * 0.16, 0.035, 0.045, hazard, x, 0.12, 0));
+      }
       break;
     }
     case 'bridge': {
-      // Brückendecks werden als zusammenhängendes Mesh aus allen Brückenzellen gerendert.
+      g.add(box(s * 1.02, 0.18, s * 0.92, roof, 0, 0.26, 0));               // breites, ebenes Deck
+      g.add(box(s * 1.04, 0.18, 0.12, dark, 0, 0.48, -s * 0.43));
+      g.add(box(s * 1.04, 0.18, 0.12, dark, 0, 0.48, s * 0.43));
+      for (const x of [-s * 0.38, 0, s * 0.38]) {
+        g.add(cyl(0.05, 0.06, 0.62, metal, x, 0.31, -s * 0.34, 6));
+        g.add(cyl(0.05, 0.06, 0.62, metal, x, 0.31, s * 0.34, 6));
+      }
+      g.add(box(s * 0.24, 0.045, 0.05, hazard, -s * 0.22, 0.39, 0));
+      g.add(box(s * 0.24, 0.045, 0.05, hazard, s * 0.22, 0.39, 0));
       break;
     }
     case 'pontoon': {
@@ -153,14 +195,17 @@ export function makeBuildingMesh(kind, size, mats) {
       break;
     }
     case 'tunnel': {
-      g.add(box(0.5, 1.9, s * 0.95, dark, -s * 0.38, 0.95, 0));              // Portalwangen
-      g.add(box(0.5, 1.9, s * 0.95, dark, s * 0.38, 0.95, 0));
-      g.add(box(s * 0.95, 0.5, s * 0.95, dark, 0, 2.1, 0));                  // Sturz
+      g.add(box(s * 1.05, 0.22, s * 1.05, roof, 0, 0.05, 0));                // Fels-/Betonsockel
+      g.add(box(0.5, 2.0, s * 0.98, dark, -s * 0.4, 1.0, 0));                // Portalwangen
+      g.add(box(0.5, 2.0, s * 0.98, dark, s * 0.4, 1.0, 0));
+      g.add(box(s * 1.0, 0.55, s * 0.98, dark, 0, 2.18, 0));                 // Sturz
       const hole = new THREE.Mesh(new THREE.PlaneGeometry(s * 0.55, 1.7),
         new THREE.MeshBasicMaterial({ color: 0x000000 }));
       hole.position.set(0, 0.9, s * 0.49); g.add(hole);                      // dunkle Röhre
       const hole2 = hole.clone(); hole2.rotation.y = Math.PI; hole2.position.z = -s * 0.49; g.add(hole2);
-      g.add(box(s * 1.0, 0.2, s * 1.0, roof, 0, 2.45, 0));                   // Überdeckung
+      g.add(box(s * 1.0, 0.22, s * 1.0, roof, 0, 2.55, 0));                  // Überdeckung
+      g.add(box(s * 0.64, 0.08, 0.08, hazard, 0, 1.9, s * 0.52));
+      g.add(box(s * 0.64, 0.08, 0.08, hazard, 0, 1.9, -s * 0.52));
       break;
     }
     case 'refinery': {
@@ -204,12 +249,12 @@ export function makeBuildingMesh(kind, size, mats) {
     case 'water_tower': {
       g.add(box(s * 0.55, 0.7, s * 0.5, body, -s * 0.2, 0.35, s * 0.18));
       for (const [dx, dz] of [[-0.45, -0.45], [0.45, -0.45], [-0.45, 0.45], [0.45, 0.45]]) {
-        g.add(cyl(0.06, 0.08, 2.4, metal, dx, 1.2, dz, 6));
+        g.add(cyl(0.06, 0.08, 3.6, metal, dx, 1.8, dz, 6));
       }
-      g.add(cyl(0.86, 0.86, 1.15, water, 0, 2.55, 0, 18));
-      const level = box(1.5, 0.16, 0.18, glass, 0, 2.68, 0.88);
+      g.add(cyl(0.9, 0.9, 1.25, water, 0, 4.0, 0, 18));
+      const level = box(1.55, 0.16, 0.18, glass, 0, 4.15, 0.92);
       g.add(level); addAnim(g, 'pulse', level, { speed: 1.1, amp: 0.05 });
-      g.add(cyl(0.72, 0.88, 0.35, metal, 0, 3.28, 0, 18));
+      g.add(cyl(0.74, 0.9, 0.38, metal, 0, 4.82, 0, 18));
       break;
     }
     case 'oil_depot': {
@@ -245,15 +290,24 @@ export function makeBuildingMesh(kind, size, mats) {
       break;
     }
     case 'barracks': {
-      g.add(box(s * 0.9, 1.3, s * 0.6, body, 0, 0.65, 0));                   // Baracke
+      g.add(box(s * 0.95, 1.15, s * 0.56, body, 0, 0.58, 0));                // lange Baracke
       const r = cyl(s * 0.46, s * 0.46, s * 0.9, roof, 0, 1.3, 0, 3);
       r.rotation.z = Math.PI / 2; r.rotation.x = Math.PI;                     // Satteldach (3-seitiger Zylinder)
       r.scale.set(1, 0.55, 0.72); g.add(r);
-      g.add(box(0.6, 1.0, 0.08, dark, 0, 0.5, s * 0.3 + 0.04));              // Tür
+      const porch = box(s * 0.42, 0.08, 0.38, dark, 0, 0.08, s * 0.42);      // kleiner Vorplatz
+      g.add(porch);
+      const doorPivot = new THREE.Group(); doorPivot.position.set(-0.32, 0.58, s * 0.28 + 0.055);
+      doorPivot.add(box(0.64, 0.96, 0.08, dark, 0.32, 0, 0));                // Schwenktür mit linker Angel
+      g.add(doorPivot); productionDoor(g, 'swingY', doorPivot, { open: -1.28, speed: 9 });
+      g.add(box(s * 0.34, 0.08, 0.12, hazard, 0, 1.12, s * 0.3 + 0.05));     // Eingangsmarkierung
+      for (const x of [-s * 0.32, s * 0.32]) {
+        g.add(box(0.52, 0.36, 0.1, dark, x, 0.44, -s * 0.31));              // Ausrüstungskisten hinten
+      }
       g.add(cyl(0.05, 0.05, 2.2, metal, s * 0.4, 1.1, -s * 0.24, 6));        // Fahnenmast
       const flag = box(0.5, 0.3, 0.04, hazard, s * 0.4 + 0.26, 1.95, -s * 0.24); // Fahne
       g.add(flag); addAnim(g, 'swingZ', flag, { speed: 3.0, amp: 0.16 });
-      windows(g, win, s * 0.7, 0.4, 0, 0.85, s * 0.3 + 0.03);
+      windows(g, win, s * 0.22, 0.34, -s * 0.3, 0.82, s * 0.3 + 0.03);
+      windows(g, win, s * 0.22, 0.34, s * 0.3, 0.82, s * 0.3 + 0.03);
       break;
     }
     case 'factory': {
@@ -269,30 +323,35 @@ export function makeBuildingMesh(kind, size, mats) {
       vent.add(box(0.75, 0.05, 0.1, metal, 0, 0, 0));
       vent.add(box(0.1, 0.05, 0.75, metal, 0, 0, 0));
       g.add(vent); addAnim(g, 'spinY', vent, { speed: 2.8 });
-      g.add(box(s * 0.5, 1.5, 0.1, dark, 0, 0.75, s * 0.35 + 0.03));         // Tor
+      const rollDoor = box(s * 0.5, 1.46, 0.1, dark, 0, 0.73, s * 0.35 + 0.03);
+      g.add(rollDoor); productionDoor(g, 'rollY', rollDoor, { open: 0.72, speed: 8, minScale: 0.16 });
+      g.add(box(s * 0.54, 0.16, 0.14, metal, 0, 1.5, s * 0.37 + 0.045));     // Rolltorkasten
       g.add(box(s * 0.56, 0.16, 0.12, hazard, 0, 1.55, s * 0.37 + 0.04));    // gelbe Hallenmarkierung
       windows(g, win, s * 0.8, 0.5, 0, 1.5, s * 0.35 + 0.04);
       break;
     }
     case 'airbase': {
-      g.add(box(s * 0.95, 0.08, s * 0.22, dark, s * 0.1, 0.04, s * 0.25));   // kurze Startbahn
-      g.add(box(s * 0.08, 0.1, s * 0.18, signal, s * 0.1, 0.1, s * 0.25));
-      const pad = cyl(s * 0.34, s * 0.34, 0.12, dark, s * 0.14, 0.06, s * 0.12, 20);
+      g.add(box(s * 0.96, 0.08, s * 0.28, dark, 0.03, 0.04, s * 0.18));      // lange Start-/Landebahn
+      for (const x of [-s * 0.32, -s * 0.12, s * 0.08, s * 0.28]) {
+        g.add(box(s * 0.08, 0.045, s * 0.035, signal, x, 0.1, s * 0.18));
+      }
+      g.add(box(s * 0.9, 0.05, s * 0.05, metal, 0, 0.11, s * 0.02));         // Rollweg
+      const pad = cyl(s * 0.18, s * 0.18, 0.12, dark, -s * 0.28, 0.08, -s * 0.22, 20);
       g.add(pad);                                                             // Landeplattform
-      g.add(cyl(s * 0.1, s * 0.1, 0.05, hazard, s * 0.14, 0.14, s * 0.12, 20)); // Markierung
-      g.add(box(s * 0.26, 3.4, s * 0.26, body, -s * 0.3, 1.7, -s * 0.28));   // Tower
-      g.add(box(s * 0.34, 0.7, s * 0.34, glass, -s * 0.3, 3.7, -s * 0.28));  // Kanzel
-      const radar = new THREE.Group(); radar.position.set(-s * 0.3, 4.2, -s * 0.28);
+      g.add(cyl(s * 0.055, s * 0.055, 0.05, hazard, -s * 0.28, 0.16, -s * 0.22, 20)); // Markierung
+      g.add(box(s * 0.18, 3.4, s * 0.18, body, -s * 0.4, 1.7, -s * 0.32));   // Tower
+      g.add(box(s * 0.24, 0.7, s * 0.24, glass, -s * 0.4, 3.7, -s * 0.32));  // Kanzel
+      const radar = new THREE.Group(); radar.position.set(-s * 0.4, 4.2, -s * 0.32);
       radar.add(box(1.1, 0.05, 0.08, signal, 0, 0, 0));
       radar.add(cyl(0.05, 0.05, 0.25, metal, 0, -0.12, 0, 8));
       g.add(radar); g.userData.spin = radar; g.userData.spinSpeed = 2.5;
-      const hangar = cyl(s * 0.22, s * 0.22, s * 0.5, roof, s * 0.18, 0, -s * 0.3, 12, true);
+      const hangar = cyl(s * 0.14, s * 0.14, s * 0.36, roof, s * 0.22, 0, -s * 0.31, 12, true);
       hangar.rotation.z = Math.PI / 2;                                        // Hangar (Halbtonne)
       g.add(hangar);
-      g.add(box(1.55, 0.12, 0.55, metal, s * 0.2, 0.72, -s * 0.3));          // sichtbares Flugzeugprofil im Hangar
-      const windsock = box(0.34, 0.28, 0.18, signal, -s * 0.45, 1.7, s * 0.38); // Windsack
+      g.add(box(1.55, 0.12, 0.55, metal, s * 0.22, 0.72, -s * 0.31));        // sichtbares Flugzeugprofil im Hangar
+      const windsock = box(0.34, 0.28, 0.18, signal, -s * 0.46, 1.7, s * 0.38); // Windsack
       g.add(windsock); addAnim(g, 'swingZ', windsock, { speed: 2.6, amp: 0.18 });
-      windows(g, win, s * 0.2, 1.6, -s * 0.3 + s * 0.135, 1.9, -s * 0.28, Math.PI / 2);
+      windows(g, win, s * 0.14, 1.6, -s * 0.4 + s * 0.095, 1.9, -s * 0.32, Math.PI / 2);
       break;
     }
     case 'shipyard': {
@@ -348,14 +407,25 @@ export function makeBuildingMesh(kind, size, mats) {
       break;
     }
     case 'flak_turret': {
-      g.add(cyl(0.82, 0.98, 0.62, dark, 0, 0.31, 0, 12));
-      g.add(cyl(0.88, 0.88, 0.08, signal, 0, 0.68, 0, 18));
-      const head = new THREE.Group(); head.position.y = 1.0;
-      head.add(cyl(0.34, 0.42, 0.28, body, 0, 0, 0, 10));
-      for (const sx of [-0.22, 0.22]) for (const sy of [-0.08, 0.12]) {
-        const gun = cyl(0.045, 0.06, 1.25, metal, sx, sy, 0.55, 7);
-        gun.rotation.x = Math.PI / 2 - 0.42; head.add(gun);
+      g.add(cyl(0.72, 1.0, 0.34, dark, 0, 0.17, 0, 12));
+      g.add(cyl(0.86, 0.86, 0.08, signal, 0, 0.39, 0, 18));
+      for (const [sx, sz] of [[-0.42, -0.42], [0.42, -0.42], [-0.42, 0.42], [0.42, 0.42]]) {
+        const leg = cyl(0.035, 0.055, 1.75, metal, sx * 0.55, 1.12, sz * 0.55, 5);
+        leg.rotation.x = sz * 0.18; leg.rotation.z = -sx * 0.18; g.add(leg);
       }
+      g.add(box(1.2, 0.12, 1.2, dark, 0, 1.92, 0));                         // offene Plattform
+      g.add(box(1.36, 0.08, 0.08, signal, 0, 2.02, -0.58));
+      g.add(box(1.36, 0.08, 0.08, signal, 0, 2.02, 0.58));
+      const head = new THREE.Group(); head.position.y = 2.18;
+      head.add(cyl(0.28, 0.34, 0.22, body, 0, 0, 0, 10));
+      for (const sx of [-0.28, -0.09, 0.09, 0.28]) {
+        const gun = cyl(0.045, 0.06, 1.45, metal, sx, 0.08, 0.58, 7);
+        gun.rotation.x = Math.PI / 2 - 0.58; head.add(gun);
+      }
+      const sight = new THREE.Group(); sight.position.set(0.48, 0.12, -0.25);
+      const dish = new THREE.Mesh(new THREE.SphereGeometry(0.24, 8, 6, 0, Math.PI * 2, 0, Math.PI / 2), signal);
+      dish.rotation.x = Math.PI / 2.5; dish.castShadow = true; sight.add(dish);
+      head.add(sight);
       g.add(head); addAnim(g, 'swingY', head, { speed: 1.0, amp: 0.5 });
       g.userData.turretHead = head;
       break;
@@ -383,6 +453,27 @@ export function makeBuildingMesh(kind, size, mats) {
       dish.add(d);
       g.add(dish);
       g.userData.spin = dish; g.userData.spinSpeed = 1.2;                     // rotiert im render()
+      break;
+    }
+    case 'spotlight': {
+      g.add(cyl(0.62, 0.82, 0.34, dark, 0, 0.17, 0, 12));
+      g.add(box(0.9, 0.12, 0.9, signal, 0, 0.42, 0));
+      const mast = cyl(0.08, 0.1, 2.15, metal, 0, 1.44, 0, 8); g.add(mast);
+      for (const sx of [-0.34, 0.34]) {
+        const brace = cyl(0.035, 0.04, 2.1, metal, sx * 0.5, 1.2, 0, 6);
+        brace.rotation.z = -sx * 0.18; g.add(brace);
+      }
+      const head = new THREE.Group(); head.position.y = 2.62; head.rotation.x = -0.2;
+      const lamp = cyl(0.34, 0.48, 0.62, body, 0, 0, 0, 16);
+      lamp.rotation.x = Math.PI / 2; head.add(lamp);
+      const glassPane = cyl(0.32, 0.32, 0.035, glass, 0, 0, 0.34, 16);
+      glassPane.rotation.x = Math.PI / 2; head.add(glassPane);
+      const yoke = box(1.0, 0.08, 0.08, metal, 0, 0, -0.08); head.add(yoke);
+      g.add(head); addAnim(g, 'swingY', head, { speed: 0.42, amp: 0.42 });
+      g.userData.turretHead = head;
+      const beamMat = new THREE.MeshBasicMaterial({ color: 0xfff0b0, transparent: true, opacity: 0.12, depthWrite: false });
+      const beam = new THREE.Mesh(new THREE.ConeGeometry(1.25, 3.2, 18, 1, true), beamMat);
+      beam.position.set(0, 2.52, 1.75); beam.rotation.x = Math.PI / 2; g.add(beam);
       break;
     }
     case 'dam': {

@@ -255,7 +255,7 @@ const KINDS = [
   'solar_plant', 'water_pump', 'pipe', 'bridge', 'tunnel', 'road',
   'ore_depot', 'material_depot', 'water_tower', 'oil_depot', 'truck', 'earth_pile', 'tractor', 'ore_pile',
   'aa_soldier', 'rocket_launcher', 'underwater_drone', 'mg_turret', 'flak_turret',
-  'bridgelayer', 'pontoon',
+  'bridgelayer', 'pontoon', 'spotlight',
 ];
 const KIND_INDEX = Object.fromEntries(KINDS.map((k, i) => [k, i]));
 export function kindId(k) { return KIND_INDEX[k] ?? -1; }

@@ -5,7 +5,7 @@ const TILE = 2;
 const CLIENT_WET_DEPTH = 0.035;
 const CLIENT_NAVIGABLE_DEPTH = 0.12;
 const CLIENT_SEA_LEVEL = 0.28;   // spiegelt SEA_LEVEL (constants.js) — Süßwasser-Erkennung fürs Pumpwerk
-const TRANSPORT_KINDS = new Set(['transport_air', 'amphib_transport']);
+const TRANSPORT_KINDS = new Set(['transport_air', 'amphib_transport', 'tractor']);
 const TRANSPORT_CAP = 6;
 const PILE_KINDS = new Set(['earth_pile', 'ore_pile']);
 const TERRA_STROKE_RADIUS = 1.12;
@@ -255,7 +255,7 @@ export class Input {
       if (tractors.length) { this.net.cmd({ type: 'tow', units: tractors, targetId: towTarget.id }); return; }
     }
     // Rechtsklick auf eigenen, nicht vollen Transporter → ausgewählte Einheiten steigen ein.
-    if (friendlyTransport && (friendlyTransport.cargo || 0) < TRANSPORT_CAP) {
+    if (friendlyTransport && (friendlyTransport.cargo || 0) < (this.data?.units?.[friendlyTransport.kind]?.capacity || TRANSPORT_CAP)) {
       const passengers = sel.filter(id => id !== friendlyTransport.id);
       if (passengers.length) { this.net.cmd({ type: 'load', transport: friendlyTransport.id, units: passengers }); return; }
     }
