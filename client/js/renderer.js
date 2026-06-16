@@ -4367,8 +4367,18 @@ export class Renderer {
       this._sprite(0xffc24a, x, cy, z, 0.13, 0.18 + Math.random() * 0.12,
         { additive: true, vx: Math.cos(a) * (3 + Math.random() * 2.5), vz: Math.sin(a) * (3 + Math.random() * 2.5), vy: 1.4 + Math.random() * 1.6, opacity: 0.95 });
     }
-    // kurzer aufgewirbelter Staubtupfer am Boden, bleicht schnell aus (kein aufsteigender Rauch)
-    this._sprite(0x8c8071, x, cy - 0.35, z, 0.55 * scale, 0.34, { grow: 1.3, vy: 0.55, opacity: 0.42 });
+    // Über Wasser: weiß-blaue Gischt statt Erdstaub (Torpedo/MG-Treffer auf Schiffe lesen sich
+    // sonst falsch als Bodeneinschlag). Sonst kurzer aufgewirbelter Staubtupfer, bleicht schnell aus.
+    if (this._isSeaWorldPoint && this._isSeaWorldPoint(x, z)) {
+      const surf = (this._waterInfoAt ? this._waterInfoAt(x, z).surface : y) + 0.06;
+      for (let i = 0; i < 3 && this._canSpawnEffect(); i++) {
+        const a = Math.random() * Math.PI * 2;
+        this._sprite(i ? 0x8fc7d8 : 0xe8f8ff, x, surf, z, 0.4 + Math.random() * 0.3, 0.4 + Math.random() * 0.2,
+          { additive: true, grow: 1.2, vx: Math.cos(a) * 1.4, vz: Math.sin(a) * 1.4, vy: 1.6 + Math.random(), opacity: 0.6 });
+      }
+    } else {
+      this._sprite(0x8c8071, x, cy - 0.35, z, 0.55 * scale, 0.34, { grow: 1.3, vy: 0.55, opacity: 0.42 });
+    }
   }
 
   spawnWashout(ev, sourceGroup = null) {
