@@ -1449,13 +1449,12 @@ export class Renderer {
       const nearestY = Math.max(0, Math.min(h - 1, Math.round(py)));
       const nearest = nearestY * w + nearestX;
       cover[key] = totalWeight > 0 ? waterWeight / totalWeight : 0;
-      // Eckpegel = gewichteter Mittelwert der (bereits über ihrem Bett liegenden) Zell-Oberflächen.
-      // Boden NUR durch das Gelände AN DIESER ECKE, nicht durch das höchste Ufer der Umgebung —
-      // sonst wurden Randecken über den flachen See gehoben und bildeten schwebende, überlappende
-      // Wasserlappen am Ufer. So bleibt die Seefläche eben und der Rand legt sich aufs Gelände.
-      const cornerGroundY = this.heightAt(cornerX(cx), cornerZ(cy)) + WATER_EDGE_TUCK_Y;
+      // Eckpegel = reiner gewichteter Mittelwert der Zell-Oberflächen (die liegen bereits über
+      // ihrem Bett). KEIN zusätzlicher Gelände-Boden mehr: ein solcher hob Randecken über höherem
+      // Ufer leicht an und erzeugte eine sichtbare, hellere Stufe/Naht am Rand. Ohne ihn bleibt die
+      // Seefläche durchgehend eben; wo das Ufergelände höher liegt, verdeckt es den Rand von selbst.
       cornerSurface[key] = waterWeight > 0
-        ? Math.max(surfSum / waterWeight, cornerGroundY)
+        ? surfSum / waterWeight
         : (surface[nearest] || this.height[nearest] * HEIGHT_SCALE + WATER_SURFACE_CLEAR);
       cornerFlowX[key] = waterWeight > 0 ? flowSumX / waterWeight : 0;
       cornerFlowZ[key] = waterWeight > 0 ? flowSumZ / waterWeight : 0;
