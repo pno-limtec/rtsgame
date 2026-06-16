@@ -1,14 +1,15 @@
 // Wasser V2 — eigenständiges Wasser-Rendering ohne Altlasten.
-// Eine Ozean-artige ShaderMaterial im Stil der three.js-Beispiele (Water / webgl_shaders_ocean):
-// Gerstner-Wellen (Vertex-Displacement + analytische Normale), Sonnen-Specular, Fresnel-
-// Himmelsspiegelung, tiefenabhängige Farbe/Deckkraft und Schaumkronen. Wellen sind beim Meer
-// kräftig, bei Binnengewässern (aSea→0) deutlich ruhiger. Die Geometrie (geglättete Wasserfläche
-// inkl. Tiefenfarbe in `color` und Meeresanteil in `aSea`) kommt vom Renderer; dieses Modul liefert
-// nur das neue Material und einen Per-Frame-Uniform-Update-Helfer.
+// Ozean-artiger Shader im Stil der three.js-Beispiele (Water / webgl_shaders_ocean):
+//  - Gerstner-Grundwellen (Vertex-Displacement) + analytische Normale; Meer kräftig, Binnen ruhig.
+//  - feine prozedurale Detailnormalen (mehrere Oktaven) → realistisches Glitzern/Funkeln im Sonnenlicht.
+//  - Sonnen-Specular (scharf + breit) und Fresnel-Himmelsspiegelung mit Horizont-Verlauf.
+//  - tiefenabhängige Farbe (aus der Geometrie) + aufgehelltes Flachwasser.
+//  - Uferschaum (aus der Wassertiefe abgeleitet) und strömungsgerichtete Kräuselung (entlang der UVs).
+// Die Geometrie (geglättete Wasserfläche, Tiefenfarbe in `color`, Meeresanteil in `aSea`,
+// strömungsausgerichtete `uv`) kommt vom Renderer; dieses Modul liefert nur das Material + Uniform-Helfer.
 import * as THREE from 'three';
 
 const VERT = /* glsl */`
-  precision highp float;
   uniform float uTime;
   uniform float uWaveAmp;      // Wellen-Amplitude (Welt-Einheiten) für offenes Meer
   attribute float aSea;        // 0..1 Meeresanteil (steuert Wellenstärke)
@@ -18,16 +19,17 @@ const VERT = /* glsl */`
   varying float vSea;
   varying vec3 vColor;
   varying float vCrest;        // normierte Wellenhöhe (für Schaumkronen)
+  varying vec2 vUv;
 
-  // Summe gerichteter Wellen → Höhe + horizontaler Gradient (für die Normale).
+  // Summe gerichteter Gerstner-Wellen → Höhe + horizontaler Gradient (für die Normale).
   float waveSum(vec2 p, float t, out vec2 grad) {
     grad = vec2(0.0);
     float h = 0.0;
-    vec2 d1 = normalize(vec2(0.86, 0.36)); float k1 = 0.085, s1 = 1.35, a1 = 0.55;
+    vec2 d1 = normalize(vec2(0.86, 0.36)); float k1 = 0.075, s1 = 1.25, a1 = 0.58;
     float p1 = dot(p, d1) * k1 + t * s1; h += sin(p1) * a1; grad += d1 * cos(p1) * a1 * k1;
-    vec2 d2 = normalize(vec2(-0.30, 0.92)); float k2 = 0.135, s2 = 1.02, a2 = 0.30;
+    vec2 d2 = normalize(vec2(-0.30, 0.92)); float k2 = 0.125, s2 = 0.95, a2 = 0.30;
     float p2 = dot(p, d2) * k2 + t * s2; h += sin(p2) * a2; grad += d2 * cos(p2) * a2 * k2;
-    vec2 d3 = normalize(vec2(0.55, -0.55)); float k3 = 0.27, s3 = 1.85, a3 = 0.15;
+    vec2 d3 = normalize(vec2(0.55, -0.55)); float k3 = 0.235, s3 = 1.7, a3 = 0.16;
     float p3 = dot(p, d3) * k3 + t * s3; h += sin(p3) * a3; grad += d3 * cos(p3) * a3 * k3;
     return h; // Bereich ~[-1, 1]
   }
@@ -35,13 +37,13 @@ const VERT = /* glsl */`
   void main() {
     vColor = color;
     vSea = aSea;
+    vUv = uv;
     vec4 wpos = modelMatrix * vec4(position, 1.0);
-    float amp = uWaveAmp * mix(0.14, 1.0, clamp(aSea, 0.0, 1.0)); // Binnenwasser ruhiger
+    float amp = uWaveAmp * mix(0.12, 1.0, clamp(aSea, 0.0, 1.0)); // Binnenwasser ruhiger
     vec2 grad;
-    float h = waveSum(wpos.xz, uTime, grad);
-    vCrest = h;
-    wpos.y += h * amp;
-    // Analytische Normale aus dem Höhengradienten.
+    float hh = waveSum(wpos.xz, uTime, grad);
+    vCrest = hh;
+    wpos.y += hh * amp;
     vNormalW = normalize(vec3(-grad.x * amp, 1.0, -grad.y * amp));
     vWorld = wpos.xyz;
     gl_Position = projectionMatrix * viewMatrix * wpos;
@@ -49,37 +51,77 @@ const VERT = /* glsl */`
 `;
 
 const FRAG = /* glsl */`
-  precision highp float;
+  uniform float uTime;
   uniform vec3 uSunDir;     // normiert, Richtung zur Sonne
   uniform vec3 uSunColor;
-  uniform vec3 uSky;        // Himmelsfarbe (Fresnel-Spiegelung)
+  uniform vec3 uSky;        // Himmelsfarbe (Fresnel-Spiegelung, zenitnah)
+  uniform vec3 uSkyHorizon; // hellere Horizontfarbe für den Spiegelungs-Verlauf
   uniform float uOpacity;   // Grund-Deckkraft
-  uniform float uDaylight;  // 0 Nacht .. 1 Tag (dämpft Sonnenglanz nachts)
+  uniform float uDaylight;  // 0 Nacht .. 1 Tag
   varying vec3 vWorld;
   varying vec3 vNormalW;
   varying float vSea;
   varying vec3 vColor;
   varying float vCrest;
+  varying vec2 vUv;
+
+  float luma(vec3 c) { return dot(c, vec3(0.299, 0.587, 0.114)); }
+
+  // Feine Detail-Normale aus mehreren hochfrequenten Wellen (analytische Ableitung) → sichtbare
+  // Kräuselung + Glitzern. Zwei Geschwindigkeiten, damit das Muster nicht starr wirkt.
+  vec3 detailNormal(vec2 p, float t, float strength) {
+    vec2 g = vec2(0.0);
+    vec2 e1 = normalize(vec2(0.9, 0.2));  float k1 = 1.1, s1 = 2.4, a1 = 1.0;
+    g += e1 * cos(dot(p, e1) * k1 + t * s1) * a1 * k1;
+    vec2 e2 = normalize(vec2(-0.2, 1.0)); float k2 = 1.8, s2 = 3.1, a2 = 0.7;
+    g += e2 * cos(dot(p, e2) * k2 + t * s2) * a2 * k2;
+    vec2 e3 = normalize(vec2(0.6, -0.7)); float k3 = 3.1, s3 = 4.2, a3 = 0.45;
+    g += e3 * cos(dot(p, e3) * k3 + t * s3) * a3 * k3;
+    vec2 e4 = normalize(vec2(-0.8, -0.5)); float k4 = 5.0, s4 = 5.6, a4 = 0.25;
+    g += e4 * cos(dot(p, e4) * k4 - t * s4) * a4 * k4;
+    return normalize(vec3(-g.x * strength, 1.0, -g.y * strength));
+  }
 
   void main() {
-    vec3 N = normalize(vNormalW);
+    float sea = clamp(vSea, 0.0, 1.0);
+    // Basis-Normale (Grundwellen) mit kräftiger Detail-Normale mischen — Detail beim Meer stärker.
+    vec3 nd = detailNormal(vWorld.xz, uTime, 0.16 + sea * 0.22);
+    vec3 N = normalize(vNormalW * 0.5 + nd * 0.5);
     vec3 V = normalize(cameraPosition - vWorld);
     float fres = pow(1.0 - max(dot(N, V), 0.0), 4.0);
 
-    vec3 col = vColor;
-    // Himmelsspiegelung am Streifwinkel (Fresnel) — dezent, damit tiefes Wasser dunkel bleibt.
-    col = mix(col, uSky, clamp(fres, 0.0, 1.0) * 0.5);
-    // Sonnen-Specular (Blinn-Phong) → helle Glanzlichter auf den Wellenkämmen.
-    vec3 Hh = normalize(uSunDir + V);
-    float spec = pow(max(dot(N, Hh), 0.0), 110.0);
-    col += uSunColor * spec * 2.0 * uDaylight;
-    // weicher Himmelsschimmer an geneigten Flächen
-    col += uSky * (1.0 - clamp(N.y, 0.0, 1.0)) * 0.05;
-    // Schaumkronen: nur auf dem Meer (vSea hoch) an den obersten Wellenkämmen.
-    float foam = smoothstep(0.72, 1.0, vCrest) * smoothstep(0.45, 0.9, vSea);
-    col = mix(col, vec3(0.92, 0.97, 1.0), foam * 0.6);
+    // Tiefenhinweis aus der Grundfarbe: helleres Wasser = flacher.
+    float shallow = smoothstep(0.30, 0.52, luma(vColor));
 
-    float a = clamp(uOpacity + fres * 0.22 + foam * 0.3, 0.0, 0.99);
+    // Grundfarbe + leicht aufgehelltes Flachwasser (Untergrund schimmert durch).
+    vec3 col = vColor + shallow * vec3(0.02, 0.05, 0.06);
+
+    // Sichtbare Kräuselung: leichte diffuse Helligkeitsmodulation nach Sonnenstand — geneigte
+    // Wellenflanken fangen Licht, sodass die Oberfläche auch ohne Glanz strukturiert wirkt.
+    float diff = dot(N, normalize(uSunDir + vec3(0.0, 0.6, 0.0))) * 0.5 + 0.5;
+    col *= 0.82 + diff * 0.42 * (0.5 + 0.5 * uDaylight);
+
+    // Fresnel-Himmelsspiegelung mit Horizont-Verlauf (am Streifwinkel heller/horizontnah).
+    vec3 skyRefl = mix(uSky, uSkyHorizon, clamp(fres, 0.0, 1.0));
+    col = mix(col, skyRefl, clamp(fres, 0.0, 1.0) * (0.45 + sea * 0.15));
+
+    // Sonnen-Specular: scharfer Kern (Glitzern) + breiter Schein.
+    vec3 Hh = normalize(uSunDir + V);
+    float ndh = max(dot(N, Hh), 0.0);
+    float spec = pow(ndh, 240.0) * 3.4 + pow(ndh, 30.0) * 0.45;
+    col += uSunColor * spec * uDaylight;
+
+    // Strömungs-Kräuselung: helle Linien wandern entlang der (strömungsausgerichteten) UV.
+    float flow = sin(vUv.y * 26.0 - uTime * 2.2) * 0.5 + 0.5;
+    float ripple = smoothstep(0.82, 1.0, flow) * (1.0 - sea) * 0.10 * uDaylight;
+    col += ripple;
+
+    // Uferschaum: am Flachwasser auf den Wellenkämmen; Meereskämme zusätzlich.
+    float crestFoam = smoothstep(0.55, 1.0, vCrest);
+    float foam = max(shallow * crestFoam * 0.9, smoothstep(0.78, 1.0, vCrest) * smoothstep(0.5, 0.9, sea) * 0.5);
+    col = mix(col, vec3(0.92, 0.97, 1.0), clamp(foam, 0.0, 0.85));
+
+    float a = clamp(uOpacity + fres * 0.20 + foam * 0.35, 0.0, 0.99);
     gl_FragColor = vec4(col, a);
   }
 `;
@@ -88,10 +130,11 @@ export function createWaterV2() {
   const material = new THREE.ShaderMaterial({
     uniforms: {
       uTime: { value: 0 },
-      uWaveAmp: { value: 0.26 },
+      uWaveAmp: { value: 0.30 },
       uSunDir: { value: new THREE.Vector3(0.4, 0.8, 0.3).normalize() },
       uSunColor: { value: new THREE.Color(0xfff2dd) },
       uSky: { value: new THREE.Color(0x9ec8e8) },
+      uSkyHorizon: { value: new THREE.Color(0xcfe3f2) },
       uOpacity: { value: 0.82 },
       uDaylight: { value: 1 },
     },
@@ -104,6 +147,8 @@ export function createWaterV2() {
   return material;
 }
 
+const _hz = new THREE.Color();
+
 // Per-Frame-Uniforms nachführen. sunDir = Welt-Richtung zur Sonne; sky/sun aus updateEnvironment.
 export function updateWaterV2(material, { dt = 0, sunDir, sunColor, sky, opacity, daylight }) {
   if (!material) return;
@@ -111,7 +156,12 @@ export function updateWaterV2(material, { dt = 0, sunDir, sunColor, sky, opacity
   u.uTime.value += dt;
   if (sunDir) u.uSunDir.value.copy(sunDir).normalize();
   if (sunColor) u.uSunColor.value.copy(sunColor);
-  if (sky) u.uSky.value.copy(sky);
+  if (sky) {
+    u.uSky.value.copy(sky);
+    // Horizontfarbe = Himmel etwas aufgehellt/entsättigt (heller Saum am Streifwinkel).
+    _hz.copy(sky).lerp(new THREE.Color(0xffffff), 0.35);
+    u.uSkyHorizon.value.copy(_hz);
+  }
   if (opacity != null) u.uOpacity.value = opacity;
   if (daylight != null) u.uDaylight.value = daylight;
 }
