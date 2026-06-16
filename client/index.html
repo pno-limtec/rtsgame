@@ -150,15 +150,12 @@
     background:var(--hud); border:1px solid var(--line); border-radius:9px; overflow-y:auto; overflow-x:hidden;
     padding:8px; z-index:10; box-shadow:0 3px 14px #0008; }
   #buildbar:empty { display:none; }
-  #buildbar h4 { margin:8px 2px 4px; font-size:10px; color:#7d8aa0; text-transform:uppercase; letter-spacing:.6px; }
-  #buildbar h4:first-child { margin-top:0; }
-  #buildbar details { border-top:1px solid #202936; padding-top:4px; margin-top:4px; }
-  #buildbar details:first-child { border-top:0; margin-top:0; padding-top:0; }
-  #buildbar summary { list-style:none; cursor:pointer; display:flex; align-items:center; justify-content:space-between;
-    color:#8fa0b8; font-size:10px; text-transform:uppercase; letter-spacing:.55px; padding:2px 2px 5px; }
-  #buildbar summary::-webkit-details-marker { display:none; }
-  #buildbar summary::after { content:"+"; color:#5f7189; font-size:13px; line-height:1; }
-  #buildbar details[open] summary::after { content:"-"; }
+  #buildbar .buildtabs { display:grid; grid-template-columns:repeat(3, minmax(0,1fr)); gap:3px; margin-bottom:7px; }
+  #buildbar .buildtab { display:flex; align-items:center; justify-content:center; gap:4px; min-width:0; height:28px;
+    background:#111822; border:1px solid var(--line); color:#aeb9c7; border-radius:5px; cursor:pointer; font-size:10.5px; }
+  #buildbar .buildtab[aria-selected="true"] { border-color:var(--accent); background:#10212b; color:#eefbff; }
+  #buildbar .buildtab .svgicon { width:13px; height:13px; }
+  #buildbar .buildpanel { min-height:0; }
   #buildbar .grid { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:3px; }
   .bbtn { position:relative; display:grid; grid-template-columns:66px minmax(0,1fr); align-items:center; gap:7px; text-align:left; padding:5px 6px; cursor:pointer; line-height:1.15;
     min-width:0; min-height:68px; background:#161d27; color:var(--text); border:1px solid var(--line); border-radius:5px; font-size:11px; overflow:hidden; }
@@ -216,18 +213,41 @@
   #lobby .watchbtn { margin-top:8px; background:#161d27; color:#dbe7f4; border:1px solid var(--line); }
   #seatlist { margin-top:12px; font-size:12px; }
   #seatlist .seat { display:flex; justify-content:space-between; padding:4px 0; border-bottom:1px solid var(--line); }
-  #spectatorbar { position:fixed; right:8px; top:54px; z-index:12; display:none; align-items:center; gap:8px;
-    background:var(--hud); border:1px solid var(--line); border-radius:9px; padding:7px 9px; box-shadow:0 3px 14px #0008;
-    font-size:12px; color:#aeb9c7; }
-  #spectatorbar select { background:#161d27; border:1px solid var(--line); color:#fff; border-radius:4px; padding:4px 7px; }
-  #spectatorbar button { background:#161d27; border:1px solid var(--line); color:#fff; border-radius:4px; padding:4px 8px;
-    cursor:pointer; font-size:12px; min-width:62px; }
+  #spectatorbar { position:fixed; right:8px; top:54px; z-index:12; display:none; flex-direction:column; align-items:stretch; gap:4px;
+    background:var(--hud); border:1px solid var(--line); border-radius:7px; padding:4px 5px; box-shadow:0 3px 14px #0008;
+    font-size:11px; color:#aeb9c7; width:min(420px, calc(100vw - 16px)); }
+  #spectatorbar .spec-tabs { display:grid; grid-template-columns:repeat(2, minmax(0,1fr)); gap:3px; }
+  #spectatorbar .spec-tab { display:flex; align-items:center; justify-content:center; gap:4px; height:24px;
+    background:#111822; border:1px solid var(--line); color:#aeb9c7; border-radius:4px; cursor:pointer; font-size:10.5px; }
+  #spectatorbar .spec-tab[aria-selected="true"] { border-color:var(--accent); background:#10212b; color:#eefbff; }
+  #spectatorbar .spec-panel { display:flex; align-items:center; gap:3px; min-width:0; }
+  #spectatorbar .spec-panel[hidden] { display:none; }
+  #spectatorbar select { max-width:126px; background:#161d27; border:1px solid var(--line); color:#fff; border-radius:4px; padding:3px 5px; font-size:11px; }
+  #spectatorbar button { background:#161d27; border:1px solid var(--line); color:#fff; border-radius:4px; padding:3px 6px;
+    cursor:pointer; font-size:11px; min-width:0; }
   #spectatorbar button:hover { border-color:var(--accent); }
+  #spectatorbar button:disabled { opacity:.45; cursor:not-allowed; }
+  #spectatorbar .spec-iconbtn { display:inline-flex; align-items:center; justify-content:center; gap:4px; min-height:24px; }
+  #spectatorbar .spec-segments { display:inline-grid; grid-auto-flow:column; grid-auto-columns:minmax(46px,1fr); gap:2px; min-width:0; }
+  #spectatorbar .spec-segments button { padding:3px 4px; }
+  #spectatorbar .spec-segments button[aria-pressed="true"] { border-color:var(--accent); background:#10212b; color:#eefbff; }
+  #spectatorbar .svgicon { width:13px; height:13px; }
+  #spectatorevents { display:flex; flex-wrap:nowrap; gap:2px; }
+  #spectatorevents[hidden] { display:none; }
+  #spectatorevents button { padding:3px 5px; }
   .lobbyopt { display:flex; align-items:center; gap:8px; margin-top:10px; font-size:12px; color:#aeb9c7; }
   .lobbyopt input { width:15px; height:15px; accent-color:var(--accent); }
   .lobbyopt span { line-height:1.25; }
-  #hint { position:fixed; left:8px; bottom:142px; font-size:11px; color:#7d8aa0; z-index:9;
-    text-shadow:0 1px 3px #000; max-width:320px; }
+  .lobbyselect { justify-content:space-between; }
+  .lobbyselect select { width:auto; min-width:190px; padding:5px 6px; font-size:12px; }
+  #scoreboard { position:fixed; left:8px; bottom:142px; width:172px; z-index:9;
+    background:var(--hud); border:1px solid var(--line); border-radius:7px; padding:5px 6px;
+    box-shadow:0 3px 14px #0008; font-size:11px; color:#cdd6e0; }
+  #scoreboard:empty { display:none; }
+  #scoreboard .score-row { display:grid; grid-template-columns:9px minmax(0,1fr) auto; align-items:center; gap:5px; min-height:17px; }
+  #scoreboard .score-dot { width:7px; height:7px; border-radius:50%; }
+  #scoreboard .score-name { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  #scoreboard .score-value { color:#fff; font-variant-numeric:tabular-nums; font-weight:700; }
 </style>
 </head>
 <body>
@@ -283,7 +303,7 @@
       </div>
     </div>
   </div>
-  <div id="hint">Linksklick+Ziehen: Auswahl · Rechtsklick: Befehl/Angriff · Rechte Maus ziehen: Karte · 1-9: Gruppen · WASD/Mausrad: Kamera · Wall/Graben/Straße/Leitung/Damm: per Linie ziehen (Start→Ende) · Erz steht an Hängen an (Bagger, Vorsicht Steinschlag) · Straßen = steile Hänge fahrbar</div>
+  <div id="scoreboard" aria-live="polite"></div>
 
   <div id="lobby">
     <div class="card">
@@ -297,17 +317,45 @@
         <input id="fowstart" type="checkbox" checked>
         <span>Nebel des Krieges aktivieren</span>
       </label>
+      <label class="lobbyopt lobbyselect" title="Steuert, wie häufig und hart Wetter, Beben, Rutschungen und andere Naturereignisse zuschlagen.">
+        <span>Level of Insanity</span>
+        <select id="insanitystart">
+          <option value="1">Easy-Peasy</option>
+          <option value="2" selected>Spicy Weather</option>
+          <option value="3">Mother Nature is angry</option>
+          <option value="4">Nature fucks you hard</option>
+        </select>
+      </label>
       <div id="seatlist"></div>
       <button id="joinbtn">Match beitreten</button>
       <button id="watchbtn" class="watchbtn">Zuschauen</button>
     </div>
   </div>
   <div id="spectatorbar">
-    <span>Zuschauer · Sicht</span>
-    <select id="viewselsel"></select>
-    <button id="spectatortakeover" type="button" hidden>Übernehmen</button>
-    <button id="spectatorspeed" type="button" hidden>Tempo x1</button>
-    <button id="spectatortime" type="button" hidden>Auto</button>
+    <div class="spec-tabs" role="tablist" aria-label="Zuschauer">
+      <button class="spec-tab" type="button" data-spectab="control" aria-selected="true">Sicht/Sim</button>
+      <button class="spec-tab" type="button" data-spectab="events" aria-selected="false">Events</button>
+    </div>
+    <div class="spec-panel" data-specpanel="control">
+      <select id="viewselsel"></select>
+      <button id="spectatortakeover" type="button" hidden>Übernehmen</button>
+      <button id="spectatorspeed" type="button" hidden>Tempo x1</button>
+      <span id="spectatortime" class="spec-segments" hidden aria-label="Tageszeit">
+        <button type="button" data-spectatortime="auto">Auto</button>
+        <button type="button" data-spectatortime="day">Tag</button>
+        <button type="button" data-spectatortime="night">Nacht</button>
+      </span>
+    </div>
+    <div class="spec-panel" data-specpanel="events" hidden>
+      <span id="spectatorevents" hidden>
+        <button type="button" data-spectatorevent="rain" title="Regenschauer beim aktuell stärkeren Spieler auslösen">Regen</button>
+        <button type="button" data-spectatorevent="drought" title="Extreme Dürre auslösen">Dürre</button>
+        <button type="button" data-spectatorevent="landslide" title="Zufälligen Hangrutsch mit Stärke-Bias auslösen">Rutsch</button>
+        <button type="button" data-spectatorevent="quake" title="Erdbeben beim aktuell stärkeren Spieler auslösen">Beben</button>
+        <button type="button" data-spectatorevent="storm" title="Gewitter mit erhöhtem Blitzrisiko auslösen">Sturm</button>
+        <button type="button" data-spectatorevent="fog" title="Nebel auslösen">Nebel</button>
+      </span>
+    </div>
   </div>
 
   <script type="importmap">

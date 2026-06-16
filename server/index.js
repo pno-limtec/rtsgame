@@ -50,6 +50,7 @@ wss.on('connection', (ws) => {
     let msg; try { msg = JSON.parse(buf); } catch { return; }
     switch (msg.t) {
       case 'join': {
+        match.setMatchOptions({ insanity: msg.insanity });
         const seat = match.joinHuman(msg.name || 'Spieler', msg.seat);
         ws.seat = seat;
         ws.send(JSON.stringify({ type: 'joined', seat, ok: seat != null }));
@@ -82,11 +83,21 @@ wss.on('connection', (ws) => {
         break;
       }
       case 'spectatorControl': {
-        match.setSpectatorControls({ speed: msg.speed, timeMode: msg.timeMode });
+        if (ws.seat == null) {
+          const patch = {};
+          if (Object.prototype.hasOwnProperty.call(msg, 'speed')) patch.speed = msg.speed;
+          if (Object.prototype.hasOwnProperty.call(msg, 'timeMode')) patch.timeMode = msg.timeMode;
+          if (Object.prototype.hasOwnProperty.call(msg, 'event')) patch.event = msg.event;
+          match.setSpectatorControls(patch);
+        }
+        break;
+      }
+      case 'matchOptions': {
+        if (ws.seat == null && match.setMatchOptions({ insanity: msg.insanity })) broadcastLobby();
         break;
       }
       case 'newGame': {
-        match.reset({ sameMap: !!msg.sameMap });
+        match.reset({ sameMap: !!msg.sameMap, insanity: msg.insanity });
         broadcastInit();
         broadcastLobby();
         break;

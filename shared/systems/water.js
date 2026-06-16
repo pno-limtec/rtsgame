@@ -39,6 +39,9 @@ const UPHILL_FLOW_BIAS = 110;
 const SURFACE_RELAX = 0.13;
 const FLOW_MIN_MOBILITY = 0.28;
 const FLOW_FULL_MOBILITY_DEPTH = WET_DEPTH * 1.05;
+const UPHILL_RUNOFF_EPS = FLOW_EPS * 1.4;
+const UPHILL_SPILL_DEPTH = FLOOD_DEPTH * 1.25;
+const DIRECTED_RUNOFF_BOOST_MAX = 1.85;
 // Wasserdruck: eine hohe Wassersäule steht unter mehr Druck und strömt schneller ab/zu
 // (Torricelli, v ∝ √Tiefe). Nur die Tiefe ÜBER der Mobilitätsschwelle erzeugt Zusatzdruck —
 // flaches Wasser/Regenfilm bleibt wie gehabt träge. Gedeckelt für CA-Stabilität.
@@ -56,9 +59,12 @@ const DIR8 = [
 const POOL_COMPONENT_DEPTH = WET_DEPTH * 0.22;
 const POOL_FLAT_DEPTH = WET_DEPTH;
 const POOL_LEVEL_EPS = 0.0025;
-const OPEN_RUNOFF_DRAIN = 0.010;          // dünne Restfeuchte verschwindet jetzt SEHR langsam (war 0.045)
-const OPEN_RUNOFF_MIN = WET_DEPTH * 0.005;
+const OPEN_RUNOFF_DRAIN = 0.018;          // offene Rinnen trocknen wieder zu Restfeuchte ab; die sichtbare Wasserhaut rendert der Client
+const OPEN_RUNOFF_MIN = WET_DEPTH * 0.003;
 const DRAIN_SEARCH_LIMIT = 9000;
+const STORM_SEA_CURRENT_MIN_DEPTH = Math.max(CURRENT_MIN_DEPTH, 0.075);
+const STORM_SEA_CURRENT_SPEED = 1.45;
+const STORM_SEA_CURRENT_SWIRL = 0.38;
 
 function flowGround(t, i) {
   return t.height[i] - ((t.tracks && t.tracks[i] > TRACK_PUDDLE_MIN) ? t.tracks[i] * TRACK_DEPRESSION : 0);
@@ -144,7 +150,53 @@ function hasOutflow(t, i, eps = FLOW_EPS) {
   return false;
 }
 
-function currentAt(t, i, depth) {
+function hasDownhillGroundNeighbor(t, i, gi, eps = UPHILL_RUNOFF_EPS) {
+  const x = i % t.w, y = (i / t.w) | 0;
+  for (const [dx, dy, dist] of DIR8) {
+    const nx = x + dx, ny = y + dy;
+    if (nx < 0 || ny < 0 || nx >= t.w || ny >= t.h) continue;
+    const j = ny * t.w + nx;
+    if (t.waterBlock[i] > 0 || t.waterBlock[j] > 0) continue;
+    if ((gi - flowGround(t, j)) / dist > eps) return true;
+  }
+  return false;
+}
+
+function canFlowAcrossGround(t, i, j, gi, gj, depth, hasDownhillGround) {
+  const rise = gj - gi;
+  if (rise <= UPHILL_RUNOFF_EPS) return true;
+  if (!hasDownhillGround) return true; // Becken dürfen weiter ansteigen/überlaufen.
+  if ((t.lakeMask && (t.lakeMask[i] || t.lakeMask[j]))) return true;
+  return depth >= UPHILL_SPILL_DEPTH && depth >= rise + WET_DEPTH * 0.5;
+}
+
+function stormSeaCurrentAt(t, world, i, depth) {
+  if (!world?.env || world.env.weather !== 'storm') return null;
+  if (depth <= STORM_SEA_CURRENT_MIN_DEPTH || !isOpenSeaCell(t, i)) return null;
+  const x = i % t.w, y = (i / t.w) | 0;
+  const time = world.time || world.tick * DT || 0;
+  const seed = (world.seed || 1) * 0.013;
+  const cx = t.w * 0.5, cy = t.h * 0.5;
+  const rx = x + 0.5 - cx, ry = y + 0.5 - cy;
+  const radial = Math.atan2(ry, rx);
+  const band = Math.sin(x * 0.11 + y * 0.07 + seed + time * 0.055);
+  const wobble = Math.sin(x * 0.047 - y * 0.063 + seed * 1.7 + time * 0.091);
+  const angle = seed + time * 0.035 + band * 0.65 + wobble * 0.24 + radial * 0.28;
+  const tang = radial + Math.PI / 2;
+  let dx = Math.cos(angle) * (1 - STORM_SEA_CURRENT_SWIRL) + Math.cos(tang) * STORM_SEA_CURRENT_SWIRL;
+  let dy = Math.sin(angle) * (1 - STORM_SEA_CURRENT_SWIRL) + Math.sin(tang) * STORM_SEA_CURRENT_SWIRL;
+  const len = Math.hypot(dx, dy) || 1;
+  dx /= len; dy /= len;
+  const shoreDist = Math.hypot(rx, ry) / Math.max(1, Math.min(t.w, t.h) * 0.42);
+  const edgeBoost = Math.max(0, Math.min(1, shoreDist - 0.55)) * 0.28;
+  const pulse = 0.76 + 0.24 * Math.sin(x * 0.031 + y * 0.043 + seed + time * 0.13);
+  const speed = STORM_SEA_CURRENT_SPEED * pulse * (1 + edgeBoost);
+  return { dx, dy, grad: speed / CURRENT_DRAG, speed, seaStorm: true };
+}
+
+function currentAt(t, i, depth, world = null) {
+  const stormSea = stormSeaCurrentAt(t, world, i, depth);
+  if (stormSea) return stormSea;
   const x = i % t.w, y = (i / t.w) | 0;
   const s0 = flowGround(t, i) + depth;
   let best = null, bestGrad = 0;
@@ -164,6 +216,22 @@ function waterDeathMeta(t, i, depth) {
   const cur = currentAt(t, i, depth);
   const speed = Math.min(CURRENT_MAX, Math.max(0.45, cur.grad * CURRENT_DRAG));
   return { vx: cur.dx * speed, vy: cur.dy * speed, depth: Math.round(depth * 1000) / 1000 };
+}
+
+function rainBiasAt(t, world, i) {
+  const b = world?.env?._hazardBias;
+  if (!b || !t?.w || !t?.h) return 1;
+  const tx = i % t.w, ty = (i / t.w) | 0;
+  const side = ((tx + 0.5 - t.w / 2) * b.sideX + (ty + 0.5 - t.h / 2) * b.sideY)
+    / Math.max(1, Math.max(t.w, t.h) * 0.42);
+  const sideBias = 0.72 + smooth01(side + 0.55) * 0.62;
+  const local = Math.max(0, 1 - Math.hypot(tx + 0.5 - b.tx, ty + 0.5 - b.ty) / (b.radius || 34));
+  return Math.max(0.65, Math.min(1.65, sideBias + local * 0.36));
+}
+
+function smooth01(x) {
+  const t = Math.max(0, Math.min(1, x));
+  return t * t * (3 - 2 * t);
 }
 
 export function stepWater(world) {
@@ -208,7 +276,7 @@ function simulateCA(t, dtW, world) {
       const i = (world.rng() * w * h) | 0;
       if (t.startSafe && t.startSafe[i]) continue; // erhöhte Startterrassen entwässern Regen statt ihn als Flut stehen zu lassen
       if (t.snow && height[i] > SNOW_LINE) continue; // über der Schneegrenze fällt Schnee statt Regen
-      const amount = RAIN_DEPTH * mult * RAIN_POOL_MULT;
+      const amount = RAIN_DEPTH * mult * RAIN_POOL_MULT * rainBiasAt(t, world, i);
       const sink = rainSinkCell(t, i);
       if (sink !== i) {
         water[i] = Math.min(WATER_MAX_DEPTH, water[i] + amount * RAIN_SINK_LOCAL_FRACTION);
@@ -225,7 +293,7 @@ function simulateCA(t, dtW, world) {
       const lakeGain = RAIN_DEPTH * mult * RAIN_LAKE_GAIN;
       for (let i = 0; i < t.lakeMask.length; i++) {
         if (!t.lakeMask[i]) continue;
-        water[i] = Math.min(WATER_MAX_DEPTH, water[i] + lakeGain);
+        water[i] = Math.min(WATER_MAX_DEPTH, water[i] + lakeGain * rainBiasAt(t, world, i));
         waterActive.add(i);
       }
     }
@@ -241,7 +309,7 @@ function simulateCA(t, dtW, world) {
           if (Math.hypot(xx, yy) > r + 0.3) continue;
           const i = ny * w + nx;
           if (height[i] <= SEA_LEVEL || height[i] > SNOW_LINE || waterBlock[i] > 0) continue;
-          water[i] = Math.min(WATER_MAX_DEPTH, water[i] + valleyGain);
+          water[i] = Math.min(WATER_MAX_DEPTH, water[i] + valleyGain * rainBiasAt(t, world, i));
           waterActive.add(i);
         }
       }
@@ -253,7 +321,7 @@ function simulateCA(t, dtW, world) {
         const tr = t.tracks[i];
         if (tr <= TRACK_PUDDLE_MIN) continue;
         if (t.snow && height[i] > SNOW_LINE) continue;
-        water[i] = Math.min(WATER_MAX_DEPTH, water[i] + RAIN_DEPTH * TRACK_RAIN_MULT * mult * tr);
+        water[i] = Math.min(WATER_MAX_DEPTH, water[i] + RAIN_DEPTH * TRACK_RAIN_MULT * mult * tr * rainBiasAt(t, world, i));
         waterActive.add(i);
       }
     }
@@ -279,7 +347,7 @@ function simulateCA(t, dtW, world) {
     }
   }
 
-  if (drought) dryRiverBeds(t, DROUGHT_RIVER_DRAIN * (0.7 + solar * 0.8), waterActive);
+  if (drought) dryRiverBeds(t, DROUGHT_RIVER_DRAIN * (0.7 + solar * 0.8), waterActive, world);
 
   // Schneedecke des Zentralbergs (Phase 15): Sonne schmilzt Schnee → Schmelzwasser speist die
   // Bergflüsse (sichtbarer Tageszyklus der Pegel); bei Regen/Gewitter fällt oben Neuschnee.
@@ -379,20 +447,25 @@ function simulateCA(t, dtW, world) {
     if (avail <= 0) continue;
     const gi = flowGround(t, i);
     const si = gi + water[i]; // eigene Oberfläche über gerilltem Boden
+    const hasDownhillGround = hasDownhillGroundNeighbor(t, i, gi);
     // Tiefer liegende, nicht gesperrte Nachbarn sammeln.
-    let lower = null, headSum = 0, maxGroundDrop = 0;
+    let lower = null, headSum = 0, maxGroundDrop = 0, touchesBarrier = waterBlock[i] > 0, blockedUphill = false;
     let surfaceSum = si, surfaceCount = 1;
     const x = i % w, y = (i / w) | 0;
     for (const [dx, dy, dist] of DIR8) {
       const nx = x + dx, ny = y + dy;
       if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
       const j = ny * w + nx;
-      if (waterBlock[i] > 0 || waterBlock[j] > 0) continue; // Damm/Deich sperrt diese Kante
+      if (waterBlock[i] > 0 || waterBlock[j] > 0) { touchesBarrier = true; continue; } // Damm/Deich sperrt diese Kante
       const gj = flowGround(t, j);
       const sj = gj + water[j];
       const head = (si - sj) / dist;
       if (head > FLOW_EPS) {
         const groundDrop = (gi - gj) / dist;
+        if (!canFlowAcrossGround(t, i, j, gi, gj, water[i], hasDownhillGround)) {
+          blockedUphill = true;
+          continue;
+        }
         const gravityBias = groundDrop >= 0
           ? 1 + Math.min(1.8, groundDrop * DOWNHILL_FLOW_BIAS)
           : Math.max(0.35, 1 + groundDrop * UPHILL_FLOW_BIAS);
@@ -415,7 +488,11 @@ function simulateCA(t, dtW, world) {
       const basinDamping = (t.lakeMask && t.lakeMask[i]) ? 0.18 : 1;
       const equalizeCap = Math.max(0, si - surfaceSum / surfaceCount) * 0.82;
       const flowCap = Math.min(avail, equalizeCap + maxGroundDrop * SLOPE_FLOW_RELIEF);
-      const out = Math.min(avail, flowCap, headSum * 0.72 * WATER_FLOW * mobility * pressure * basinDamping);
+      const barrierDamping = touchesBarrier ? 0 : 1;
+      const directedBoost = blockedUphill && maxGroundDrop > 0
+        ? Math.min(DIRECTED_RUNOFF_BOOST_MAX, 1.12 + maxGroundDrop * 22)
+        : 1;
+      const out = Math.min(avail, flowCap, headSum * 0.72 * WATER_FLOW * mobility * pressure * basinDamping * barrierDamping * directedBoost);
       if (out > SETTLE_EPS) {
         for (const [j, weight] of lower) {
           const q = out * (weight / headSum);
@@ -640,6 +717,7 @@ function relaxWaterSurface(t, seeds, touched) {
     if (avail <= SETTLE_EPS) continue;
     const gi = flowGround(t, i);
     const si = gi + water[i];
+    const hasDownhillGround = hasDownhillGroundNeighbor(t, i, gi);
     const x = i % w, y = (i / w) | 0;
     let spent = 0;
     for (const [dx, dy, dist] of DIR8) {
@@ -647,7 +725,9 @@ function relaxWaterSurface(t, seeds, touched) {
       if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
       const j = ny * w + nx;
       if (waterBlock[i] > 0 || waterBlock[j] > 0) continue;
-      const sj = flowGround(t, j) + water[j];
+      const gj = flowGround(t, j);
+      if (!canFlowAcrossGround(t, i, j, gi, gj, water[i], hasDownhillGround)) continue;
+      const sj = gj + water[j];
       const gap = si - sj;
       if (gap <= FLOW_EPS * 2) continue;
       const q = Math.min(avail - spent, (gap * SURFACE_RELAX) / dist);
@@ -667,7 +747,7 @@ function relaxWaterSurface(t, seeds, touched) {
   return relaxed;
 }
 
-function dryRiverBeds(t, amount, waterActive) {
+function dryRiverBeds(t, amount, waterActive, world) {
   if (!t.riverPaths || amount <= 0) return;
   const seen = new Set();
   for (const path of t.riverPaths) for (const pi of path) {
@@ -683,7 +763,7 @@ function dryRiverBeds(t, amount, waterActive) {
       if (before <= 0) continue;
       // Nur ÜBERSCHUSS über dem Grundpegel abtragen: die beiden Hauptflüsse (baseWater>0 entlang
       // der Rinne) schrumpfen in der Trockenphase, versiegen aber nie — sie führen dauerhaft Wasser.
-      t.water[i] = Math.max(t.baseWater[i] || 0, before - amount);
+      t.water[i] = Math.max(t.baseWater[i] || 0, before - amount * rainBiasAt(t, world, i));
       if (Math.abs(t.water[i] - before) > SETTLE_EPS) markActive(t, waterActive, i);
     }
   }
@@ -822,14 +902,29 @@ function applyFloodDamage(world, didStep) {
     // Strömung: fließendes Wasser (Oberflächengefälle) reißt Einheiten flussabwärts —
     // Landeinheiten voll, Schiffe abgeschwächt (Motorkraft hält dagegen).
     if (depth > CURRENT_MIN_DEPTH) {
-      const cur = currentAt(t, ci, depth);
+      const cur = currentAt(t, ci, depth, world);
       if (cur.grad > 0) {
-        const domainMult = e.domain === 'water' || e.domain === 'amphibious' ? 0.35
+        const floatingSurfaceShip = cur.seaStorm && (e.domain === 'water' || e.domain === 'amphibious') && !e.submerged;
+        const domainMult = floatingSurfaceShip ? 0.95
+          : e.domain === 'water' || e.domain === 'amphibious' ? 0.35
           : builderWaterWork(e, depth) ? 0.45
             : (depth > FLOOD_DEPTH ? 1.35 : 1);
-        const drift = Math.min(CURRENT_MAX, cur.grad * CURRENT_DRAG) * dtW * domainMult;
-        e.x += cur.dx * drift; e.y += cur.dy * drift;
-        e.inFlood = world.tick;
+        const currentSpeed = cur.speed ?? cur.grad * CURRENT_DRAG;
+        const drift = Math.min(CURRENT_MAX, currentSpeed) * dtW * domainMult;
+        const nx = e.x + cur.dx * drift, ny = e.y + cur.dy * drift;
+        let canDrift = true;
+        if (e.domain === 'water' || e.domain === 'amphibious') {
+          const [ntx, nty] = worldToTile(nx, ny);
+          canDrift = false;
+          if (inBounds(t, ntx, nty)) {
+            const ni = tIdx(t, ntx, nty);
+            canDrift = t.type?.[ni] === TT.WATER || (t.water[ni] || 0) > CURRENT_MIN_DEPTH;
+          }
+        }
+        if (canDrift) {
+          e.x = nx; e.y = ny;
+          e.inFlood = world.tick;
+        }
       }
     }
     if (e.domain === 'water' || e.domain === 'amphibious') continue;

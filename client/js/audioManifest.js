@@ -80,14 +80,6 @@ export const SFX_SAMPLES = {
     'https://cdn.pixabay.com/download/audio/2022/03/10/audio_f365c249a1.mp3?filename=freesound_community-construction-35446.mp3',
     'https://cdn.pixabay.com/download/audio/2022/03/09/audio_41942b7caf.mp3?filename=freesound_community-construction-drilling-24221.mp3',
   ],
-  motor: [
-    'https://cdn.pixabay.com/download/audio/2025/04/08/audio_e4287ae332.mp3?filename=u_ywhhzm31em-motor-brake-sound-324220.mp3',
-    'https://cdn.pixabay.com/download/audio/2025/04/20/audio_7b2bfa0d2a.mp3?filename=arunangshubanerjee-mechanical-motor-starting-whirring-stopping-330043.mp3',
-  ],
-  excavator: [
-    'https://cdn.pixabay.com/download/audio/2022/03/13/audio_600d3b5c2f.mp3?filename=freesound_community-excavator-58372.mp3',
-    'https://cdn.pixabay.com/download/audio/2022/03/09/audio_c3ee42a09b.mp3?filename=freesound_community-demolition-excavator-with-wrecking-ball-22250.mp3',
-  ],
   yes: [
     'https://cdn.pixabay.com/download/audio/2022/03/19/audio_14ce860b16.mp3?filename=freesound_community-yes-96786.mp3',
     'https://cdn.pixabay.com/download/audio/2022/03/15/audio_f353fb5d17.mp3?filename=freesound_community-yes-laugh-82035.mp3',

@@ -72,10 +72,10 @@ export const LIGHTNING_DMG = 65;               // Schaden eines direkten Blitzei
 export const QUAKE_INTERVAL = [180, 420];      // Sekunden zwischen Erdbeben (min, max; deterministisch)
 export const QUAKE_DURATION = 3.5;             // Sekunden Bebendauer
 export const QUAKE_RADIUS = 14;                // Tiles um das Epizentrum
-export const QUAKE_SLOPE = 0.055;              // Hangneigung (Höhendiff. je Nachbarzelle), ab der Material abrutscht
+export const QUAKE_SLOPE = 0.036;              // Hangneigung (Höhendiff. je Nachbarzelle), ab der Material abrutscht
 export const QUAKE_SLIDE = 0.5;                // Anteil der Überneigung, der je Rutsch-Durchgang abrutscht
 export const QUAKE_BUILDING_DMG = 60;          // Gebäudeschaden je Sekunde im Bebenradius auf Hangzellen
-export const RAIN_SLIDE_SLOPE = 0.060;         // nasse Hänge werden ab dieser Neigung instabil (häufiger als zuvor)
+export const RAIN_SLIDE_SLOPE = 0.038;         // nasse Hänge werden ab dieser Neigung instabil (häufiger als zuvor)
 export const RAIN_SLIDE_CHANCE = 0.22;         // Stichprobenchance je Regenprüfung und Kandidat
 export const RAIN_SLIDE_AMT = 0.55;            // Anteil der Überneigung, der bei Regen abrutscht (sichtbarer)
 

@@ -53,6 +53,7 @@ function drawRoad(t, road, a, b) {
     const i = y * t.w + x;
     if (t.type[i] === TT.CLIFF && !(t.tunnel && t.tunnel[i])) continue;
     if (t.water[i] > WET_DEPTH && !(t.bridge && t.bridge[i])) continue;
+    if (t.block && t.block[i] > 0) continue;   // nicht unter Gebäuden (Gebäude steht nicht auf der Straße)
     road[i] = 1;
   }
 }

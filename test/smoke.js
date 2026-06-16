@@ -56,6 +56,55 @@ ok(Array.isArray(init.terrain.waterDepth) && init.terrain.waterDepth.length > 0,
     'Client kann initiale Binnengewässer durch dynamische Trockenlegung überschreiben');
 }
 {
+  const n = new Net();
+  n.players = [{ id: 0 }, { id: 1 }];
+  n.seat = 0;
+  n.viewSeat = 0;
+  const sent = [];
+  n.ws = { readyState: 1, send: (msg) => sent.push(JSON.parse(msg)) };
+  n.watch(1, 'Zuschauer');
+  ok(sent.length === 1 && sent[0].t === 'release',
+    'Zuschauen aus aktivem Sitz gibt den Sitz serverseitig frei');
+  n.onMessage({ type: 'spectator', seat: 0, ok: true });
+  ok(n.spectator && n.seat == null && n.viewSeat === 1,
+    'Zuschauer bleibt nach Serverfreigabe auf der gewählten Sicht');
+}
+{
+  const n = new Net();
+  const sent = [];
+  n.players = [{ id: 0 }, { id: 1 }];
+  n.ws = { readyState: 1, send: (msg) => sent.push(JSON.parse(msg)) };
+  n.join('Kommandant', 1, { insanity: 4 });
+  n.watch(0, 'Zuschauer', { insanity: 3 });
+  ok(sent[0]?.t === 'join' && sent[0].insanity === 4,
+    'Start-Lobby sendet Insanity-Level beim Beitreten');
+  ok(sent[1]?.t === 'matchOptions' && sent[1].insanity === 3,
+    'Zuschauerstart kann das Insanity-Level als Match-Option setzen');
+}
+{
+  const m = new Match({ data, seed: 779, slots: 2 });
+  m.setMatchOptions({ insanity: 4 });
+  ok(m.controlsView().insanity === 4, 'Match speichert Insanity-Level in den Controls');
+  m.reset({ sameMap: true });
+  ok(m.controlsView().insanity === 4, 'Neues Spiel behält das Insanity-Level bei');
+}
+{
+  const { initEnv, normalizeInsanityLevel } = await import('../shared/systems/environment.js');
+  ok(normalizeInsanityLevel(0) === 1 && normalizeInsanityLevel(99) === 4,
+    'Insanity-Level wird auf vier Startstufen begrenzt');
+  const players = [{ id: 0, faction: 'KBN', controller: 'human' }, { id: 1, faction: 'HLX', controller: 'human' }];
+  const calm = createWorld({ data, seed: 918, players });
+  const wild = createWorld({ data, seed: 918, players });
+  calm.controls = { insanity: 1 };
+  wild.controls = { insanity: 4 };
+  initEnv(calm);
+  initEnv(wild);
+  ok(wild.env.weatherLeft < calm.env.weatherLeft,
+    'Insanity 4 verkürzt Wetterphasen gegenüber Easy-Peasy');
+  ok(wild.env._nextQuake < calm.env._nextQuake,
+    'Insanity 4 lässt Beben häufiger kommen als Easy-Peasy');
+}
+{
   for (let seed = 30; seed < 38; seed++) {
     const w = createWorld({ data, seed, players: [{ id: 0, faction: 'KBN', controller: 'human' }, { id: 1, faction: 'HLX', controller: 'human' }] });
     const wetStart = ownerEntities(w, 0).concat(ownerEntities(w, 1)).some(e => {
@@ -141,6 +190,7 @@ ok(snap.players.every(p => p.cap && typeof p.cap.water === 'number' && typeof p.
 ok(snap.controls?.aiOnly && snap.controls.speed === 1 && snap.controls.timeMode === 'auto', 'Snapshot enthält Zuschauer-Kontrollen im KI-Restspiel');
 ok(match.setSpectatorControls({ speed: 4, timeMode: 'night' }), 'Zuschauer kann KI-Restspiel beschleunigen und auf Nacht fixieren');
 ok(match.simSpeed() === 4 && match.snapshot().controls.timeMode === 'night', 'Zuschauer-Kontrollen wirken serverseitig');
+ok(match.setSpectatorControls({ speed: 2 }) && match.snapshot().controls.timeMode === 'night', 'Tempoänderung behält Tag/Nacht-Fixierung');
 
 // 3) Join-in-Progress: Mensch übernimmt einen laufenden KI-Slot (KI-Übernahme)
 const before = match.player(0).controller;
@@ -148,7 +198,8 @@ const seat = match.joinHuman('TestSpieler', 0);
 ok(seat === 0, 'Mensch erhält Sitz 0');
 ok(before === 'ai' && match.player(0).controller === 'human', 'KI-Slot wurde von Mensch übernommen');
 ok(match.player(0).name === 'TestSpieler', 'Spielername übernommen');
-ok(!match.snapshot().controls.aiOnly && match.simSpeed() === 1 && !match.setSpectatorControls({ speed: 8 }), 'Zuschauer-Kontrollen sind mit aktivem Menschen gesperrt');
+ok(!match.snapshot().controls.aiOnly && match.setSpectatorControls({ speed: 8, timeMode: 'day' }) && match.simSpeed() === 8,
+  'Zuschauer-Kontrollen bleiben mit aktivem Menschen verfügbar');
 const unitsBefore = ownerEntities(match.world, 0, 'unit').length;
 ok(unitsBefore > 0, 'Übernommene Fraktion behält ihre Einheiten');
 ok(match.takeoverAi('Zuschauer', 1) === 1 && match.player(1).controller === 'human',
@@ -1673,7 +1724,9 @@ ok(match.player(0).controller === 'ai', 'Sitz fällt nach Disconnect-Timeout an 
   // (f) Automatische Straßen zwischen nahen Gebäuden.
   for (let k = 0; k < 51; k++) step(w);
   let roadCells = 0; for (let i = 0; i < t.road.length; i++) if (t.road[i]) roadCells++;
-  ok(roadCells >= 4, `Straßennetz zwischen nahen Gebäuden gebaut (${roadCells} Zellen)`);
+  // Straßen liegen NICHT mehr unter Gebäude-Footprints (Gebäude steht nicht auf der Straße) → es zählen
+  // nur die freien Verbindungszellen zwischen den Bauten.
+  ok(roadCells >= 3, `Straßennetz zwischen nahen Gebäuden gebaut (${roadCells} Zellen)`);
 
   // (g) Terraforming-Auftrag: Bagger fährt hin, gräbt ab, Erde landet im Erdhügel.
   const builder = ownerEntities(w, 0, 'unit').find(u => u.abilities.includes('construct'));

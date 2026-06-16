@@ -3,7 +3,7 @@
 import { DT, FLOOD_DEPTH, MAX_UNITS_PER_PLAYER, MUD_IMPASSABLE, TERRA_RAISE_COST } from './constants.js';
 import {
   createWorld, spawnBuilding, buildSpatial, ownerEntities,
-  canAfford, pay, effectiveCost, canPlaceBuilding, requiresBuildingAnchor, removeFortification, removeSolidBlock,
+  canAfford, pay, effectiveCost, canPlaceBuilding, requiresBuildingAnchor, removeFortification, removeSolidBlock, addResource,
 } from './world.js';
 import { stepEconomy } from './systems/economy.js';
 import { stepProduction } from './systems/production.js';
@@ -377,6 +377,23 @@ export function applyCommand(world, cmd, playerId) {
       const t = world.terrain, i = tIdx(t, cmd.tx, cmd.ty);
       if (inBounds(t, cmd.tx, cmd.ty)) { t.block[i]++; pile._solid = true; }
       site.pileTx = cmd.tx; site.pileTy = cmd.ty;
+      break;
+    }
+    case 'destroy': {
+      // Eigenes Gebäude abreißen: im Bau → volle Rückerstattung (Bau abbrechen), fertig → 50 %.
+      // Die normale Cleanup-Routine (siehe cleanup) gibt Sperren/Befestigungen/Tunnel frei.
+      const b = world.entities.get(cmd.building);
+      if (!b || b.etype !== 'building' || b.owner !== playerId || b.dead) break;
+      if (b.kind === 'earth_pile' || b.kind === 'ore_pile') break; // Materialhaufen sind keine Bauten
+      const def = b.def || world.data.buildings[b.kind];
+      const refundFrac = b.buildProgress < 1 ? 1 : 0.5;   // im Bau: voll zurück, fertig: halb
+      const cost = effectiveCost(world, playerId, def) || {};
+      for (const [k, v] of Object.entries(cost)) {
+        const give = Math.round((v || 0) * refundFrac);
+        if (give > 0) addResource(world, player, k, give);
+      }
+      b.dead = true; b.hp = 0; b._deathCause = 'sold';
+      world.events.push({ type: 'death', id: b.id, x: b.x, y: b.y, etype: 'building', kind: b.kind, size: b.size || 1, sold: 1 });
       break;
     }
     case 'produce': {

@@ -252,6 +252,21 @@ export function stepMovement(world) {
     }
     stampVehicleTrack(world, e, ox, oy);
 
+    // Anti-Stau bei Gruppenbewegung: Einheiten haben keine Tile-Sperre, weichen einander aber per
+    // Separation aus. Drängen sich viele am Ziel, blockieren sie sich gegenseitig und kommen ihrem
+    // Formationsplatz nie ganz nahe → endloses Repathen/„Verhaken". Macht eine Einheit ihrem Ziel über
+    // ~1,5 s kaum noch Boden gut UND ist sie schon in Zielnähe, gilt sie als angekommen (Move→idle).
+    // NUR für reine 'move'-Befehle: 'attackmove'/'guard'/'patrol' müssen weiter vorrücken, bis sie in
+    // Waffenreichweite sind — sonst bleiben Angriffswellen kurz vor dem Gegner stehen (kein Gefecht →
+    // Unentschieden, in match-sim gemessen).
+    if (e.moveTarget && e.order.type === 'move') {
+      const fdNow = Math.hypot(e.moveTarget.x - e.x, e.moveTarget.y - e.y);
+      if (e._jamFd != null && fdNow > e._jamFd - 0.12) e._jamT = (e._jamT || 0) + DT;
+      else e._jamT = 0;
+      e._jamFd = fdNow;
+      if (e._jamT > 1.5 && fdNow < 5.5) { finishMoveOrder(e); e._jamT = 0; e._jamFd = null; e._v = 0; }
+    } else { e._jamT = 0; e._jamFd = null; }
+
     // Periodisches Repathing, falls Pfad leer aber Ziel nicht erreicht. Cooldown je Einheit
     // gestaffelt, damit nicht ganze Armeen im selben Tick A* rechnen (Tick-Spitzen).
     e.repathCd -= DT;
@@ -292,6 +307,10 @@ function trackBuilderWade(world, e, tx, ty) {
 
 function updateStuckState(world, e, tx, ty, blocked) {
   if (e.kind === 'tractor' || e.domain !== 'land' || e.category !== 'vehicle') { e._stuckTime = 0; return false; }
+  if (nearHaulDepot(world, e)) {
+    e._stuckTime = 0;
+    return false;
+  }
   const t = world.terrain;
   let hazard = !!blocked;
   let waterHazard = false, mudHazard = false;
@@ -328,6 +347,18 @@ function updateStuckState(world, e, tx, ty, blocked) {
   if (e._stuckTime < abandonAfter) return false;
   abandonVehicle(world, e);
   return true;
+}
+
+function nearHaulDepot(world, e) {
+  if (e.order?.type !== 'haul_pile' || e.order.state !== 'toDepot' || (e.cargo || 0) <= 0) return false;
+  const resource = e.cargoResource || e.order.resource;
+  if (!resource) return false;
+  for (const b of world.entities.values()) {
+    if (b.owner !== e.owner || b.etype !== 'building' || b.dead || b.buildProgress < 1) continue;
+    if (b.def?.resourceDepot !== resource && !(b.def?.integratedStorage && b.def.integratedStorage[resource])) continue;
+    if (Math.hypot(b.x - e.x, b.y - e.y) <= (b.size || 1) + 3.5) return true;
+  }
+  return false;
 }
 
 // Nächste trockene, befahrbare Zelle (Spiralsuche) als Fluchtziel.

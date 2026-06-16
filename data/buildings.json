@@ -32,17 +32,17 @@
     "desc": "Verbindet Pumpwerke mit Wassertürmen und Bohrtürme mit Öldepots. Kann auch durchs Wasser verlegt werden. Verwundbar — Leitungsbruch stoppt die Förderung."
   },
   "refinery": {
-    "label": "Raffinerie", "role": "economy",
+    "label": "Stahlwerk", "role": "economy",
     "hp": 900, "cost": { "ore": 800 }, "buildTime": 14,
     "power": -30, "size": 3, "sight": 7,
     "storage": { "ore": 1000 },
-    "desc": "Verarbeitet Erz aus dem Erzlager zu Credits. Erz wird von Erz-LKWs angeliefert."
+    "desc": "Verhüttet Erz aus dem Erzlager zu Stahl/Credits. Erz wird von Erz-LKWs angeliefert."
   },
   "ore_depot": {
     "label": "Erzlager", "role": "logistics",
     "hp": 650, "cost": { "ore": 350, "materials": 20 }, "buildTime": 8,
     "power": -5, "size": 2, "sight": 5, "resourceDepot": "ore", "storage": { "ore": 2500 },
-    "desc": "Annahmestelle für Erz-LKWs. Von hier verarbeitet die Raffinerie Erz zu Credits."
+    "desc": "Annahmestelle für Erz-LKWs. Von hier verhüttet das Stahlwerk Erz zu Credits."
   },
   "material_depot": {
     "label": "Baumateriallager", "role": "logistics",

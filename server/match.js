@@ -4,6 +4,7 @@ import { createWorld, step, enqueueCommand, applyCommand } from '../shared/sim.j
 import { serializeInit, serializeSnapshot } from './snapshot.js';
 import { TICK_RATE } from '../shared/constants.js';
 import { deserializeSavegame, serializeSavegame } from './savegame.js';
+import { normalizeInsanityLevel, setInsanityLevel, triggerSpectatorEvent } from '../shared/systems/environment.js';
 
 const SPECTATOR_SPEEDS = [1, 2, 4, 8];
 const TIME_MODES = new Set(['auto', 'day', 'night']);
@@ -17,7 +18,7 @@ export class Match {
     this.factions = factions;
     const players = this.makePlayers();
     this.world = createWorld({ data, seed, map, players });
-    this.world.controls = { speed: 1, timeMode: 'auto', aiOnly: true };
+    this.world.controls = { speed: 1, timeMode: 'auto', aiOnly: true, insanity: 2 };
     this.seats = players.map((p) => ({ id: p.id, occupant: null, disconnectAt: null }));
     this.running = false;
     this.onSnapshot = null;     // (snapshot) => void   (vom Transport gesetzt)
@@ -31,8 +32,9 @@ export class Match {
     return players;
   }
 
-  reset({ sameMap = false } = {}) {
+  reset({ sameMap = false, insanity = null } = {}) {
     const oldSeats = this.seats || [];
+    const nextInsanity = normalizeInsanityLevel(insanity ?? this.world?.controls?.insanity ?? 2);
     if (!sameMap) this.seed = (Date.now() & 0x7fffffff) || 1;
     const oldPlayers = this.world?.players || [];
     const players = this.makePlayers().map(p => {
@@ -46,7 +48,8 @@ export class Match {
       };
     });
     this.world = createWorld({ data: this.data, seed: this.seed, map: this.map, players });
-    this.world.controls = { speed: 1, timeMode: 'auto', aiOnly: this.aiOnly() };
+    this.world.controls = { speed: 1, timeMode: 'auto', aiOnly: this.aiOnly(), insanity: nextInsanity };
+    setInsanityLevel(this.world, nextInsanity);
     this.seats = players.map(p => {
       const old = oldSeats.find(s => s.id === p.id);
       return { id: p.id, occupant: old?.occupant || null, disconnectAt: null };
@@ -144,19 +147,25 @@ export class Match {
   syncSpectatorControls() {
     const controls = this.world.controls || (this.world.controls = {});
     controls.aiOnly = this.aiOnly();
-    if (!controls.aiOnly) {
-      controls.speed = 1;
-      controls.timeMode = 'auto';
-    } else {
-      controls.speed = normalizeSpeed(controls.speed) || 1;
-      if (!TIME_MODES.has(controls.timeMode)) controls.timeMode = 'auto';
-    }
+    controls.speed = normalizeSpeed(controls.speed) || 1;
+    if (!TIME_MODES.has(controls.timeMode)) controls.timeMode = 'auto';
+    controls.insanity = normalizeInsanityLevel(controls.insanity ?? 2);
     if (this.world.env) this.world.env.timeMode = controls.timeMode;
+    setInsanityLevel(this.world, controls.insanity);
+  }
+
+  setMatchOptions({ insanity } = {}) {
+    this.syncSpectatorControls();
+    const level = normalizeInsanityLevel(insanity ?? this.world.controls.insanity);
+    if (level === this.world.controls.insanity) return false;
+    this.world.controls.insanity = level;
+    setInsanityLevel(this.world, level);
+    return true;
   }
 
   setSpectatorControls(patch = {}) {
     this.syncSpectatorControls();
-    if (!this.world.controls.aiOnly) return false;
+    const wantsEvent = Object.prototype.hasOwnProperty.call(patch, 'event');
     let changed = false;
     if (Object.prototype.hasOwnProperty.call(patch, 'speed')) {
       const speed = normalizeSpeed(patch.speed);
@@ -172,13 +181,14 @@ export class Match {
         changed = true;
       }
     }
+    if (wantsEvent && triggerSpectatorEvent(this.world, String(patch.event || ''))) changed = true;
     this.syncSpectatorControls();
     return changed;
   }
 
   simSpeed() {
     this.syncSpectatorControls();
-    return this.world.controls.aiOnly ? this.world.controls.speed : 1;
+    return this.world.controls.speed;
   }
 
   controlsView() {

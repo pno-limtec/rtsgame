@@ -6,12 +6,14 @@ import {
   SLOPE_INFANTRY, SLOPE_VEHICLE, SLOPE_HEAVY, SLOPE_BUILDER, FOG_SIGHT_MULT, WET_DEPTH, SEA_LEVEL, SNOW_LINE,
 } from './constants.js';
 import { initVet, awardXp, killValue, DEFAULT_VET } from './systems/veterancy.js';
+import { findPath } from './pathfinding.js';
 
 let _gid = 1;
 const START_RIVER_CLEARANCE = 18;
 const START_SUPPORT_RIVER_CLEARANCE = 10;
 const BUILD_ANCHOR_RANGE = 7;
 const ANCHORED_BUILD_ROLES = new Set(['logistics', 'defense', 'production']);
+const VIADUCT_HALF_WIDTH = 2; // 5 Zellen: genug Raum für zwei Fahrzeuge auf der Querung
 
 export function setNextEntityId(id) {
   const n = Math.max(1, Math.floor(Number(id) || 1));
@@ -62,7 +64,94 @@ export function createWorld({ data, seed = 1, map = DEFAULT_MAP, players = [] })
   ensureInterbaseBarriers(world); // Zwischen Basen liegen natürliche Sperren statt neutraler Abkürzungen.
   stabilizeWaterTerrain(terrain.height, terrain.w, terrain.h, terrain.water, terrain.baseWater, terrain.height0, terrain.terra);
   enforceDrainageToSea(terrain);
+  ensureVehicleRoute(world); // EIN fahrzeugtauglicher Viadukt-Pass Basis→Basis (Brücken über Klippen/Fluss)
+  rebalanceHighLakeStarts(terrain);
+  // Erz-Ausgangsmenge je Zelle festhalten (nach aller Anfangs-Stampfung) — Erzvorkommen füllen sich
+  // im Spielverlauf langsam wieder bis zu diesem Wert auf (siehe Erz-Regeneration in economy.js).
+  terrain.ore0 = terrain.ore.slice();
   return world;
+}
+
+function rebalanceHighLakeStarts(t) {
+  if (!t?.lakes?.length || !t.water || !t.baseWater) return;
+  for (const L of t.lakes) {
+    const r = Math.max(1, L.r || 3);
+    for (let yy = -r; yy <= r; yy++) for (let xx = -r; xx <= r; xx++) {
+      const nx = L.x + xx, ny = L.y + yy;
+      if (!inBounds(t, nx, ny) || Math.hypot(xx, yy) > r) continue;
+      const i = tIdx(t, nx, ny);
+      if (t.startSafe?.[i]) continue;
+      const full = Math.max(0, L.level - t.height[i]);
+      if (full <= WET_DEPTH * 1.12) continue;
+      const edge = Math.min(1, Math.hypot(xx, yy) / r);
+      const cap = Math.min(full * 0.52, Math.max(WET_DEPTH * 1.08, full * (0.24 + edge * 0.08)));
+      const depth = Math.max(WET_DEPTH * 1.08, Math.min(t.water[i] || 0, cap));
+      t.water[i] = depth;
+      t.baseWater[i] = Math.min(depth, Math.max(WET_DEPTH * 1.02, depth * 0.92));
+      if (t.lakeMask) t.lakeMask[i] = 1;
+      if (depth > WET_DEPTH) t.type[i] = TT.WATER;
+      if (t.waterActive) t.waterActive.add(i);
+    }
+  }
+}
+
+// Garantiert EINEN fahrzeugtauglichen Pass zwischen je zwei Basen, OHNE das Gelände zu verbiegen
+// (frühere Höhen-Carves wurden von der Wasser-Sim wieder geflutet). Stattdessen wird der ECHTE
+// INFANTERIEPFAD (von FAHRZEUG-Ankern neben den HQs) genommen und an seinen FAHRZEUG-UNPASSIERBAREN
+// Stellen (Klippe / tiefes Wasser / zu steil) ein breiter BRÜCKEN-Viadukt gestempelt. Brücken
+// sind ein Passierbarkeits-Flag (siehe isPassable/slopeOk: onBridge quert Klippe/Wasser/Steigung) → die
+// Wasser-Sim kann sie NICHT fluten und die KI baut nicht darauf. Deterministisch, am Map-Anfang.
+function ensureVehicleRoute(world) {
+  const t = world.terrain;
+  if (!t.bridge) return;
+  const hqs = [];
+  for (const e of world.entities.values()) if (e.kind === 'hq') hqs.push(e);
+  hqs.sort((a, b) => a.owner - b.owner);
+  const pairs = hqs.length === 2 ? 1 : hqs.length;
+  for (let k = 0; k < pairs; k++) {
+    const a = hqs[k], b = hqs[(k + 1) % hqs.length];
+    if (a === b) continue;
+    const sa = vehicleAnchorNear(t, Math.round(a.tx + a.size / 2), Math.round(a.ty + a.size / 2));
+    const sb = vehicleAnchorNear(t, Math.round(b.tx + b.size / 2), Math.round(b.ty + b.size / 2));
+    if (!sa || !sb) continue;
+    const path = findPath(t, 'land', sa[0], sa[1], sb[0], sb[1], 200000, Infinity, { category: 'infantry' });
+    if (path && path.length) stampViaduct(t, path);
+  }
+}
+
+function vehicleAnchorNear(t, cx, cy) {
+  for (let r = 0; r <= 16; r++) {
+    for (let dy = -r; dy <= r; dy++) for (let dx = -r; dx <= r; dx++) {
+      if (Math.max(Math.abs(dx), Math.abs(dy)) !== r) continue;
+      const x = cx + dx, y = cy + dy;
+      if (inBounds(t, x, y) && isPassable(t, 'land', x, y, 'vehicle')) return [x, y];
+    }
+  }
+  return null;
+}
+
+// Brücken-Viadukt zweispurig über die fahrzeug-unpassierbaren Stellen des Pfads stempeln.
+function stampViaduct(t, cells) {
+  let prevH = t.height[tIdx(t, cells[0][0], cells[0][1])];
+  for (let k = 0; k < cells.length; k++) {
+    const [cx, cy] = cells[k];
+    const i = tIdx(t, cx, cy);
+    const cliff = t.type[i] === TT.CLIFF;
+    const deep = (t.water[i] || 0) > WET_DEPTH;
+    const steep = Math.abs(t.height[i] - prevH) > SLOPE_VEHICLE;
+    prevH = t.height[i];
+    if (!cliff && !deep && !steep) continue;       // sanftes, befahrbares Land bleibt natürlich
+    const [nx, ny] = cells[Math.min(k + 1, cells.length - 1)];
+    const dx = nx - cx, dy = ny - cy, len = Math.hypot(dx, dy) || 1;
+    const px = -dy / len, py = dx / len;            // quer zur Pfadrichtung
+    for (let w = -VIADUCT_HALF_WIDTH; w <= VIADUCT_HALF_WIDTH; w++) {
+      const x = Math.round(cx + px * w), y = Math.round(cy + py * w);
+      if (!inBounds(t, x, y)) continue;
+      const j = tIdx(t, x, y);
+      if (t.block && t.block[j] > 0) continue;      // nicht unter Gebäuden
+      t.bridge[j] = Math.max(t.bridge[j], 1);       // Viadukt: onBridge quert Klippe/Wasser/Steigung
+    }
+  }
 }
 
 // Zwischen benachbarten Startbasen soll nicht einfach glattes Fahrgelände liegen:
@@ -647,7 +736,12 @@ export function spawnBuilding(world, owner, kind, tx, ty) {
   if (!def.pipe && !def.bridges && !def.tunnels && !def.roadBuilt && def.role !== 'fortification') {
     const t = world.terrain;
     for (let yy = 0; yy < size; yy++) for (let xx = 0; xx < size; xx++) {
-      if (inBounds(t, tx + xx, ty + yy)) t.block[tIdx(t, tx + xx, ty + yy)]++;
+      if (!inBounds(t, tx + xx, ty + yy)) continue;
+      const i = tIdx(t, tx + xx, ty + yy);
+      t.block[i]++;
+      // Straße unter dem Gebäude entfernen — ein Gebäude soll nicht auf der Fahrbahn stehen.
+      if (t.road && t.road[i]) { t.road[i] = 0; t.roadDirty = true; }
+      if (t.roadBuilt && t.roadBuilt[i]) { t.roadBuilt[i] = 0; t.roadDirty = true; }
     }
     e._solid = true;
   }

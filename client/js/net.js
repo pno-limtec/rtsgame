@@ -29,9 +29,10 @@ export class Net {
     this.events = [];           // gesammelte Effekt-Events
     this.jobs = [];             // offene Terraform-Aufträge + Erdhügel-Marker
     this.waterBase = [];        // initial sichtbare Hochseen/Flüsse; Snapshots liefern nur Abweichungen
-    this.controls = { speed: 1, timeMode: 'auto', aiOnly: false };
+    this.controls = { speed: 1, timeMode: 'auto', aiOnly: false, insanity: 2 };
     this.name = 'Spieler';
     this.handlers = {};
+    this._pendingWatchSeat = null;
   }
 
   on(type, fn) { (this.handlers[type] || (this.handlers[type] = [])).push(fn); }
@@ -75,8 +76,10 @@ export class Net {
       case 'spectator':
         this.seat = null;
         this.spectator = true;
-        if (m.seat != null && this.players.some(p => p.id === m.seat)) this.viewSeat = m.seat;
+        if (this._pendingWatchSeat != null && this.players.some(p => p.id === this._pendingWatchSeat)) this.viewSeat = this._pendingWatchSeat;
+        else if (m.seat != null && this.players.some(p => p.id === m.seat)) this.viewSeat = m.seat;
         else if (this.viewSeat == null) this.viewSeat = this.players[0]?.id ?? 0;
+        this._pendingWatchSeat = null;
         this.emit('joined', { ...m, spectator: true, seat: null });
         this.emit('viewseat', { seat: this.viewSeat });
         break;
@@ -183,15 +186,22 @@ export class Net {
     return out;
   }
 
-  join(name, seat) {
+  join(name, seat, opts = {}) {
     this.name = name || this.name || 'Spieler';
-    this.send({ t: 'join', name: this.name, seat });
+    this.send({ t: 'join', name: this.name, seat, insanity: opts.insanity });
   }
-  watch(seat = null, name = 'Zuschauer') {
+  watch(seat = null, name = 'Zuschauer', opts = {}) {
     this.name = name || this.name || 'Zuschauer';
-    this.seat = null;
+    const viewSeat = seat ?? this.players[0]?.id ?? 0;
+    this._pendingWatchSeat = viewSeat;
+    if (opts.insanity != null) this.send({ t: 'matchOptions', insanity: opts.insanity });
+    if (this.seat != null) {
+      this.send({ t: 'release' });
+      return;
+    }
     this.spectator = true;
-    this.viewSeat = seat ?? this.players[0]?.id ?? 0;
+    this.viewSeat = viewSeat;
+    this._pendingWatchSeat = null;
     this.emit('joined', { ok: true, seat: null, spectator: true });
   }
   takeoverSeat(seat = this.viewSeat, name = this.name || 'Spieler') {
@@ -210,7 +220,7 @@ export class Net {
   }
   cmd(cmd) { if (!this.spectator && this.seat != null) this.send({ t: 'cmd', cmd }); }
   setSpectatorControls(patch = {}) { if (this.spectator) this.send({ t: 'spectatorControl', ...patch }); }
-  newGame(sameMap = false) { this.send({ t: 'newGame', sameMap: !!sameMap }); }
+  newGame(sameMap = false, opts = {}) { this.send({ t: 'newGame', sameMap: !!sameMap, insanity: opts.insanity }); }
   requestSave() { this.send({ t: 'saveGame' }); }
   loadGame(save) { this.send({ t: 'loadGame', save }); }
   send(o) { if (this.ws && this.ws.readyState === 1) this.ws.send(JSON.stringify(o)); }

@@ -2,16 +2,63 @@
 // Lazy-Init beim ersten Nutzer-Gesture (Browser-Autoplay-Richtlinie).
 import { MUSIC_PLAYLISTS, SFX_SAMPLES } from './audioManifest.js';
 
-const MUSIC_GAIN = { calm: 0.16, combat: 0.24 };
+const MUSIC_GAIN = { calm: 0.13, combat: 0.26 }; // ruhiger im Aufbau, deutlich wilder im Gefecht
 const MUSIC_CROSSFADE = 5.5;
 const COMBAT_HOLD = 12;
+const MOVE_VOICE_COOLDOWN = 3.2;
+const MOVE_VOICE_LINES = {
+  mixed: [
+    'Alle los, bitte mit Haltung und ohne Drama.',
+    'Bewegung. Das sieht fast nach Plan aus.',
+    'Auf gehts, synchrones Chaos.',
+    'Los, der Boden wartet nicht ewig.',
+  ],
+  infantry: [
+    'Zu Fuss? Na gut, heute ist Beintag.',
+    'Wir laufen schon mal los. Schick Kaffee hinterher.',
+    'Verstanden. Wir nehmen die scenic Route.',
+    'Marschieren ist auch nur Fahren ohne Fahrzeug.',
+  ],
+  builder: [
+    'Bagger rollt. Wer hat den Boden bestellt?',
+    'Unterwegs. Ich bringe Schaufel und schlechte Laune mit.',
+    'Bagger in Bewegung. Landschaft, bitte kurz wegsehen.',
+    'Alles klar. Ich parke da gleich ein Loch.',
+  ],
+  truck: [
+    'LKW unterwegs. Ladung tut so, als waere sie gesichert.',
+    'Route gesetzt. Schlagloecher werden ignoriert.',
+    'Brumm brumm, Logistik mit Charakter.',
+    'Ich fahre los. Papierkram kommt spaeter.',
+  ],
+  vehicle: [
+    'Motor an. Wir machen Reifenspuren mit Absicht.',
+    'Fahrzeug unterwegs. Bitte Ziel nicht wieder verschieben.',
+    'Verstanden. Wir rollen da mal professionell hin.',
+    'Kette oder Reifen, Hauptsache vorwaerts.',
+  ],
+  air: [
+    'Luftweg bestaetigt. Stau ist heute unter uns.',
+    'Wir heben ab und tun wichtig.',
+    'Kurs gesetzt. Wolken bitte Platz machen.',
+    'Fliegen los. Bodenprobleme sind jetzt optional.',
+  ],
+  water: [
+    'Kurs gesetzt. Wellen bitte rechts ranfahren.',
+    'Schiff unterwegs. Wir tun nautisch.',
+    'Aye. Wasser ist schon mal vorhanden.',
+    'Wir legen los. Bitte keine trockenen Abkuerzungen.',
+  ],
+};
 
 // Persistente Ton-Einstellungen (überleben Reload). '1' = an, '0' = aus; fehlend = Standard (an).
 function loadAudioPref(key, def = true) {
-  try { const v = localStorage.getItem(key); return v == null ? def : v === '1'; } catch { return def; }
+  if (typeof window === 'undefined' || !window.localStorage) return def;
+  try { const v = window.localStorage.getItem(key); return v == null ? def : v === '1'; } catch { return def; }
 }
 function saveAudioPref(key, on) {
-  try { localStorage.setItem(key, on ? '1' : '0'); } catch {}
+  if (typeof window === 'undefined' || !window.localStorage) return;
+  try { window.localStorage.setItem(key, on ? '1' : '0'); } catch {}
 }
 
 export class Audio {
@@ -30,6 +77,8 @@ export class Audio {
     this.lastCombatAt = -999;
     this.sampleCache = new Map();
     this.beat = 0;
+    this.lastMoveVoiceAt = -999;
+    this.speechVoice = null;
   }
 
   // Beim ersten Klick/Tastendruck aufrufen (entsperrt den AudioContext).
@@ -68,6 +117,7 @@ export class Audio {
     this.sfxMuted = !on;
     saveAudioPref('if_sfx_on', on);
     if (this.master) this.master.gain.value = this.sfxMuted ? 0 : 0.5;
+    if (this.sfxMuted && typeof window !== 'undefined') window.speechSynthesis?.cancel?.();
   }
 
   // Kompatibilität: alles gemeinsam stummschalten.
@@ -296,12 +346,11 @@ export class Audio {
   command(vol = 1) {
     if (!this.ready || this.sfxMuted) return;
     if (!this._budget('command', 3)) return;
-    if (!this._sample('yes', 0.18 * vol, 0.94 + Math.random() * 0.08)) this._tone(0.18 * vol, 520, 0.08);
+    if (!this._sample('yes', 0.12 * vol, 0.94 + Math.random() * 0.08)) this._tone(0.12 * vol, 520, 0.08);
   }
 
   // Befehls-Quittung mit EIGENEM Klang je Einheitentyp: Grundton aus dem Namen-Hash (jeder Typ klingt
-  // anders), Charakter aus Domäne/Kategorie — Infanterie zwitschert, Fahrzeuge piepen mechanisch,
-  // Flieger steigen auf, Schiffe geben ein tiefes Horn.
+  // anders), Charakter aus Domäne/Kategorie, aber bewusst leise und kurz.
   unitAck(kind = '', category = 'vehicle', domain = 'land', vol = 1) {
     if (!this.ready || this.sfxMuted) return;
     if (!this._budget('command', 3)) return;
@@ -309,28 +358,79 @@ export class Audio {
     for (let i = 0; i < kind.length; i++) h = Math.imul(h ^ kind.charCodeAt(i), 16777619) >>> 0;
     const semi = h % 12;
     const f = 300 * Math.pow(2, semi / 12);     // typeigener Grundton
-    const v = 0.16 * vol;
-    if (domain === 'air') {                       // aufsteigender Doppelton
-      this._tone(v, f * 1.5, 0.07, 'sine'); this._tone(v, f * 2.1, 0.08, 'sine', 0.07);
-    } else if (domain === 'water') {              // tiefes Horn
-      this._tone(v, f * 0.5, 0.2, 'sawtooth'); this._tone(v * 0.7, f * 0.66, 0.16, 'sawtooth', 0.08);
-    } else if (category === 'infantry') {         // weiches Zwitschern
-      this._tone(v * 0.85, f * 1.3, 0.06, 'triangle'); this._tone(v * 0.7, f * 1.6, 0.05, 'triangle', 0.06);
-    } else {                                      // Fahrzeug: mechanisches Piep-Piep
-      this._tone(v, f, 0.06, 'square'); this._tone(v * 0.8, f * 1.26, 0.06, 'square', 0.07);
+    // Dezent & realistisch (statt arcade-artigem Rechteck-Piepen): leise, weiche/gefilterte Klänge.
+    const v = 0.09 * vol;
+    if (domain === 'air') {                       // weicher, leicht aufsteigender Funk-Ton
+      this._tone(v * 0.9, f * 1.6, 0.09, 'sine'); this._tone(v * 0.7, f * 2.1, 0.10, 'sine', 0.06);
+    } else if (domain === 'water') {              // tiefes, weiches Schiffshorn
+      this._tone(v, f * 0.5, 0.24, 'sine'); this._tone(v * 0.6, f * 0.75, 0.18, 'sine', 0.10);
+    } else if (category === 'infantry') {         // kurzes, gedämpftes Funk-Klick (kein Zwitschern)
+      this._burst(v * 0.6, 1500, 0.035, 1.3, 'bandpass'); this._tone(v * 0.5, f * 1.4, 0.04, 'sine', 0.04);
+    } else {                                      // Fahrzeug: weicher mechanischer Servo-Klick statt Piep
+      this._burst(v * 0.7, 520, 0.05, 0.7); this._tone(v * 0.6, f, 0.06, 'triangle', 0.03);
     }
+  }
+
+  moveVoice(units = []) {
+    if (this.sfxMuted || typeof window === 'undefined') return;
+    const synth = window.speechSynthesis;
+    const Utterance = window.SpeechSynthesisUtterance;
+    if (!synth || !Utterance || synth.speaking || synth.pending) return;
+    const now = Date.now() / 1000;
+    if (now - this.lastMoveVoiceAt < MOVE_VOICE_COOLDOWN) return;
+    const group = this._moveVoiceGroup(units);
+    const lines = MOVE_VOICE_LINES[group] || MOVE_VOICE_LINES.mixed;
+    const text = lines[(Math.random() * lines.length) | 0];
+    const utter = new Utterance(text);
+    utter.lang = 'de-DE';
+    utter.volume = 0.55;
+    utter.rate = 1.04 + Math.random() * 0.08;
+    utter.pitch = 0.92 + Math.random() * 0.16;
+    const voice = this._speechVoice();
+    if (voice) utter.voice = voice;
+    this.lastMoveVoiceAt = now;
+    synth.speak(utter);
+  }
+
+  _moveVoiceGroup(units = []) {
+    const live = units.filter(u => u && u.kind);
+    if (!live.length) return 'mixed';
+    const domains = new Set(live.map(u => u.domain || 'land'));
+    const categories = new Set(live.map(u => u.category || 'vehicle'));
+    if (domains.size > 1 || categories.size > 1) return 'mixed';
+    const u = live[0];
+    if (u.domain === 'air') return 'air';
+    if (u.domain === 'water') return 'water';
+    if (u.category === 'infantry') return 'infantry';
+    if (u.kind === 'builder') return 'builder';
+    if (u.kind === 'truck' || u.kind === 'harvester') return 'truck';
+    return 'vehicle';
+  }
+
+  _speechVoice() {
+    if (this.speechVoice) return this.speechVoice;
+    const voices = window.speechSynthesis?.getVoices?.() || [];
+    this.speechVoice = voices.find(v => /^de[-_]/i.test(v.lang))
+      || voices.find(v => /deutsch|german/i.test(`${v.name} ${v.lang}`))
+      || voices[0]
+      || null;
+    return this.speechVoice;
   }
 
   motor(vol = 1) {
     if (!this.ready || this.sfxMuted) return;
-    if (!this._budget('motor', 2)) return;
-    if (!this._sample('motor', 0.16 * vol, 0.9 + Math.random() * 0.12)) this._burst(0.08 * vol, 180, 0.16, 0.4);
+    if (!this._budget('motor', 1)) return;
+    const v = Math.min(0.06, 0.045 * vol);
+    this._burst(v, 150, 0.10, 0.35);
+    this._thump(v * 0.65, 95, 62, 0.12);
   }
 
   excavate(vol = 1) {
     if (!this.ready || this.sfxMuted) return;
-    if (!this._budget('excavator', 2)) return;
-    if (!this._sample('excavator', 0.22 * vol, 0.9 + Math.random() * 0.1)) this._burst(0.18 * vol, 380, 0.16, 0.6);
+    if (!this._budget('excavator', 1)) return;
+    const v = Math.min(0.07, 0.055 * vol);
+    this._burst(v, 280, 0.08, 0.55);
+    this._thump(v * 0.55, 125, 78, 0.10);
   }
 
   // Dauerregen als gefilterte Rauschschleife; Lautstärke folgt der Wetterlage.

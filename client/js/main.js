@@ -15,6 +15,7 @@ async function boot() {
   const audio = new Audio();
   const rawCmd = net.cmd.bind(net);
   const INFANTRY = new Set(['rifleman', 'at_soldier', 'engineer']);
+  const WORK_VEHICLES = new Set(['builder', 'truck', 'harvester', 'tractor']);
   net.cmd = (cmd) => {
     if (cmd.type === 'move' || cmd.type === 'attack' || cmd.type === 'load' || cmd.type === 'unload') {
       const ids = new Set(cmd.units || []);
@@ -24,8 +25,14 @@ async function boot() {
       const pdef = prim ? data.units[prim.kind] : null;
       if (prim) audio.unitAck(prim.kind, pdef?.category, pdef?.domain, 1); else audio.command(1);
       if (cmd.type === 'move') {
+        const voiceUnits = moved.map(e => {
+          const def = data.units[e.kind] || {};
+          return { kind: e.kind, category: def.category, domain: def.domain };
+        });
+        audio.moveVoice(voiceUnits);
         // Motorengeräusch nur, wenn tatsächlich Fahrzeuge losfahren — Infanterie macht Schritte.
-        if (moved.some(e => !INFANTRY.has(e.kind))) audio.motor(0.8);
+        const vehicles = moved.filter(e => !INFANTRY.has(e.kind));
+        if (vehicles.length) audio.motor(vehicles.every(e => WORK_VEHICLES.has(e.kind)) ? 0.25 : 0.8);
         else if (moved.length) audio.steps(0.8);
       }
     }
@@ -40,8 +47,8 @@ async function boot() {
 
   ui.setupLobby((name, seat, opts = {}) => {
     applyFogOption(!!opts.fow);
-    if (opts.spectator) net.watch(seat, name);
-    else net.join(name, seat);
+    if (opts.spectator) net.watch(seat, name, opts);
+    else net.join(name, seat, opts);
   });
   ui.setupMenu(renderer, audio);
 

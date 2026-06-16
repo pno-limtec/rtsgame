@@ -378,6 +378,25 @@ export class Input {
       if (def?.freshWater && !(realWater && (r.height?.[i] || 0) > CLIENT_SEA_LEVEL + 0.03)) return true;
       if (!def?.buildOnWater && !waterOptional && wet) return true;
     }
+    // Pumpwerk (Süßwasser-Bau im Wasser): nur dort erlaubt, wo der BAGGER hinkommt — d. h. der Footprint
+    // muss an mindestens eine bagger-zugängliche Zelle grenzen (Land oder watbares Flachwasser, keine
+    // Klippe). Sonst stünde das Pumpwerk mitten im tiefen See, unerreichbar für den Bau.
+    if (def?.freshWater && !this._builderCanReachFootprint(tx, ty, size)) return true;
+    return false;
+  }
+
+  // Grenzt der (Wasser-)Footprint an eine Zelle, auf der ein Bagger stehen/waten kann?
+  _builderCanReachFootprint(tx, ty, size) {
+    const r = this.renderer;
+    for (let y = -1; y <= size; y++) for (let x = -1; x <= size; x++) {
+      if (x >= 0 && x < size && y >= 0 && y < size) continue;     // nur der Rand zählt
+      const nx = tx + x, ny = ty + y;
+      if (nx < 0 || ny < 0 || nx >= r.mapW || ny >= r.mapH) continue;
+      const i = ny * r.mapW + nx;
+      const depth = r.waterDepth?.[i] || 0;
+      const cliff = r.terrainType?.[i] === 2;
+      if (!cliff && depth < CLIENT_NAVIGABLE_DEPTH) return true;   // Land oder watbares Flachwasser
+    }
     return false;
   }
 
@@ -394,6 +413,12 @@ export class Input {
     const d = this.lineDrag;
     if (!d) return [];
     const ex = d.ex ?? d.sx, ey = d.ey ?? d.sy;
+    // Pipeline: nicht stur die Gerade, sondern den BESTEN Weg über bebaubares, bagger-erreichbares
+    // Gelände vorschlagen (umgeht Klippen/tiefes Wasser). Fällt auf die Gerade zurück, wenn kein Weg.
+    if (this.buildMode === 'pipe') {
+      const route = this.routePipeCells(d.sx, d.sy, ex, ey);
+      if (route && route.length) return route;
+    }
     const stepSz = this.buildMode === 'dam' ? 2 : 1;
     const n = Math.max(Math.abs(ex - d.sx), Math.abs(ey - d.sy));
     const cells = [];
@@ -404,6 +429,50 @@ export class Input {
       if (last && last[0] === tx && last[1] === ty) continue;
       cells.push([tx, ty]); last = [tx, ty];
     }
+    return cells;
+  }
+
+  // Bester Pipeline-Weg (A*, 8-Richtungen) über bagger-erreichbares Gelände: keine Klippen, kein tiefes
+  // Wasser; sanftere Hänge werden bevorzugt. Liefert die Zell-Liste Start→Ende oder null (kein Weg).
+  routePipeCells(sx, sy, ex, ey) {
+    const r = this.renderer; const W = r.mapW, H = r.mapH;
+    if (!W || !H) return null;
+    const passable = (x, y) => {
+      if (x < 0 || y < 0 || x >= W || y >= H) return false;
+      const i = y * W + x;
+      if (r.terrainType?.[i] === 2) return false;                      // Klippe
+      if ((r.waterDepth?.[i] || 0) >= CLIENT_NAVIGABLE_DEPTH) return false; // tiefes Wasser (nicht bagger-erreichbar)
+      return true;
+    };
+    if (!passable(sx, sy) || !passable(ex, ey)) return null;
+    const N = W * H, gScore = new Float64Array(N).fill(Infinity), came = new Int32Array(N).fill(-1);
+    const heightAt = (i) => r.height?.[i] || 0;
+    const heap = [];                                                   // [f, idx] Min-Heap
+    const push = (f, idx) => { heap.push([f, idx]); let c = heap.length - 1; while (c > 0) { const p = (c - 1) >> 1; if (heap[p][0] <= heap[c][0]) break; [heap[p], heap[c]] = [heap[c], heap[p]]; c = p; } };
+    const pop = () => { const top = heap[0], last = heap.pop(); if (heap.length) { heap[0] = last; let c = 0; for (;;) { let s = c, l = 2 * c + 1, ri = 2 * c + 2; if (l < heap.length && heap[l][0] < heap[s][0]) s = l; if (ri < heap.length && heap[ri][0] < heap[s][0]) s = ri; if (s === c) break; [heap[s], heap[c]] = [heap[c], heap[s]]; c = s; } } return top; };
+    const start = sy * W + sx, goal = ey * W + ex;
+    const hEst = (i) => { const x = i % W, y = (i / W) | 0; return Math.hypot(x - ex, y - ey); };
+    gScore[start] = 0; push(hEst(start), start);
+    const N8 = [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [1, -1], [-1, 1], [-1, -1]];
+    let iter = 0;
+    while (heap.length && iter++ < 40000) {
+      const cur = pop()[1];
+      if (cur === goal) break;
+      const cx = cur % W, cy = (cur / W) | 0, cg = gScore[cur];
+      for (const [dx, dy] of N8) {
+        const nx = cx + dx, ny = cy + dy;
+        if (!passable(nx, ny)) continue;
+        if (dx && dy && (!passable(cx + dx, cy) || !passable(cx, cy + dy))) continue; // keine Eck-Diagonale
+        const ni = ny * W + nx;
+        const step = (dx && dy ? 1.414 : 1) + Math.abs(heightAt(ni) - heightAt(cur)) * 6; // Steigung leicht meiden
+        const ng = cg + step;
+        if (ng < gScore[ni]) { gScore[ni] = ng; came[ni] = cur; push(ng + hEst(ni), ni); }
+      }
+    }
+    if (came[goal] < 0 && goal !== start) return null;
+    const cells = []; let c = goal;
+    while (c >= 0) { cells.push([c % W, (c / W) | 0]); if (c === start) break; c = came[c]; }
+    cells.reverse();
     return cells;
   }
 

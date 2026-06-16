@@ -156,8 +156,12 @@ function stepProjectiles(world) {
 function craterTerrain(t, gx, gy, splash) {
   if (!t || !t.type) return;
   const [cx, cy] = worldToTile(gx, gy);
-  const depth = Math.min(0.03, 0.012 * splash);
-  for (const [dx, dy, f] of [[0, 0, 1], [1, 0, 0.5], [-1, 0, 0.5], [0, 1, 0.5], [0, -1, 0.5]]) {
+  const depth = Math.min(0.022, 0.009 * splash);
+  for (const [dx, dy, f] of [
+    [0, 0, 1],
+    [1, 0, 0.58], [-1, 0, 0.58], [0, 1, 0.58], [0, -1, 0.58],
+    [1, 1, 0.32], [1, -1, 0.32], [-1, 1, 0.32], [-1, -1, 0.32],
+  ]) {
     const x = cx + dx, y = cy + dy;
     if (!inBounds(t, x, y)) continue;
     const i = tIdx(t, x, y);

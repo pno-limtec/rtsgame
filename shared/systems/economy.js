@@ -11,8 +11,26 @@ import { addResource, hasResourceDepot } from '../world.js';
 import { setMoveGoal, stopMove } from './movement.js';
 import { assignOrePile, fillOrePile } from './construction.js';
 
+// Erz-Vorkommen regenerieren sich langsam (Erz wächst geologisch nach) bis zur Ausgangsmenge ore0 —
+// pro Sekunde und Zelle. Bewusst gemächlich: füllt erschöpfte Felder über ~15–20 min wieder auf, ohne
+// die Wirtschaft beim aktiven Abbau (20/s) zu überholen.
+const ORE_REGEN_PER_SEC = 1.0;
+const ORE_REGEN_INTERVAL = 50; // alle 5 s
+
+function regenOre(world) {
+  const t = world.terrain;
+  if (!t.ore0 || !t.oreList) return;
+  const add = ORE_REGEN_PER_SEC * DT * ORE_REGEN_INTERVAL;
+  for (const idx of t.oreList) {
+    const cap0 = t.ore0[idx] || 0;
+    if (cap0 <= 0 || t.ore[idx] >= cap0) continue;
+    t.ore[idx] = Math.min(cap0, t.ore[idx] + add);
+  }
+}
+
 export function stepEconomy(world) {
   if ((world.tick % 10) === 0) stepPipes(world); // Pipeline-Konnektivität (günstig, alle 1s)
+  if (world.tick > 0 && (world.tick % ORE_REGEN_INTERVAL) === 0) regenOre(world);
   computeEnergy(world);
   for (const p of world.players) {
     if (p.defeated) continue;
@@ -236,10 +254,11 @@ function carveMiningFurrows(world, tx, ty, amount, scale = 1) {
   const [ax, ay] = axes[seed & 3];
   const sx = -ay, sy = ax;
   const cuts = [
-    [0, 0, 1.35],
-    [ax, ay, 0.62], [-ax, -ay, 0.48],
-    [sx, sy, 0.38], [-sx, -sy, 0.32],
-    [ax + sx, ay + sy, 0.22], [ax - sx, ay - sy, 0.22],
+    [0, 0, 0.95],
+    [ax, ay, 0.52], [-ax, -ay, 0.44],
+    [sx, sy, 0.34], [-sx, -sy, 0.30],
+    [ax + sx, ay + sy, 0.24], [ax - sx, ay - sy, 0.24],
+    [-ax + sx, -ay + sy, 0.18], [-ax - sx, -ay - sy, 0.18],
   ];
   for (const [dx, dy, m] of cuts) {
     const x = tx + dx, y = ty + dy;

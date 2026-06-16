@@ -38,6 +38,37 @@ const isFree = (e) => e.order.type === 'idle' || e.order.type === 'guard';
 const canHaulPile = (u, pile) => u.kind === 'truck' || (pileResource(pile) === 'ore' && u.abilities?.includes('harvest'));
 const builderRole = (w) => w.resourceRole === 'materials' ? 'build' : w.resourceRole;
 
+// Liniengebäude (per Linie gezogen): bauen sich von den Enden her durchgehend nach innen.
+const isLineInfra = (def) => !!(def && (def.roadBuilt || def.bridges || def.tunnels || def.pipe || def.role === 'fortification'));
+const FRONTIER_N8 = [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [1, -1], [-1, 1], [-1, -1]];
+
+// Für jede Linien-Infrastruktur je Besitzer die aktuell baubaren Endzellen ermitteln: eine Zelle ist
+// „Bauschnitt-Ende", wenn sie höchstens EINEN noch unfertigen Linien-Nachbarn (8er) hat. So entsteht
+// ein zusammenhängend wachsender Bauabschnitt statt verstreuter Einzelteile. Geschlossene Ringe ohne
+// Ende fallen auf „alle baubar" zurück (kein Deadlock).
+function computeLineFrontiers(world, sites) {
+  const t = world.terrain;
+  const byOwner = new Map();
+  for (const s of sites) {
+    if (!isLineInfra(s.def)) continue;
+    let set = byOwner.get(s.owner); if (!set) byOwner.set(s.owner, set = new Set());
+    set.add(tIdx(t, s.tx, s.ty));
+  }
+  const frontiers = new Map();
+  for (const [owner, set] of byOwner) {
+    const front = new Set();
+    for (const i of set) {
+      const gx = i % t.w, gy = (i / t.w) | 0;
+      let n = 0;
+      for (const [dx, dy] of FRONTIER_N8) if (set.has((gy + dy) * t.w + (gx + dx))) n++;
+      if (n <= 1) front.add(i);
+    }
+    if (front.size === 0) for (const i of set) front.add(i); // Ring/Knoten → kein Deadlock
+    frontiers.set(owner, front);
+  }
+  return frontiers;
+}
+
 export function stepConstruction(world) {
   const jobs = world.terraJobs || (world.terraJobs = []);
   for (const s of world.entities.values()) {
@@ -49,6 +80,17 @@ export function stepConstruction(world) {
   for (const e of world.entities.values()) {
     if (e.etype === 'building' && !e.dead && e.buildProgress < 1 && e.def.buildTime) sites.push(e);
   }
+
+  // Linien-Infrastruktur (Straße/Brücke/Leitung/Wall/Graben/Tunnel) wird DURCHGEHEND von den Enden
+  // her gebaut, nicht in der Mitte verstreut: nur die Endzellen einer noch unfertigen Linie sind
+  // gerade baubar (≤1 unfertiger Linien-Nachbar). So wächst ein zusammenhängender Bauschnitt nach
+  // außen, der fertige Teil ist sofort befahrbar. Ringe/Knoten ohne Ende → Fallback: alle baubar.
+  const frontierByOwner = computeLineFrontiers(world, sites);
+  const buildableNow = (s) => {
+    if (!isLineInfra(s.def)) return true;
+    const front = frontierByOwner.get(s.owner);
+    return !front || front.has(tIdx(world.terrain, s.tx, s.ty));
+  };
 
   // Bereits vergebene Aufgaben ermitteln (lebende Arbeiter mit gültigem Auftrag).
   const claimedSites = new Set(), claimedJobs = new Set();
@@ -75,6 +117,7 @@ export function stepConstruction(world) {
   // Unbesetzte Aufgaben an die nächsten freien Arbeiter vergeben.
   for (const s of sites) {
     if (claimedSites.has(s.id)) continue;
+    if (!buildableNow(s)) continue;   // Linie nur an ihrem aktuellen Bauschnitt (Ende) weiterbauen
     // Bevorzugt der Bau-Bagger; NOTFALL-RESERVE: ist kein anderer Bauarbeiter mehr am
     // Leben, springt auch der Erz-Bagger ein — sonst Deadlock (Fabrik unfertig → kein
     // Ersatz-Bagger baubar → Wirtschaft steht für immer; in KI-Matches verifiziert).
@@ -286,7 +329,9 @@ function stepTruckHaul(world, t) {
   const depot = nearestResourceDepot(world, t, resource);
   if (!depot) { t.order = { type: 'idle' }; return; }
   const [dx, dy] = buildingAccessPoint(world, t, depot);
-  if (Math.hypot(depot.x - t.x, depot.y - t.y) > depot.size + 2) {
+  const nearDepot = Math.hypot(depot.x - t.x, depot.y - t.y) <= depot.size + 3.5
+    || Math.hypot(dx - t.x, dy - t.y) <= 2.0;
+  if (!nearDepot) {
     if (!t.moveTarget) setMoveGoal(world, t, dx, dy);
     return;
   }

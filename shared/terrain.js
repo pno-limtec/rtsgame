@@ -318,14 +318,14 @@ function smoothDryCorridors(height, w, h, paths, protectedRadius = 0) {
     const x = i % w, y = (i / w) | 0;
     if (protectedRadius && inCenterMountainCore(w, h, x, y, protectedRadius)) continue;
     const base = Math.max(SEA_LEVEL + 0.045, height[i]);
-    for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) {
+    for (let dy = -3; dy <= 3; dy++) for (let dx = -3; dx <= 3; dx++) {
       const nx = x + dx, ny = y + dy;
       if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
       if (protectedRadius && inCenterMountainCore(w, h, nx, ny, protectedRadius)) continue;
       const d = Math.hypot(dx, dy);
-      if (d > 2.10) continue;
+      if (d > 2.70) continue;
       const j = ny * w + nx;
-      height[j] = Math.min(height[j], base + 0.026 + d * 0.030);
+      height[j] = Math.min(height[j], base + 0.024 + d * 0.024);
     }
   }
 }
@@ -400,7 +400,7 @@ function deepenRiverChannels(height, w, h, paths, protectedRadius = 0) {
       const d = Math.hypot(dx, dy);
       if (d > 2.25) continue;
       const j = ny * w + nx;
-      const cut = d <= 0.1 ? 0.125 : d <= 1.45 ? 0.100 : 0.052;
+      const cut = d <= 0.1 ? 0.090 : d <= 1.45 ? 0.070 : 0.038;
       height[j] = Math.min(height[j], Math.max(SEA_LEVEL - 0.085, bed - cut));
     }
   }
@@ -500,7 +500,7 @@ function addLocalRelief(height, w, h, rng, cx, cy) {
     let y = cy + Math.sin(baseA) * r0;
     const len = Math.round(minDim * (0.12 + rng() * 0.20));
     const width = 1 + rng.int(3);
-    const dig = 0.03 + rng() * 0.055;   // flachere Gräben/Senken abseits des Flusses (nicht mehr zu tief)
+    const dig = 0.022 + rng() * 0.038;  // flachere Gräben/Senken abseits des Flusses (weniger Zackenkanten)
     const points = [];
     const path = [];
     let lastR = r0;
@@ -523,12 +523,12 @@ function addLocalRelief(height, w, h, rng, cx, cy) {
       const i = iy * w + ix;
       if (path[path.length - 1] !== i) path.push(i);
     }
-    stampContinuousCorridor(height, w, h, points, width + 0.80, ({ i, dist, along }) => {
+    stampContinuousCorridor(height, w, h, points, width + 1.05, ({ i, dist, along }) => {
       const fade = Math.sin(along * Math.PI);
-      const lateral = Math.max(0, 1 - dist / (width + 0.80));
-      const cut = dig * fade * Math.pow(lateral, 0.72);
+      const lateral = Math.max(0, 1 - dist / (width + 1.05));
+      const cut = dig * fade * Math.pow(lateral, 0.58);
       const outSlope = Math.max(SEA_LEVEL + 0.025, 0.82 - along * 0.58);
-      return Math.max(SEA_LEVEL + 0.025, Math.min(height[i] - cut, outSlope + dist * 0.040));
+      return Math.max(SEA_LEVEL + 0.025, Math.min(height[i] - cut, outSlope + dist * 0.032));
     });
     enforceSeaSlopePath(height, w, h, path, 0.003, SEA_LEVEL + 0.025);
     if (path.length > 2) trenchPaths.push(path);
@@ -813,6 +813,10 @@ export function generateTerrain({ w, h, seed = 1 }) {
   roundTerrain(height, w, h, 1, 0.5);
   // Nutzbare, ebene Plateaus NACH der Rundung stempeln (sonst würden die Deckel weggeglättet).
   stampUsablePlateaus(height, w, h, rngP, cx0, cy0, valleys);
+  // Die letzten Rundungs-/Plateau-Pässe dürfen Hochsee-Becken nicht wieder zuschieben. Vor der
+  // Wasserinitialisierung die Becken deshalb noch einmal setzen; sonst kann ein Seezentrum über
+  // seinem eigenen Pegel liegen und startet trocken.
+  for (const L of lakes) carveHighLake(height, w, h, L.x, L.y, L.r, L.level);
 
   for (let i = 0; i < w * h; i++) {
     const e = height[i];
@@ -840,7 +844,7 @@ export function generateTerrain({ w, h, seed = 1 }) {
       const j = ny * w + nx;
       const d0 = Math.max(0, L.level - height[j]);
       if (d0 > 0) {
-        const shallow = Math.min(d0, Math.max(WET_DEPTH * 1.15, d0 * 0.34));
+        const shallow = Math.min(d0, Math.max(WET_DEPTH * 1.08, d0 * 0.22));
         water[j] = Math.max(water[j], shallow);
         baseWater[j] = Math.max(baseWater[j], shallow);
         lakeMask[j] = 1;
@@ -1033,6 +1037,14 @@ export function waterBlocksLand(t, i) {
   return (t.water?.[i] || 0) > WET_DEPTH;
 }
 
+// Dauerhaftes (statisches) Gewässer an dieser Zelle — Fluss/See/Meer, NICHT eine vorübergehende
+// Überflutung (Regen, Damm, Flutkanal). baseWater ist die Gleichgewichts-Seefüllung; transiente Flut
+// hebt nur t.water, nicht baseWater. Damit unterscheidet die KI „echter Fluss zum Überbrücken" von
+// „irgendwo steht gerade Wasser im Gelände".
+export function persistentWaterBlocksLand(t, i) {
+  return (t.baseWater?.[i] || 0) > WET_DEPTH;
+}
+
 export function isNavigableWater(t, tx, ty) {
   if (!inBounds(t, tx, ty)) return false;
   return (t.water?.[tIdx(t, tx, ty)] || 0) >= NAVIGABLE_DEPTH;
@@ -1147,10 +1159,37 @@ export function unstampFortification(t, tx, ty, size, cover, blocks, waterBlocks
 // Exportiert: auch Erdbeben-Hangrutsche nutzen diesen Pfad (gleiches Tracking/Streaming).
 export function applyHeightDelta(t, i, delta, add) {
   if (!t.terra) t.terra = new Float32Array(t.w * t.h);
-  const hNew = Math.max(0.02, Math.min(MAX_HEIGHT, t.height[i] + (add ? delta : -delta)));
+  const hOld = t.height[i];
+  const hNew = Math.max(0.02, Math.min(MAX_HEIGHT, hOld + (add ? delta : -delta)));
+  const dh = hNew - hOld;
   t.height[i] = hNew;
   t.terra[i] = Math.abs(hNew - t.height0[i]) < 1e-4 ? 0 : hNew - t.height0[i];
   if (t.terraDirty) t.terraDirty.add(i);  // für Snapshot-Streaming markieren
+  if (t.water && Math.abs(dh) > 1e-6) {
+    const oldDepth = t.water[i] || 0;
+    if (oldDepth > WET_DEPTH * 0.2 || (t.baseWater && t.baseWater[i] > WET_DEPTH * 0.2)) {
+      // Boden unter vorhandener Wasserfläche bewegt sich: Oberfläche bleibt physikalisch stehen,
+      // die Tiefe passt sich an. Ein frisch ausgebaggerter Unterwasser-Graben wird dadurch sofort
+      // gefüllt statt als trockenes Loch im Wassermesh zu erscheinen.
+      t.water[i] = Math.max(0, Math.min(WATER_MAX_DEPTH, oldDepth - dh));
+    } else if (dh < 0) {
+      // Trockene Senke neben Wasser: wenn Nachbaroberflächen bereits höher liegen, bekommt die
+      // Zelle eine kleine Startfüllung und wird aktiv, statt bis zum nächsten Zufallstreffer leer
+      // zu bleiben. Die CA übernimmt danach den eigentlichen Massenausgleich.
+      const x = i % t.w, y = (i / t.w) | 0;
+      let level = -Infinity;
+      for (let yy = -1; yy <= 1; yy++) for (let xx = -1; xx <= 1; xx++) {
+        if (!xx && !yy) continue;
+        const nx = x + xx, ny = y + yy;
+        if (!inBounds(t, nx, ny)) continue;
+        const j = tIdx(t, nx, ny);
+        if ((t.water?.[j] || 0) <= WET_DEPTH * 0.35) continue;
+        level = Math.max(level, t.height[j] + t.water[j]);
+      }
+      if (level > hNew + WET_DEPTH * 0.35) t.water[i] = Math.min(WATER_MAX_DEPTH, level - hNew);
+    }
+    if (t.waterActive) t.waterActive.add(i);
+  }
 }
 
 // Wasser-CA in einem Umkreis reaktivieren (nach Bau/Zerstörung einer Wassersperre).
@@ -1205,6 +1244,8 @@ export const roadAtIdx = (t, i) => (t.road && t.road[i] > 0) || (t.roadBuilt && 
 // auf Straßen (Serpentinen) deutlich mehr. maxSlope=Infinity (Infanterie hoch, Luft egal).
 export function slopeOk(t, fromI, toI, maxSlope, roadLimit, terraformLimit) {
   if (maxSlope === Infinity) return true;
+  // Eine Brücke/ein Viadukt überspannt jede Steigung — Brückenzellen sind steigungsfrei befahrbar.
+  if (t.bridge && (t.bridge[fromI] > 0 || t.bridge[toI] > 0)) return true;
   const dh = Math.abs(t.height[toI] - t.height[fromI]);
   if (dh <= maxSlope) return true;
   if (terraformLimit != null
@@ -1242,9 +1283,11 @@ export function isPassable(t, domain, tx, ty, category) {
     // Eine Brücke ODER ein Tunnel überwindet auch eine gebaute Sperre (Wall/Graben) — sonst wäre eine
     // Bodensperre für ALLE undurchlässig (auch Infanterie-Kletterer). Massive Gebäude liegen nie unter
     // Brücke/Tunnel (Überlappungsprüfung beim Bau), daher unkritisch.
-    case 'amphibious': return (ty_ !== TT.CLIFF || inTunnel) && (!blocked || onBridge || inTunnel);
+    // Eine Brücke quert auch eine Klippe (Viadukt) — so kann ein durchgehender Brücken-Pass eine
+    // Schlucht/ein Klippenband für Fahrzeuge überbrücken.
+    case 'amphibious': return (ty_ !== TT.CLIFF || inTunnel || onBridge) && (!blocked || onBridge || inTunnel);
     case 'land':
-    default: return (ty_ !== TT.CLIFF || inTunnel || climber) && (!wet || onBridge) && (!blocked || onBridge || inTunnel);
+    default: return (ty_ !== TT.CLIFF || inTunnel || climber || onBridge) && (!wet || onBridge) && (!blocked || onBridge || inTunnel);
   }
 }
 

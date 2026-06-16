@@ -232,7 +232,8 @@ function serializeControls(world) {
   const aiOnly = active.length > 0 && active.every(p => p.controller === 'ai');
   const speed = Number.isFinite(Number(controls.speed)) ? Number(controls.speed) : 1;
   const timeMode = ['auto', 'day', 'night'].includes(controls.timeMode) ? controls.timeMode : 'auto';
-  return { speed: Math.max(1, Math.round(speed * 10) / 10), timeMode, aiOnly };
+  const insanity = Math.max(1, Math.min(4, Math.round(Number(controls.insanity) || 2)));
+  return { speed: Math.max(1, Math.round(speed * 10) / 10), timeMode, aiOnly, insanity };
 }
 
 function playerView(p) {

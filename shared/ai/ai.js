@@ -8,7 +8,7 @@ import { ownerEntities, canAfford, effectiveCost, dist, canPlaceBuilding, spawnU
 import { findPath } from '../pathfinding.js';
 import { validateTunnel } from '../systems/tunnel.js';
 import {
-  worldToTile, tileToWorld, hasWaterNear, nearestWaterTile, waterBlocksLand,
+  worldToTile, tileToWorld, hasWaterNear, nearestWaterTile, waterBlocksLand, persistentWaterBlocksLand,
   inBounds, tIdx, isPassable, TT, roadAtIdx, forestBlocks,
 } from '../terrain.js';
 
@@ -598,24 +598,91 @@ function pipePathTiles(world, owner, prod, sink, def) {
 
 function manageBridges(world, player, s, applyCommand) {
   if (!s.hq || constructionBusy(s) || buildingInProgress(s, 'bridge')) return false;
-  // Brücken sind teuer und v. a. für FAHRZEUGE da (Infanterie watet/klettert ohnehin). Deckel niedrig
-  // halten, sonst versenkt die KI ihr ganzes Erz in einer endlosen Brückenspur statt in die Armee.
-  if (s.bridges >= 6) return false;
+  // Deckel etwas höher als eine einzelne Querung (5–7 Zellen, diagonal länger), damit eine vollständige
+  // Ufer-zu-Ufer-Brücke passt; durch die Erreichbarkeitsprüfung baut die KI ohnehin nur EINE Querung.
+  if (s.bridges >= 14) return false;
   const vehicles = s.army.filter(u => u.domain === 'land' && u.category === 'vehicle');
   if (vehicles.length < 1 && s.vehicleArmy < 1) return false;   // erst Fahrzeuge, dann Brücken für sie
   const def = world.data.buildings.bridge;
   if (!def || !canAfford(player, effectiveCost(world, player.id, def))) return false;
-  const spot = pickBridgeSpot(world, player, s, def);
-  if (!spot) return false;
-  applyCommand(world, { type: 'build', building: 'bridge', tx: spot[0], ty: spot[1] }, player.id);
-  return true;
+  // Nur überbrücken, wenn der Gegner NICHT ohnehin über Land erreichbar ist (sonst keine Brücke nötig).
+  const enemy = pickEnemyTarget(world, player);
+  if (!enemy) return false;
+  const from = { tx: Math.round(s.hq.tx + s.hq.size / 2), ty: Math.round(s.hq.ty + s.hq.size / 2) };
+  const [gx, gy] = worldToTile(enemy.x, enemy.y);
+  if (canReachTile(world.terrain, from.tx, from.ty, gx, gy, SLOPE_HEAVY, { heavy: true, category: 'vehicle' }, 5)) return false;
+  // EINE durchgehende Querung planen: der zusammenhängende Wasserlauf auf der Linie HQ→Gegner.
+  const span = planBridgeCrossing(world, from, gx, gy);
+  if (!span || !span.length) return false;
+  // Die ganze Spannweite auf einmal setzen — der Frontier-Bau (construction.js) zieht sie Ufer→Ufer
+  // als zusammenhängende Brücke hoch, statt verstreute Einzelteile, die nie eine Querung ergeben.
+  const t = world.terrain;
+  let placed = 0;
+  for (const [tx, ty] of span) {
+    const i = tIdx(t, tx, ty);
+    if (t.bridge && t.bridge[i] > 0) continue;
+    if (!placeable(world, tx, ty, 1, def, player.id)) continue;
+    if (!canAfford(player, effectiveCost(world, player.id, def))) break;
+    applyCommand(world, { type: 'build', building: 'bridge', tx, ty }, player.id);
+    placed++;
+  }
+  return placed > 0;
+}
+
+// Plant die Brückenquerung: den ersten echten Wasserlauf auf der Linie HQ→Gegner,
+// aber als gerade orthogonale Ufer-zu-Ufer-Spannweite. Keine diagonalen Treppen.
+function planBridgeCrossing(world, from, gx, gy) {
+  const line = lineTiles(from.tx, from.ty, gx, gy);
+  for (const [tx, ty] of line) {
+    const span = bridgeSpanFromEntry(world, tx, ty);
+    if (span) return span.cells;
+  }
+  return null;
+}
+
+function bridgeSpanFromEntry(world, ex, ey, maxLen = 30) {
+  if (!isBridgeCandidateCell(world, ex, ey)) return null;
+  const t = world.terrain;
+  const bridgeAnchor = (x, y) => {
+    if (!inBounds(t, x, y)) return false;
+    const i = tIdx(t, x, y);
+    if (t.bridge && t.bridge[i] > 0) return true;
+    return !waterBlocksLand(t, i) && isPassable(t, 'land', x, y, 'vehicle');
+  };
+  const scan = (dx, dy) => {
+    const cells = [];
+    let x = ex, y = ey;
+    while (inBounds(t, x, y) && cells.length < maxLen) {
+      const i = tIdx(t, x, y);
+      if (!waterBlocksLand(t, i) || !persistentWaterBlocksLand(t, i) || (t.bridge && t.bridge[i] > 0)) break;
+      cells.push([x, y]);
+      x += dx; y += dy;
+    }
+    if (!cells.length) return null;
+    const before = [ex - dx, ey - dy];
+    const after = [x, y];
+    if (!bridgeAnchor(before[0], before[1]) || !bridgeAnchor(after[0], after[1])) return null;
+    return { cells, dx, dy };
+  };
+  let best = null;
+  for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+    const span = scan(dx, dy);
+    if (!span) continue;
+    if (!best || span.cells.length < best.cells.length) best = span;
+  }
+  return best;
 }
 
 function manageAccessRoutes(world, player, s, applyCommand) {
   if (!s.hq || constructionBusy(s)) return false;
   const pressure = world.aiDirector?.pressure || 0;
   const landArmy = s.army.filter(u => u.domain === 'land');
-  if (landArmy.length < (pressure > 0 ? 2 : 5) && s.vehicleArmy < 1 && s.factories < 1) return false;
+  // Angriffsstraßen/-brücken zum Gegner sind für FAHRZEUGE da (Infanterie watet/klettert ohnehin) und
+  // dürfen den Bau der ERSTEN Fabrik nicht verdrängen: Infrastruktur läuft im stepAi VOR manageBuild,
+  // d. h. solange die KI Straßen legt, kommt die Fabrik nie dran (gemessen: Seiten mit 60+ Straßen, aber
+  // ohne Fabrik → reine Infanterie). Erst ab einer Fabrik (= Fahrzeug-Siegpfad existiert) Routen bauen.
+  if (s.factories < 1) return false;
+  if (landArmy.length < (pressure > 0 ? 2 : 5) && s.vehicleArmy < 1) return false;
   const enemy = pickEnemyTarget(world, player, pressure > 0);
   if (!enemy) return false;
   // Route IMMER vom (unbeweglichen) HQ aus planen — sonst wandert die Linie mit der jeweils
@@ -730,7 +797,10 @@ function isBridgeCandidateCell(world, tx, ty) {
   const t = world.terrain;
   if (!inBounds(t, tx, ty)) return false;
   const i = tIdx(t, tx, ty);
-  return waterBlocksLand(t, i) && !(t.bridge && t.bridge[i] > 0);
+  // NUR über dauerhafte Gewässer (Fluss/See/Meer) brücken. Eine vorübergehende Überflutung
+  // (Regen, Damm, Flutkanal) hebt zwar t.water, ist aber kein Fluss → sonst stellt die KI bei
+  // jeder Pfütze im Gelände Brückenpfeiler ab. baseWater unterscheidet beides.
+  return waterBlocksLand(t, i) && persistentWaterBlocksLand(t, i) && !(t.bridge && t.bridge[i] > 0);
 }
 
 function hasBridgeShore(world, tx, ty) {
@@ -1269,11 +1339,18 @@ function pickEnemyTarget(world, player, decisive = false, raid = false) {
     const production = e.etype === 'building' && (e.def?.produces_units || e.def?.produces_category);
     // Raid-Doktrin: greift die VERSORGUNG an — Pipelines, Bohrtürme, Pumpwerke, Depots zuerst.
     const supply = e.etype === 'building' && (e.def?.pipe || e.def?.pipelineResource || e.def?.pump || e.def?.resourceDepot || e.kind === 'oil_derrick');
+    // Begehbare Infrastruktur (Straße/Brücke/Tunnel/Leitung) und Befestigungen (Wall/Graben) sind als
+    // Angriffsziel wertlos — eine zerstörte Straße tut dem Gegner kaum weh, bindet aber die Armee fernab
+    // der eigentlichen Ziele. Stark depriorisieren, damit die KI Produktion/Wirtschaft/Armee angreift.
+    const lowValue = e.etype === 'building'
+      && (e.def?.roadBuilt || e.def?.bridges || e.def?.tunnels || e.def?.pipe || e.def?.role === 'fortification');
     let prio = e.etype === 'building'
       ? e.kind === 'hq' ? (decisive ? 0.25 : 0.5)
         : production ? (decisive ? 0.45 : 0.8)
         : decisive ? 0.9 : 1.0
       : decisive ? 1.8 : 1.2;
+    if (e.etype === 'building' && buildingTouchesFlood(world.terrain, e)) prio *= 4;
+    if (lowValue) prio *= 12;            // Straße/Brücke/Leitung/Wall fast nie ansteuern
     if (raid && supply) prio *= 0.25;   // Versorgungsziele stark bevorzugen
     const d = ((e.x - from.x) ** 2 + (e.y - from.y) ** 2) * prio;
     if (d < bestD) { bestD = d; best = e; }
@@ -1300,7 +1377,7 @@ function prepareVehicleAttackRoute(world, player, s, vehicles, enemy, applyComma
   const [sx, sy] = worldToTile(lead.x, lead.y);
   const [gx, gy] = worldToTile(enemy.x, enemy.y);
   if (canReachTile(world.terrain, sx, sy, gx, gy, lead.maxSlope ?? SLOPE_HEAVY,
-    { heavy: true, category: lead.category }, 5)) return false;
+    { heavy: true, category: lead.category }, 1.25)) return false;
   return planRouteInfrastructure(world, player, s, { tx: sx, ty: sy }, { tx: gx, ty: gy }, applyCommand, { preferRoad: true });
 }
 
@@ -1393,20 +1470,11 @@ function planBridgeSpan(world, player, cells, n, applyCommand) {
   // KÜRZESTE ORTHOGONALE Überquerung ab der Eintrittszelle (x- ODER y-Richtung). Wichtig: eine
   // diagonale Brückentreppe ist für Fahrzeuge NICHT passierbar (A* schneidet keine Wasser-Ecken),
   // darum bauen wir eine gerade, orthogonal zusammenhängende Spanne quer durch den Fluss.
-  const runLen = (dx, dy) => {
-    let L = 0, x = ex, y = ey;
-    while (inBounds(t, x, y) && waterBlocksLand(t, tIdx(t, x, y)) && L < 30) { L++; x += dx; y += dy; }
-    return L;
-  };
-  let best = null, bestLen = Infinity;
-  for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
-    const L = runLen(dx, dy);
-    if (L > 0 && L < bestLen) { bestLen = L; best = [dx, dy]; }
-  }
-  if (!best) return false;
+  const span = bridgeSpanFromEntry(world, ex, ey);
+  if (!span) return false;
   const cost = effectiveCost(world, player.id, def);
-  let built = false, x = ex, y = ey;
-  for (let k = 0; k < bestLen; k++) {
+  let built = false;
+  for (const [x, y] of span.cells) {
     const i = tIdx(t, x, y);
     if (!(t.bridge && t.bridge[i] > 0) && !existingOrPendingBuilding(world, player.id, 'bridge', x, y)
       && placeable(world, x, y, 1, def, player.id)) {
@@ -1414,7 +1482,6 @@ function planBridgeSpan(world, player, cells, n, applyCommand) {
       applyCommand(world, { type: 'build', building: 'bridge', tx: x, ty: y }, player.id);
       built = true;
     }
-    x += best[0]; y += best[1];
   }
   return built;
 }
@@ -1438,7 +1505,7 @@ function routeCellAction(world, player, prev, cur, step, opts) {
   const prevI = tIdx(t, prev.tx, prev.ty);
   if (waterBlocksLand(t, i) && !(t.bridge && t.bridge[i] > 0)) {
     if (step > 2 && opts.preferRoad && !roadAtIdx(t, prevI)) return { type: 'build', kind: 'road', tx: prev.tx, ty: prev.ty };
-    return { type: 'build', kind: 'bridge', tx: cur.tx, ty: cur.ty };
+    return null;
   }
   // Klippen werden in planRouteInfrastructure als durchgehender Tunnel behandelt (nicht hier).
   if (t.type[i] === TT.CLIFF && !(t.tunnel && t.tunnel[i] > 0)) return null;
@@ -1540,6 +1607,15 @@ function entityTile(e) {
   if (e.etype === 'building') return { tx: Math.round(e.tx + (e.size || 1) / 2), ty: Math.round(e.ty + (e.size || 1) / 2) };
   const [tx, ty] = worldToTile(e.x, e.y);
   return { tx, ty };
+}
+
+function buildingTouchesFlood(t, e) {
+  const size = e.size || 1;
+  for (let yy = 0; yy < size; yy++) for (let xx = 0; xx < size; xx++) {
+    const tx = e.tx + xx, ty = e.ty + yy;
+    if (inBounds(t, tx, ty) && waterBlocksLand(t, tIdx(t, tx, ty))) return true;
+  }
+  return false;
 }
 
 function nearestBy(list, scoreFn) {
