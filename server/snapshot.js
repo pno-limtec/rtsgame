@@ -179,8 +179,13 @@ export function serializeSnapshot(world) {
       if (e.queue && e.queue.length) {
         const front = e.queue[0];
         const fp = front.total ? Math.round((1 - Math.max(0, front.timeLeft) / front.total) * 100) : 0;
-        brow.push(fp, e.queue.map(it => kindId(it.kind)));  // Index 15: Fortschritt, Index 16: Kind-Liste
+        brow[15] = fp;
+        brow[16] = e.queue.map(it => kindId(it.kind));  // Index 15: Fortschritt, Index 16: Kind-Liste
+      } else {
+        brow[15] = 0;
+        brow[16] = null;
       }
+      brow[17] = pipeResourceId(e._pipeResource);
       ents.push(brow);
     }
   }
@@ -259,6 +264,7 @@ export const KIND_TABLE = KINDS;
 const ROLES = [null, 'ore', 'build', 'earth'];
 const ROLE_INDEX = new Map(ROLES.map((r, i) => [r, i]));
 function roleId(r) { return ROLE_INDEX.get(r === 'materials' ? 'build' : r) || 0; }
+function pipeResourceId(r) { return r === 'water' ? 1 : r === 'oil' ? 2 : 0; }
 
 // Warn-Markierung: Gebäude steht, kann aber seine Funktion NICHT erfüllen → Client zeigt ein
 // Warndreieck. Fälle: Produktionsgebäude ohne Strom; Pumpe/Bohrturm ohne Leitung ODER ohne Rohstoff

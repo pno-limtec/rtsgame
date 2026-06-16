@@ -20,6 +20,7 @@ import {
 } from '../constants.js';
 import { TT, applyHeightDelta, wakeWaterAround, worldToTile, tIdx, inBounds } from '../terrain.js';
 import { applyDamage } from '../world.js';
+import { insanityProfile } from './environment.js';
 
 const SETTLE_EPS = 1e-4;   // Schwelle, unter der eine Zelle als beruhigt gilt
 const FLOW_EPS = 0.0015;   // minimale Oberflächenneigung, bevor Wasser sichtbar strömt
@@ -256,8 +257,13 @@ function simulateCA(t, dtW, world) {
   const drought = weather === 'drought';
   const precip = weather === 'rain' || weather === 'storm' || weather === 'fog';
   const solar = world && world.env ? (world.env.solar || 0) : 0;
+  const profile = insanityProfile(world);
+  const rainInflow = profile.rainInflow ?? profile.rain ?? 1;
+  const floodCapFrac = FLOOD_CAP_FRAC * (profile.floodCap ?? 1);
+  const sourceSurge = profile.sourceSurge ?? 1;
+  const startMelt = profile.startMelt ?? 1;
 
-  // GLOBALER FLUT-DECKEL: höchstens FLOOD_CAP_FRAC (25 %) der Karte dürfen ÜBER Normalpegel
+  // GLOBALER FLUT-DECKEL: profilabhängig darf nur ein Teil der Karte ÜBER Normalpegel
   // geflutet sein. Darüber stoppt zusätzlicher Regenzufluss; vorhandenes Wasser läuft nur
   // sichtbar über die CA weiter. Zählt nur überflutetes LAND (nass, obwohl der
   // Normalpegel trocken ist) — Meer/Flüsse/Seen im Normalzustand zählen nicht.
@@ -268,9 +274,9 @@ function simulateCA(t, dtW, world) {
     for (let i = 0; i < water.length; i++) if (water[i] > WET_DEPTH && baseWater[i] <= WET_DEPTH) flooded++;
     t._wetFrac = flooded / (w * h);
   }
-  const floodCap = (t._wetFrac || 0) > FLOOD_CAP_FRAC;
+  const floodCap = (t._wetFrac || 0) > floodCapFrac;
   if (precip && !floodCap) {
-    const mult = weather === 'storm' ? STORM_RAIN_MULT : 1;
+    const mult = (weather === 'storm' ? STORM_RAIN_MULT : 1) * rainInflow;
     const drops = (w * h * RAIN_FRAC) | 0;   // skaliert mit der Kartengröße
     for (let k = 0; k < drops; k++) {
       const i = (world.rng() * w * h) | 0;
@@ -386,7 +392,7 @@ function simulateCA(t, dtW, world) {
       // die Schneedecke breitet sich über das Einzugsband talwärts aus (Schneegrenze sinkt). Die
       // Deckelhöhe je Zelle steigt mit der Höhe über SNOW_FALL_LINE — Bandzellen tragen nur dünn,
       // der Gipfel baut die tiefste Decke auf.
-      const snowGain = SNOW_FALL * (weather === 'storm' ? 3.0 : 1.8);
+      const snowGain = SNOW_FALL * (weather === 'storm' ? 3.0 : 1.8) * rainInflow;
       for (const i of snowCells) {
         const cap = (height[i] - SNOW_FALL_LINE) * SNOW_BAND_CAP;
         if (cap <= 0) continue;
@@ -400,7 +406,7 @@ function simulateCA(t, dtW, world) {
   // Flüsse, Gräben und geschlossene Senken.
   if (world?.env && !floodCap && !drought && t.startMeltLeft > 0 && t.startMeltCells && t.startMeltCells.length) {
     const fade = Math.max(0.25, t.startMeltLeft / Math.max(1, t.startMeltTotal || 300));
-    const meltRate = 0.007 * fade;   // gedrosselt: Start-Schmelze füllt Flüsse, flutet aber nicht die Ebenen
+    const meltRate = 0.007 * fade * startMelt;   // gedrosselt: Start-Schmelze füllt Flüsse, flutet aber nicht die Ebenen
     for (const i of t.startMeltCells) {
       const snow = t.snow ? t.snow[i] || 0 : 0;
       const m = Math.min(Math.max(0.0015, snow * 0.08), meltRate);
@@ -409,7 +415,7 @@ function simulateCA(t, dtW, world) {
       waterActive.add(i);
     }
     for (const si of sources) {
-      water[si] = Math.min(WATER_MAX_DEPTH, water[si] + WATER_SOURCE_RATE * (0.65 + fade));
+      water[si] = Math.min(WATER_MAX_DEPTH, water[si] + WATER_SOURCE_RATE * (0.65 + fade) * startMelt);
       waterActive.add(si);
     }
     t.startMeltLeft--;
@@ -419,7 +425,10 @@ function simulateCA(t, dtW, world) {
   // beiden Hauptflüsse versiegen also nie und entwässern dauerhaft zum Meer. Bei Regen kräftiger
   // (Flüsse schwellen), bei Trockenheit gedrosselt, aber nie null.
   {
-    const srcRate = WATER_SOURCE_RATE * (weather === 'storm' ? 2.2 : weather === 'rain' ? 1.6 : drought ? 0.75 : 1);
+    const sourceWeather = weather === 'storm' ? 1 + (2.2 - 1) * sourceSurge
+      : weather === 'rain' ? 1 + (1.6 - 1) * sourceSurge
+        : drought ? 0.75 : 1;
+    const srcRate = WATER_SOURCE_RATE * sourceWeather;
     for (const si of sources) {
       water[si] = Math.min(WATER_MAX_DEPTH, water[si] + srcRate);
       waterActive.add(si);

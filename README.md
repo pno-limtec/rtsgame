@@ -1,4 +1,4 @@
-# Iron Frontier — Browser-RTS
+# Faultline Command — Browser-RTS
 
 Ein eigenständiges, browserbasiertes Multiplayer-Echtzeitstrategiespiel (eigenes IP) im Geist
 klassischer industrieller Tactical-RTS-Titel. Basisbau, mehrstufige Rohstoffwirtschaft,

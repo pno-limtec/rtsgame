@@ -1,7 +1,7 @@
 {
-  "name": "iron-frontier-rts",
+  "name": "faultline-command-rts",
   "version": "0.2.0",
-  "description": "Iron Frontier — a browser-based multiplayer real-time strategy game (original IP).",
+  "description": "Faultline Command — a browser-based multiplayer real-time strategy game (original IP).",
   "type": "module",
   "scripts": {
     "server": "node server/index.js",
@@ -17,6 +17,6 @@
   "dependencies": {
     "ws": "^8.21.0"
   },
-  "author": "Iron Frontier dev team",
+  "author": "Faultline Command dev team",
   "license": "MIT"
 }

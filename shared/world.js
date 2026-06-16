@@ -20,7 +20,7 @@ export function setNextEntityId(id) {
   _gid = n;
 }
 
-export function createWorld({ data, seed = 1, map = DEFAULT_MAP, players = [] }) {
+export function createWorld({ data, seed = 1, map = DEFAULT_MAP, players = [], controls = null }) {
   // Entity-ID-Zähler je Welt zurücksetzen → Matches sind voneinander UNABHÄNGIG. Ohne diesen Reset
   // schleppte der modulglobale _gid den Endstand der vorigen Partie in die nächste (Mehr-Match-Prozesse
   // wie coverage.js/match-sim.js/smoke.js): id-abhängige Logik (repathCd-Stagger id%7, Tie-Breaks)
@@ -42,6 +42,7 @@ export function createWorld({ data, seed = 1, map = DEFAULT_MAP, players = [] })
     events: [],          // flüchtige Effekt-Events für Clients (pro Snapshot geleert)
     spatial: null,
     map,
+    controls: controls ? { ...controls } : {},
   };
 
   // Spieler initialisieren (Ressourcen aus data.resources).
@@ -360,13 +361,14 @@ function placeStartBases(world) {
   const radius = Math.min(terrain.w, terrain.h) * 0.30;
   const startRiverClearance = riverClearanceForMap(terrain, START_RIVER_CLEARANCE, 6, 0.19);
   const supportRiverClearance = riverClearanceForMap(terrain, START_SUPPORT_RIVER_CLEARANCE, 4, 0.11);
+  const easyStart = (world.controls?.insanity ?? 2) <= 2;
   world.players.forEach((p, i) => {
     const ang = (i / n) * Math.PI * 2;
     let tx = Math.round(cx + Math.cos(ang) * radius);
     let ty = Math.round(cy + Math.sin(ang) * radius);
     [tx, ty] = tryBuildableNear(world, tx, ty, 3, { minRiverDist: startRiverClearance })
       || forceDryBuildableNear(world, tx, ty, 3, { minRiverDist: startRiverClearance });
-    protectStartTerrace(terrain, tx, ty, 3);
+    protectStartTerrace(terrain, tx, ty, 3, { large: easyStart });
     clearOreAround(terrain, tx + 1.5, ty + 1.5, 8);
     spawnBuilding(world, p.id, 'hq', tx, ty);
     for (const [kind, ox, oy] of [
@@ -388,6 +390,7 @@ function placeStartBases(world) {
     // Start-Raffinerie zwischen Basis und Erzfeld.
     const refSpot = tryBuildableNear(world, Math.round(tx + Math.cos(towardCenter) * 6), Math.round(ty + Math.sin(towardCenter) * 6), 3, { minRiverDist: supportRiverClearance });
     if (refSpot) spawnBuilding(world, p.id, 'refinery', refSpot[0], refSpot[1]);
+    if (easyStart) stampPlateauResources(terrain, tx + 1.5, ty + 1.5, towardCenter);
 
     // kleine Startarmee + 2 Bagger + 2 LKW rund um den Bauhof
     const used = new Set();
@@ -495,11 +498,11 @@ function hasInlandWaterNear(t, tx, ty, size, radius) {
   return false;
 }
 
-function protectStartTerrace(t, tx, ty, size) {
+function protectStartTerrace(t, tx, ty, size, opts = {}) {
   if (!t.startSafe) t.startSafe = new Uint8Array(t.w * t.h);
   const cx = tx + size / 2, cy = ty + size / 2;
-  const core = 9;
-  const outer = 17;
+  const core = opts.large ? 13 : 9;
+  const outer = opts.large ? 23 : 17;
   // Umgebungshöhe am äußeren Ring abtasten → der Plateau-Deckel liegt IMMER klar darüber, also ein
   // echtes erhöhtes Plateau (auch bei den jetzt größeren Höhenunterschieden), nicht eine Mulde.
   let sum = 0, cnt = 0;
@@ -537,6 +540,29 @@ function protectStartTerrace(t, tx, ty, size) {
     const x = i % t.w, y = (i / t.w) | 0;
     return Math.hypot(x + 0.5 - cx, y + 0.5 - cy) > outer + 2;
   });
+}
+
+function stampPlateauResources(t, cx, cy, angle) {
+  const oreX = Math.round(cx + Math.cos(angle) * 12);
+  const oreY = Math.round(cy + Math.sin(angle) * 12);
+  stampOre(t, oreX, oreY, 3, 1500);
+  const oilAngle = angle + Math.PI * 0.55;
+  const oilX = Math.round(cx + Math.cos(oilAngle) * 11);
+  const oilY = Math.round(cy + Math.sin(oilAngle) * 11);
+  stampOil(t, oilX, oilY, 3, 760);
+}
+
+function stampOil(t, cx, cy, radius, amount) {
+  if (!t.oil) return;
+  for (let y = cy - radius; y <= cy + radius; y++) for (let x = cx - radius; x <= cx + radius; x++) {
+    if (!inBounds(t, x, y)) continue;
+    const d = Math.hypot(x - cx, y - cy);
+    if (d > radius) continue;
+    const i = tIdx(t, x, y);
+    if (t.water?.[i] > WET_DEPTH || t.type[i] === TT.WATER) continue;
+    t.oil[i] = Math.max(t.oil[i] || 0, amount * (1 - d / (radius + 0.01)));
+    if (t.oilDirty) t.oilDirty.add(i);
+  }
 }
 
 function dryFootprint(t, tx, ty, size, pad = 0, minHeight = SEA_LEVEL + 0.14) {

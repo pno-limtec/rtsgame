@@ -283,7 +283,10 @@ export class Input {
     const loaded = sel.filter(id => { const e = byId.get(id); return e && TRANSPORT_KINDS.has(e.kind) && (e.cargo || 0) > 0; });
     for (const id of loaded) this.net.cmd({ type: 'unload', transport: id, x: g.x, y: g.z });
     const movers = sel.filter(id => !loaded.includes(id));
-    if (movers.length) this.net.cmd({ type: 'move', units: movers, x: g.x, y: g.z, attackMove: shift });
+    if (movers.length) {
+      this.net.cmd({ type: 'move', units: movers, x: g.x, y: g.z, attackMove: shift });
+      this.renderer.spawnMoveMarker?.(g.x, g.z);
+    }
   }
 
   isLineMode() {

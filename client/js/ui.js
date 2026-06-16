@@ -1,7 +1,16 @@
 // UI: Ressourcen-HUD, Bauleiste, Produktionsmenü, Minimap, Auswahlpanel, Warnungen, Lobby.
 // Die „goldene" Credits-Ressource ist Geschichte: ERZ ist die Hauptressource (Bagger → Raffinerie).
 const RES_ICONS = { ore: 'ore', energy: 'energy', oil: 'oil', fuel: 'fuel', ammo: 'ammo', materials: 'materials', water: 'water' };
-const RES_ORDER = ['ore', 'materials', 'water', 'oil', 'fuel', 'ammo'];
+const RES_ORDER = ['ore', 'materials', 'water', 'oil', 'fuel'];
+const RES_COLOR = {
+  ore: '#ffcf5a',
+  materials: '#cfa277',
+  water: '#42d7ff',
+  oil: '#b58cff',
+  fuel: '#ff8f3d',
+  ammo: '#ff6464',
+  energy: '#ffe66a',
+};
 const RES_TIP = {
   ore: 'Erz (Bagger baut es ab, LKW bringt Erzhaufen ins Lager)',
   materials: 'Erde/Baumateriallager',
@@ -181,7 +190,8 @@ function iconSvg(name, cls = '') {
 }
 
 function resIcon(resource, cls = 'ricon') {
-  return iconSvg(RES_ICONS[resource] || 'ore', cls);
+  const color = RES_COLOR[resource] || '#eaf6ff';
+  return iconSvg(RES_ICONS[resource] || 'ore', cls).replace('<svg ', `<svg style="color:${color}" `);
 }
 
 function techObjectText(obj) {
@@ -320,6 +330,7 @@ export class UI {
     this.lastWarn = {};
     this.selPanel = document.getElementById('selpanel');
     this.scoreboard = document.getElementById('scoreboard');
+    this.joinCodeHud = document.getElementById('joincodehud');
     this.minimap = document.getElementById('minimap');
     this.mctx = this.minimap.getContext('2d');
     input.onSelectionChange = () => this.renderSelection();
@@ -330,10 +341,53 @@ export class UI {
     const lobby = document.getElementById('lobby');
     const sel = document.getElementById('seatsel');
     const list = document.getElementById('seatlist');
+    const status = document.getElementById('lobbystatus');
+    const gameList = document.getElementById('gamelist');
+    const setStatus = (text) => { if (status) status.textContent = text || ''; };
     const lobbyOptions = () => ({
       fow: !!document.getElementById('fowstart')?.checked,
+      timeMode: document.getElementById('daynightstart')?.checked === false ? 'day' : 'auto',
       insanity: normalizeInsanity(document.getElementById('insanitystart')?.value, this.net.controls?.insanity),
     });
+    const setTab = (tab) => {
+      for (const btn of document.querySelectorAll('[data-lobbytab]')) {
+        const active = btn.dataset.lobbytab === tab;
+        btn.setAttribute('aria-selected', active ? 'true' : 'false');
+      }
+      for (const panel of document.querySelectorAll('[data-lobbypanel]')) panel.hidden = panel.dataset.lobbypanel !== tab;
+      if (tab === 'join') this.net.requestGameList();
+      setStatus('');
+    };
+    for (const btn of document.querySelectorAll('[data-lobbytab]')) btn.onclick = () => setTab(btn.dataset.lobbytab);
+    for (const btn of document.querySelectorAll('[data-startmode]')) {
+      btn.onclick = () => {
+        for (const other of document.querySelectorAll('[data-startmode]')) other.setAttribute('aria-pressed', other === btn ? 'true' : 'false');
+      };
+    }
+    const renderGames = (games = this.net.games || []) => {
+      if (!gameList) return;
+      if (!games.length) {
+        gameList.innerHTML = '<div class="gamerow"><span>Keine öffentlichen Spiele gefunden</span><button type="button" data-refresh-games>Aktualisieren</button></div>';
+      } else {
+        gameList.innerHTML = games.slice(0, 50).map(g => {
+          const free = Math.max(0, Number(g.free) || 0);
+          const players = Math.max(0, Number(g.players) || 0);
+          const label = g.running ? 'läuft' : 'wartet';
+          return `<div class="gamerow" data-roomid="${escAttr(g.id)}">
+            <span><b>${players} Spieler</b><span class="gmeta"> · ${free} freie KI-Slots · ${label}</span></span>
+            <button type="button" data-join-room="${escAttr(g.id)}">Beitreten</button>
+          </div>`;
+        }).join('');
+      }
+      gameList.querySelector('[data-refresh-games]')?.addEventListener('click', () => this.net.requestGameList());
+      for (const btn of gameList.querySelectorAll('[data-join-room]')) {
+        btn.onclick = () => {
+          const name = document.getElementById('pname').value || 'Spieler';
+          onJoin(name, null, { roomId: btn.dataset.joinRoom, ...lobbyOptions() });
+          setStatus('Spiel wird betreten...');
+        };
+      }
+    };
     const render = () => {
       sel.innerHTML = ''; list.innerHTML = '';
       for (const p of this.net.players) {
@@ -348,8 +402,14 @@ export class UI {
       }
     };
     render();
+    renderGames();
     this.net.on('lobby', render);
     this.net.on('init', render);
+    this.net.on('gameList', renderGames);
+    this.net.on('joinDenied', (m) => setStatus(m.message || 'Beitritt nicht möglich'));
+    this.net.on('roomInfo', (room) => {
+      if (room?.code) setStatus(`Privates Spiel erstellt: ${room.code}`);
+    });
     document.getElementById('joinbtn').onclick = () => {
       const name = document.getElementById('pname').value || 'Spieler';
       const seat = parseInt(sel.value, 10);
@@ -359,7 +419,27 @@ export class UI {
       const seat = parseInt(sel.value, 10);
       onJoin('Zuschauer', Number.isFinite(seat) ? seat : 0, { ...lobbyOptions(), spectator: true });
     };
+    document.getElementById('joincodebtn')?.addEventListener('click', () => {
+      const code = String(document.getElementById('joincode')?.value || '').trim().toUpperCase();
+      if (!code) { setStatus('Code eingeben'); return; }
+      const name = document.getElementById('pname').value || 'Spieler';
+      onJoin(name, null, { code, ...lobbyOptions() });
+      setStatus('Privates Spiel wird gesucht...');
+    });
+    document.getElementById('creategamebtn')?.addEventListener('click', () => {
+      const name = document.getElementById('pname').value || 'Spieler';
+      const startMode = document.querySelector('[data-startmode][aria-pressed="true"]')?.dataset.startmode || 'instant';
+      onJoin(name, null, {
+        ...lobbyOptions(),
+        create: true,
+        visibility: document.getElementById('visibilitystart')?.value || 'public',
+        slots: parseInt(document.getElementById('slotstart')?.value || '2', 10),
+        startMode,
+      });
+      setStatus('Spiel wird erstellt...');
+    });
     this.net.on('joined', (m) => { if (m.ok) lobby.style.display = 'none'; });
+    setTab('join');
   }
 
   setupMenu(renderer, audio = null) {
@@ -638,7 +718,7 @@ export class UI {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = filename || 'iron-frontier-savegame.json';
+    a.download = filename || 'faultline-command-savegame.json';
     document.body.appendChild(a);
     a.click();
     a.remove();
@@ -773,11 +853,11 @@ export class UI {
       const capText = cap == null ? 'unb.' : Math.round(cap);
       const label = `${Math.round(v)}/${capText}`;
       const low = (k === 'ammo' && v < 50) || (k === 'fuel' && v < 50) || (k === 'ore' && v < 100) || (k === 'water' && v < 30);
-      html += `<span class="res" title="${RES_TIP[k] || k}: ${label}">${resIcon(k)} <b class="${low ? 'low' : ''}">${label}</b></span>`;
+      html += `<span class="res" data-res="${escAttr(k)}" style="--res-color:${RES_COLOR[k] || '#eaf6ff'}" title="${RES_TIP[k] || k}: ${label}">${resIcon(k)} <b class="${low ? 'low' : ''}">${label}</b></span>`;
     }
     if (me.energy) {
       const def = me.energy.p < me.energy.c;
-      html += `<span class="res" title="Energie: Erzeugung/Verbrauch (nachts höher — Beleuchtung)">${resIcon('energy')} <b class="${def ? 'low' : ''}">${me.energy.p}/${me.energy.c}</b></span>`;
+      html += `<span class="res" data-res="energy" style="--res-color:${RES_COLOR.energy}" title="Energie: Erzeugung/Verbrauch (nachts höher — Beleuchtung)">${resIcon('energy')} <b class="${def ? 'low' : ''}">${me.energy.p}/${me.energy.c}</b></span>`;
     }
     html += envHtml;
     html += `<span class="sep"></span>${this.helpButtonHtml()}<button id="releasecontrol" class="topaction" type="button" title="Sitz an die KI zurückgeben und weiter zuschauen">Ausklinken</button>`;
@@ -1240,6 +1320,7 @@ export class UI {
 
   renderScoreboard(entities = this.net.entities(1)) {
     if (!this.scoreboard) return;
+    this.renderJoinCode();
     const rows = this.net.players
       .slice()
       .sort((a, b) => a.id - b.id)
@@ -1254,6 +1335,14 @@ export class UI {
         </div>`;
       });
     this.scoreboard.innerHTML = rows.join('');
+  }
+
+  renderJoinCode() {
+    if (!this.joinCodeHud) return;
+    const room = this.net.room;
+    this.joinCodeHud.innerHTML = room?.code
+      ? `Privates Spiel<b>${escAttr(room.code)}</b>`
+      : '';
   }
 
   // --- Minimap ---

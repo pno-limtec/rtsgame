@@ -10,15 +10,17 @@ const SPECTATOR_SPEEDS = [1, 2, 4, 8];
 const TIME_MODES = new Set(['auto', 'day', 'night']);
 
 export class Match {
-  constructor({ data, seed = 1, slots = 2, map, factions = ['HLX', 'KBN', 'FLG'] }) {
+  constructor({ data, seed = 1, slots = 2, map, factions = ['HLX', 'KBN', 'FLG'], insanity = 2, timeMode = 'auto' }) {
     this.data = data;
     this.seed = seed;
     this.map = map;
     this.slots = slots;
     this.factions = factions;
+    const initialInsanity = normalizeInsanityLevel(insanity);
+    const initialTimeMode = normalizeTimeMode(timeMode);
     const players = this.makePlayers();
-    this.world = createWorld({ data, seed, map, players });
-    this.world.controls = { speed: 1, timeMode: 'auto', aiOnly: true, insanity: 2 };
+    this.world = createWorld({ data, seed, map, players, controls: { insanity: initialInsanity, timeMode: initialTimeMode } });
+    this.world.controls = { speed: 1, timeMode: initialTimeMode, aiOnly: true, insanity: initialInsanity };
     this.seats = players.map((p) => ({ id: p.id, occupant: null, disconnectAt: null }));
     this.running = false;
     this.onSnapshot = null;     // (snapshot) => void   (vom Transport gesetzt)
@@ -35,6 +37,7 @@ export class Match {
   reset({ sameMap = false, insanity = null } = {}) {
     const oldSeats = this.seats || [];
     const nextInsanity = normalizeInsanityLevel(insanity ?? this.world?.controls?.insanity ?? 2);
+    const nextTimeMode = normalizeTimeMode(this.world?.controls?.timeMode);
     if (!sameMap) this.seed = (Date.now() & 0x7fffffff) || 1;
     const oldPlayers = this.world?.players || [];
     const players = this.makePlayers().map(p => {
@@ -47,8 +50,8 @@ export class Match {
         controller: seat?.occupant ? 'human' : 'ai',
       };
     });
-    this.world = createWorld({ data: this.data, seed: this.seed, map: this.map, players });
-    this.world.controls = { speed: 1, timeMode: 'auto', aiOnly: this.aiOnly(), insanity: nextInsanity };
+    this.world = createWorld({ data: this.data, seed: this.seed, map: this.map, players, controls: { insanity: nextInsanity, timeMode: nextTimeMode } });
+    this.world.controls = { speed: 1, timeMode: nextTimeMode, aiOnly: this.aiOnly(), insanity: nextInsanity };
     setInsanityLevel(this.world, nextInsanity);
     this.seats = players.map(p => {
       const old = oldSeats.find(s => s.id === p.id);
@@ -148,19 +151,30 @@ export class Match {
     const controls = this.world.controls || (this.world.controls = {});
     controls.aiOnly = this.aiOnly();
     controls.speed = normalizeSpeed(controls.speed) || 1;
-    if (!TIME_MODES.has(controls.timeMode)) controls.timeMode = 'auto';
+    controls.timeMode = normalizeTimeMode(controls.timeMode);
     controls.insanity = normalizeInsanityLevel(controls.insanity ?? 2);
     if (this.world.env) this.world.env.timeMode = controls.timeMode;
     setInsanityLevel(this.world, controls.insanity);
   }
 
-  setMatchOptions({ insanity } = {}) {
+  setMatchOptions({ insanity, timeMode } = {}) {
     this.syncSpectatorControls();
+    let changed = false;
     const level = normalizeInsanityLevel(insanity ?? this.world.controls.insanity);
-    if (level === this.world.controls.insanity) return false;
-    this.world.controls.insanity = level;
-    setInsanityLevel(this.world, level);
-    return true;
+    if (level !== this.world.controls.insanity) {
+      this.world.controls.insanity = level;
+      setInsanityLevel(this.world, level);
+      changed = true;
+    }
+    if (timeMode != null) {
+      const nextTimeMode = normalizeTimeMode(timeMode);
+      if (nextTimeMode !== this.world.controls.timeMode) {
+        this.world.controls.timeMode = nextTimeMode;
+        changed = true;
+      }
+    }
+    this.syncSpectatorControls();
+    return changed;
   }
 
   setSpectatorControls(patch = {}) {
@@ -218,4 +232,9 @@ function normalizeSpeed(value) {
   const n = Number(value);
   if (!Number.isFinite(n)) return null;
   return SPECTATOR_SPEEDS.reduce((best, cur) => (Math.abs(cur - n) < Math.abs(best - n) ? cur : best), 1);
+}
+
+function normalizeTimeMode(value) {
+  const mode = String(value || 'auto');
+  return TIME_MODES.has(mode) ? mode : 'auto';
 }

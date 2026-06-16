@@ -49,29 +49,33 @@ const SPECTATOR_EVENTS = new Set(['rain', 'drought', 'landslide', 'quake', 'stor
 const INSANITY_DEFAULT = 2;
 const INSANITY_PROFILES = {
   1: {
-    weatherDuration: 1.55, rainWeather: 0.7, stormWeather: 0.38, droughtWeather: 0.45, fogWeather: 1.15,
-    rain: 0.75, cloudRadius: 0.85, cloudDuration: 0.85, slide: 0.55, slideThreshold: 1.18,
-    slideMass: 0.72, slideLength: 0.75, damage: 0.72, lightningGap: 1.85, lightningDamage: 0.7,
-    quakeGap: 1.7, quakeRadius: 0.82, quakeDuration: 0.75, quakeSlope: 1.18, quakeSlide: 0.65,
-    eventRate: 0.65, rockRate: 0.65,
+    weatherDuration: 1.75, rainWeather: 0.55, stormWeather: 0.24, droughtWeather: 0.45, fogWeather: 1.15,
+    rain: 0.48, rainInflow: 0.45, floodCap: 0.45, sourceSurge: 0.62, startMelt: 0.60,
+    cloudRadius: 0.8, cloudDuration: 0.8, slide: 0.48, slideThreshold: 1.28,
+    slideMass: 0.62, slideLength: 0.62, damage: 0.64, lightningGap: 2.1, lightningDamage: 0.62,
+    quakeGap: 2.7, quakeRadius: 0.62, quakeDuration: 0.55, quakeSlope: 1.42, quakeSlide: 0.38,
+    eventRate: 0.36, rockRate: 0.28,
   },
   2: {
-    weatherDuration: 1, rainWeather: 1, stormWeather: 1, droughtWeather: 1, fogWeather: 1,
-    rain: 1, cloudRadius: 1, cloudDuration: 1, slide: 1, slideThreshold: 1,
-    slideMass: 1, slideLength: 1, damage: 1, lightningGap: 1, lightningDamage: 1,
-    quakeGap: 1, quakeRadius: 1, quakeDuration: 1, quakeSlope: 1, quakeSlide: 1,
-    eventRate: 1, rockRate: 1,
+    weatherDuration: 1.18, rainWeather: 0.78, stormWeather: 0.62, droughtWeather: 1, fogWeather: 1,
+    rain: 0.76, rainInflow: 0.72, floodCap: 0.68, sourceSurge: 0.82, startMelt: 0.78,
+    cloudRadius: 0.92, cloudDuration: 0.92, slide: 0.82, slideThreshold: 1.12,
+    slideMass: 0.86, slideLength: 0.82, damage: 0.9, lightningGap: 1.28, lightningDamage: 0.86,
+    quakeGap: 1.65, quakeRadius: 0.78, quakeDuration: 0.72, quakeSlope: 1.22, quakeSlide: 0.62,
+    eventRate: 0.62, rockRate: 0.55,
   },
   3: {
     weatherDuration: 0.68, rainWeather: 1.35, stormWeather: 1.85, droughtWeather: 1.35, fogWeather: 0.75,
-    rain: 1.35, cloudRadius: 1.15, cloudDuration: 1.1, slide: 1.65, slideThreshold: 0.88,
+    rain: 1.35, rainInflow: 1, floodCap: 1, sourceSurge: 1, startMelt: 1,
+    cloudRadius: 1.15, cloudDuration: 1.1, slide: 1.65, slideThreshold: 0.88,
     slideMass: 1.25, slideLength: 1.25, damage: 1.3, lightningGap: 0.65, lightningDamage: 1.35,
     quakeGap: 0.62, quakeRadius: 1.16, quakeDuration: 1.15, quakeSlope: 0.9, quakeSlide: 1.25,
     eventRate: 1.65, rockRate: 1.45,
   },
   4: {
     weatherDuration: 0.42, rainWeather: 1.9, stormWeather: 3.2, droughtWeather: 1.8, fogWeather: 0.45,
-    rain: 1.9, cloudRadius: 1.35, cloudDuration: 1.25, slide: 2.6, slideThreshold: 0.76,
+    rain: 1.9, rainInflow: 1.25, floodCap: 1.25, sourceSurge: 1.18, startMelt: 1.12,
+    cloudRadius: 1.35, cloudDuration: 1.25, slide: 2.6, slideThreshold: 0.76,
     slideMass: 1.65, slideLength: 1.55, damage: 1.75, lightningGap: 0.38, lightningDamage: 1.85,
     quakeGap: 0.34, quakeRadius: 1.42, quakeDuration: 1.35, quakeSlope: 0.78, quakeSlide: 1.75,
     eventRate: 2.55, rockRate: 2.1,
@@ -96,7 +100,7 @@ function insanityLevel(world) {
   return normalizeInsanityLevel(world?.env?.insanity ?? world?.controls?.insanity ?? INSANITY_DEFAULT);
 }
 
-function insanityProfile(world) {
+export function insanityProfile(world) {
   return INSANITY_PROFILES[insanityLevel(world)] || INSANITY_PROFILES[INSANITY_DEFAULT];
 }
 

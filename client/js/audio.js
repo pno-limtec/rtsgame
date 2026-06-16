@@ -6,6 +6,7 @@ const MUSIC_GAIN = { calm: 0.13, combat: 0.26 }; // ruhiger im Aufbau, deutlich 
 const MUSIC_CROSSFADE = 5.5;
 const COMBAT_HOLD = 12;
 const MOVE_VOICE_COOLDOWN = 3.2;
+const MOTOR_COOLDOWN = 1.6;
 const MOVE_VOICE_LINES = {
   mixed: [
     'Alle los, bitte mit Haltung und ohne Drama.',
@@ -78,7 +79,12 @@ export class Audio {
     this.sampleCache = new Map();
     this.beat = 0;
     this.lastMoveVoiceAt = -999;
+    this.lastMotorAt = -999;
     this.speechVoice = null;
+    this.voiceAudio = null;
+    this.voiceAudioUrl = null;
+    this.voicePlaying = false;
+    this.openAiVoiceDisabledUntil = 0;
   }
 
   // Beim ersten Klick/Tastendruck aufrufen (entsperrt den AudioContext).
@@ -117,7 +123,10 @@ export class Audio {
     this.sfxMuted = !on;
     saveAudioPref('if_sfx_on', on);
     if (this.master) this.master.gain.value = this.sfxMuted ? 0 : 0.5;
-    if (this.sfxMuted && typeof window !== 'undefined') window.speechSynthesis?.cancel?.();
+    if (this.sfxMuted && typeof window !== 'undefined') {
+      window.speechSynthesis?.cancel?.();
+      this._stopVoiceAudio();
+    }
   }
 
   // Kompatibilität: alles gemeinsam stummschalten.
@@ -373,23 +382,83 @@ export class Audio {
 
   moveVoice(units = []) {
     if (this.sfxMuted || typeof window === 'undefined') return;
-    const synth = window.speechSynthesis;
-    const Utterance = window.SpeechSynthesisUtterance;
-    if (!synth || !Utterance || synth.speaking || synth.pending) return;
+    if (this.voicePlaying || window.speechSynthesis?.speaking || window.speechSynthesis?.pending) return;
     const now = Date.now() / 1000;
     if (now - this.lastMoveVoiceAt < MOVE_VOICE_COOLDOWN) return;
     const group = this._moveVoiceGroup(units);
     const lines = MOVE_VOICE_LINES[group] || MOVE_VOICE_LINES.mixed;
     const text = lines[(Math.random() * lines.length) | 0];
+    this.lastMoveVoiceAt = now;
+    if (Date.now() >= this.openAiVoiceDisabledUntil) {
+      this._openAiMoveVoice(text, group).then(ok => { if (!ok) this._browserMoveVoice(text); });
+      return;
+    }
+    this._browserMoveVoice(text);
+  }
+
+  _browserMoveVoice(text) {
+    if (this.sfxMuted || typeof window === 'undefined' || this.voicePlaying) return false;
+    const synth = window.speechSynthesis;
+    const Utterance = window.SpeechSynthesisUtterance;
+    if (!synth || !Utterance || synth.speaking || synth.pending) return false;
     const utter = new Utterance(text);
     utter.lang = 'de-DE';
-    utter.volume = 0.55;
+    utter.volume = 1.0;
     utter.rate = 1.04 + Math.random() * 0.08;
     utter.pitch = 0.92 + Math.random() * 0.16;
     const voice = this._speechVoice();
     if (voice) utter.voice = voice;
-    this.lastMoveVoiceAt = now;
     synth.speak(utter);
+    return true;
+  }
+
+  async _openAiMoveVoice(text, group) {
+    if (!window.fetch || this.voicePlaying) return false;
+    try {
+      const res = await fetch('/tts', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ text, group }),
+      });
+      if (!res.ok) {
+        this.openAiVoiceDisabledUntil = Date.now() + (res.status === 503 || res.status === 404 ? 300000 : 20000);
+        return false;
+      }
+      if (this.sfxMuted) return true;
+      const blob = await res.blob();
+      if (!blob.size) return false;
+      const url = URL.createObjectURL(blob);
+      const audio = new Audio(url);
+      audio.volume = 1.0;
+      this._stopVoiceAudio();
+      this.voiceAudio = audio;
+      this.voiceAudioUrl = url;
+      this.voicePlaying = true;
+      const cleanup = () => {
+        if (this.voiceAudio === audio) this._stopVoiceAudio();
+        else URL.revokeObjectURL(url);
+      };
+      audio.addEventListener('ended', cleanup, { once: true });
+      audio.addEventListener('error', cleanup, { once: true });
+      await audio.play();
+      return true;
+    } catch {
+      this.openAiVoiceDisabledUntil = Date.now() + 20000;
+      this._stopVoiceAudio();
+      return false;
+    }
+  }
+
+  _stopVoiceAudio() {
+    if (this.voiceAudio) {
+      this.voiceAudio.pause();
+      this.voiceAudio.removeAttribute?.('src');
+      this.voiceAudio.load?.();
+    }
+    if (this.voiceAudioUrl) URL.revokeObjectURL(this.voiceAudioUrl);
+    this.voiceAudio = null;
+    this.voiceAudioUrl = null;
+    this.voicePlaying = false;
   }
 
   _moveVoiceGroup(units = []) {
@@ -420,9 +489,12 @@ export class Audio {
   motor(vol = 1) {
     if (!this.ready || this.sfxMuted) return;
     if (!this._budget('motor', 1)) return;
-    const v = Math.min(0.06, 0.045 * vol);
-    this._burst(v, 150, 0.10, 0.35);
-    this._thump(v * 0.65, 95, 62, 0.12);
+    const now = this.ctx.currentTime;
+    if (now - this.lastMotorAt < MOTOR_COOLDOWN) return;
+    this.lastMotorAt = now;
+    const v = Math.min(0.024, 0.016 * vol);
+    this._burst(v, 135, 0.055, 0.28);
+    this._thump(v * 0.42, 88, 58, 0.075);
   }
 
   excavate(vol = 1) {

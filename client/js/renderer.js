@@ -93,6 +93,7 @@ const WATER_BUILDINGS = new Set(['shipyard', 'water_pump', 'pontoon']);
 const SURFACE_SHIP_KINDS = new Set(['patrol_boat', 'destroyer', 'amphib_transport', 'sea_builder']);
 // Bauten, die ans Pipeline-Netz andocken (für die optische Rohrverbindung).
 const PIPE_CONNECT = new Set(['pipe', 'water_pump', 'water_tower', 'oil_derrick', 'oil_depot']);
+const PIPE_ENDPOINT_RESOURCE = { water_pump: 'water', water_tower: 'water', oil_derrick: 'oil', oil_depot: 'oil' };
 const PIPE_BRIDGE_CHAIN_MIN = TILE * 8;
 const PIPE_BRIDGE_SPACING = TILE * 7;
 const PIPE_BRIDGE_WIDTH = TILE * 1.8;
@@ -770,18 +771,20 @@ export class Renderer {
     this._bridgeSig = '';
     this.updateBridgeOverlay();
 
-    this.pipeMat = new THREE.MeshStandardMaterial({ color: 0x9aa3ad, roughness: 0.42, metalness: 0.55, emissive: 0x18506e, emissiveIntensity: 0 });
+    this.pipeMat = new THREE.MeshStandardMaterial({ color: 0xffffff, vertexColors: true, roughness: 0.42, metalness: 0.55, emissive: 0x18506e, emissiveIntensity: 0 });
     // Durchfluss-Visualisierung: helle Bänder wandern entlang der Bogenlänge (aFlow) durch die Leitung,
     // solange Förderung läuft (uFlowOn). Reines Shader-Overlay auf dem bestehenden Rohr-Mesh.
     this.pipeMat.onBeforeCompile = (shader) => {
       shader.uniforms.uFlowTime = { value: 0 };
       shader.uniforms.uFlowOn = { value: 0 };
       this._pipeShader = shader;
-      shader.vertexShader = 'attribute float aFlow;\nvarying float vFlow;\n'
-        + shader.vertexShader.replace('#include <begin_vertex>', '#include <begin_vertex>\n  vFlow = aFlow;');
-      shader.fragmentShader = 'uniform float uFlowTime;\nuniform float uFlowOn;\nvarying float vFlow;\n'
+      shader.vertexShader = 'attribute float aFlow;\nvarying float vFlow;\nvarying vec3 vPipeColor;\n'
+        + shader.vertexShader
+          .replace('#include <color_vertex>', '#include <color_vertex>\n  vPipeColor = vColor;')
+          .replace('#include <begin_vertex>', '#include <begin_vertex>\n  vFlow = aFlow;');
+      shader.fragmentShader = 'uniform float uFlowTime;\nuniform float uFlowOn;\nvarying float vFlow;\nvarying vec3 vPipeColor;\n'
         + shader.fragmentShader.replace('#include <emissivemap_fragment>',
-          '#include <emissivemap_fragment>\n  float fb = fract(vFlow * 0.6 - uFlowTime);\n  float band = smoothstep(0.72, 0.98, fb) * (1.0 - smoothstep(0.98, 1.0, fb));\n  totalEmissiveRadiance += vec3(0.25, 0.72, 1.0) * band * uFlowOn * 1.6;');
+          '#include <emissivemap_fragment>\n  float fb = fract(vFlow * 0.6 - uFlowTime);\n  float band = smoothstep(0.72, 0.98, fb) * (1.0 - smoothstep(0.98, 1.0, fb));\n  totalEmissiveRadiance += vPipeColor * band * uFlowOn * 1.6;');
     };
     this.pipeMesh = new THREE.Mesh(this._makeEmptyOverlayGeometry(), this.pipeMat);
     this.pipeMesh.renderOrder = 3;
@@ -3016,6 +3019,7 @@ export class Renderer {
     if (this.oilAmount && this._oilSet) for (const idx of this._oilSet) {
       const q = this.oilAmount[idx] || 0;
       if (q <= 0) continue;
+      if (this._visibleWaterDepth?.(idx) > 0.012) continue;
       const f = Math.min(0.96, (q / 255) * 0.96);
       const o = idx * 3;
       base[o] = base[o] * (1 - f) + 0.004 * f;
@@ -3072,6 +3076,7 @@ export class Renderer {
       const q = this.oilAmount[idx] || 0;
       if (q <= 0) continue;
       const gx = idx % this.mapW, gy = (idx / this.mapW) | 0;
+      if (this._visibleWaterDepth?.(idx) > 0.012) continue;
       const f = Math.max(0.08, Math.min(1, q / 255));
       const sx = 0.70 + f * (1.25 + hash01(gx, gy, 401) * 0.45);
       const sz = 0.62 + f * (1.12 + hash01(gx, gy, 411) * 0.42);
@@ -3390,7 +3395,7 @@ export class Renderer {
       if (e.etype !== 'building') continue;
       if (PIPE_CONNECT.has(e.kind) && (e.buildProgress ?? 1) >= 1 && infraVisible(e)) {
         const tx = e.x / TILE - 0.5, ty = e.y / TILE - 0.5;
-        this._pipeAnchors.push({ id: e.id, owner: e.owner, kind: e.kind, x: e.x, z: e.y, tx, ty, size: e.size || 1 });
+        this._pipeAnchors.push({ id: e.id, owner: e.owner, kind: e.kind, x: e.x, z: e.y, tx, ty, size: e.size || 1, pipeResource: e.pipeResource || null });
       }
       if (e.kind === 'bridge' && (e.buildProgress ?? 1) >= 1 && infraVisible(e)) {
         const tx = Math.round(e.x / TILE - 0.5), ty = Math.round(e.y / TILE - 0.5);
@@ -4083,6 +4088,7 @@ export class Renderer {
       h = Math.imul(h ^ (a.id | 0), 16777619) >>> 0;
       h = Math.imul(h ^ Math.round(a.x * 10), 16777619) >>> 0;
       h = Math.imul(h ^ Math.round(a.z * 10), 16777619) >>> 0;
+      h = Math.imul(h ^ (a.pipeResource === 'water' ? 11 : a.pipeResource === 'oil' ? 23 : 0), 16777619) >>> 0;
     }
     const sig = `${anchors.length}:${h}`;
     if (sig === this._pipeSig) return;
@@ -4097,6 +4103,7 @@ export class Renderer {
       const byDir = new Map();
       for (const b of this._pipeAnchors || []) {
         if (a.id === b.id || a.owner !== b.owner) continue;
+        if (!this._pipeResourcesCompatible(a, b)) continue;
         const dx = b.x - a.x, dz = b.z - a.z;
         const dist = Math.hypot(dx, dz);
         if (dist < 0.05) continue;
@@ -4124,15 +4131,29 @@ export class Renderer {
           z1 -= uz * inset;
         }
         // Anschluss an ein Gebäude (Pumpwerk/Bohrturm/Depot) → letztes Stück als flexibler Schlauch.
-        if (Math.hypot(x1 - a.x, z1 - a.z) > 0.35) edges.push({ x0: a.x, z0: a.z, x1, z1, dist, flex: b.kind !== 'pipe' });
+        if (Math.hypot(x1 - a.x, z1 - a.z) > 0.35) edges.push({ x0: a.x, z0: a.z, x1, z1, dist, flex: b.kind !== 'pipe', resource: this._pipeEdgeResource(a, b) });
       }
     }
     return edges;
   }
 
+  _pipeAnchorResource(a) {
+    if (!a) return null;
+    return a.kind === 'pipe' ? (a.pipeResource || null) : (PIPE_ENDPOINT_RESOURCE[a.kind] || null);
+  }
+
+  _pipeResourcesCompatible(a, b) {
+    const ra = this._pipeAnchorResource(a), rb = this._pipeAnchorResource(b);
+    return !ra || !rb || ra === rb;
+  }
+
+  _pipeEdgeResource(a, b) {
+    return this._pipeAnchorResource(a) || this._pipeAnchorResource(b) || null;
+  }
+
   _makePipelineGeometry(edges) {
     if (!edges.length) return this._makeEmptyOverlayGeometry();
-    const positions = [], indices = [], flows = [];
+    const positions = [], indices = [], flows = [], colors = [];
     const seg = 8, radius = 0.17;
     const edgeInfos = edges.map((e, index) => {
       const dx = e.x1 - e.x0, dz = e.z1 - e.z0, len = Math.hypot(dx, dz);
@@ -4184,13 +4205,21 @@ export class Renderer {
       const u = 1 - d / half;
       return Math.sin(u * Math.PI * 0.5) * PIPE_BRIDGE_LIFT;
     };
-    const addRing = (x, y, z, rx, rz, rad = radius, flow = 0) => {
+    const pipeColor = (resource) => resource === 'water'
+      ? [0.18, 0.74, 1.0]
+      : resource === 'oil'
+        ? [0.72, 0.48, 1.0]
+        : [0.58, 0.63, 0.68];
+    const resourceLift = (resource) => resource === 'oil' ? 0.18 : resource === 'water' ? 0.04 : 0;
+    const addRing = (x, y, z, rx, rz, rad = radius, flow = 0, resource = null) => {
       const start = positions.length / 3;
+      const col = pipeColor(resource);
       for (let n = 0; n < seg; n++) {
         const a = (n / seg) * Math.PI * 2;
         const side = Math.cos(a) * rad, up = Math.sin(a) * rad;
         positions.push(x + rx * side, y + up, z + rz * side);
         flows.push(flow);
+        colors.push(col[0], col[1], col[2]);
       }
       return start;
     };
@@ -4205,8 +4234,8 @@ export class Renderer {
         const z = info.e.z0 + (info.e.z1 - info.e.z0) * f;
         // Flexibler Schlauch: durchhängende Kettenlinie (Sinus-Bogen) statt starrer Geraden.
         const sag = info.flex ? PIPE_FLEX_SAG * Math.sin(f * Math.PI) : 0;
-        const y = this.heightAt(x, z) + 0.42 + liftAt(x, z, info.ux, info.uz, info.passThrough) - sag;
-        const cur = addRing(x, y, z, info.rx, info.rz, flexRad, f * info.len); // Bogenlänge → Fluss-Phase
+        const y = this.heightAt(x, z) + 0.42 + resourceLift(info.e.resource) + liftAt(x, z, info.ux, info.uz, info.passThrough) - sag;
+        const cur = addRing(x, y, z, info.rx, info.rz, flexRad, f * info.len, info.e.resource); // Bogenlänge → Fluss-Phase
         if (prev >= 0) {
           for (let n = 0; n < seg; n++) {
             const p = (n + 1) % seg;
@@ -4219,6 +4248,7 @@ export class Renderer {
     const geo = new THREE.BufferGeometry();
     geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
     geo.setAttribute('aFlow', new THREE.Float32BufferAttribute(flows, 1)); // Bogenlänge für Durchfluss-Shader
+    geo.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
     geo.setIndex(indices);
     geo.computeVertexNormals();
     geo.computeBoundingSphere();
@@ -4245,6 +4275,7 @@ export class Renderer {
     const byDir = new Map();
     for (const a of this._pipeAnchors || []) {
       if (a.id === e.id || a.owner !== e.owner) continue;
+      if (!this._pipeResourcesCompatible({ kind: e.kind, pipeResource: e.pipeResource || null }, a)) continue;
       const dx = a.x - e.x, dz = a.z - e.y;
       const dist = Math.hypot(dx, dz);
       if (dist < 0.05) continue;
@@ -4954,6 +4985,47 @@ export class Renderer {
       vx: opts.vx || 0, vz: opts.vz || 0, opacity: opts.opacity ?? 0.9, fadeIn: opts.fadeIn || 0 });
   }
 
+  _moveMarkerGeometry() {
+    if (this._moveMarkerGeo) return this._moveMarkerGeo;
+    const verts = [];
+    const pushBar = (angle) => {
+      const len = 1.45, halfW = 0.08;
+      const dx = Math.cos(angle), dz = Math.sin(angle);
+      const px = -dz * halfW, pz = dx * halfW;
+      const ax = -dx * len, az = -dz * len;
+      const bx = dx * len, bz = dz * len;
+      verts.push(
+        ax + px, 0, az + pz, bx + px, 0, bz + pz, ax - px, 0, az - pz,
+        bx + px, 0, bz + pz, bx - px, 0, bz - pz, ax - px, 0, az - pz,
+      );
+    };
+    pushBar(Math.PI / 4);
+    pushBar(-Math.PI / 4);
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(verts, 3));
+    this._moveMarkerGeo = geo;
+    return geo;
+  }
+
+  spawnMoveMarker(x, z) {
+    if (!this._canSpawnEffect()) return;
+    const info = this._waterInfoAt?.(x, z);
+    const y = Math.max(this.heightAt(x, z), info?.surface ?? -Infinity) + 0.14;
+    const mat = new THREE.MeshBasicMaterial({
+      color: 0x77dcff,
+      transparent: true,
+      opacity: 0.9,
+      depthWrite: false,
+      depthTest: false,
+      side: THREE.DoubleSide,
+    });
+    const marker = new THREE.Mesh(this._moveMarkerGeometry(), mat);
+    marker.position.set(x, y, z);
+    marker.renderOrder = 11;
+    this.scene.add(marker);
+    this._addEffect({ mesh: marker, life: 0, max: 0.9, opacity: 0.9, grow: 0.45, alwaysVisible: true });
+  }
+
   _particlesVisible() {
     const maxDist = this.quality === 'low' ? 205 : this.quality === 'medium' ? 235 : PARTICLE_ZOOM_HIDE_DIST;
     return this.camDist < maxDist;
@@ -4980,7 +5052,7 @@ export class Renderer {
       this._disposeEffectMesh(effect);
       return false;
     }
-    effect.mesh.visible = this._particlesVisible();
+    effect.mesh.visible = effect.alwaysVisible || this._particlesVisible();
     this.effects.push(effect);
     return true;
   }
@@ -5874,7 +5946,8 @@ export class Renderer {
     this._spawnSourceParticles(dt);
     for (let i = this.effects.length - 1; i >= 0; i--) {
       const f = this.effects[i]; f.life += dt;
-      if (f.mesh.visible !== visible) f.mesh.visible = visible;
+      const effectVisible = f.alwaysVisible || visible;
+      if (f.mesh.visible !== effectVisible) f.mesh.visible = effectVisible;
       const t = f.life / f.max;
       if (f.sink) {
         f.mesh.position.x += (f.vx || 0) * dt;

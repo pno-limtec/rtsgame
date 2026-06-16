@@ -11,6 +11,7 @@ const KIND_TABLE = [
   'bridgelayer', 'pontoon',
 ];
 const ROLE_TABLE = [null, 'ore', 'build', 'earth'];
+const PIPE_RESOURCE_TABLE = [null, 'water', 'oil'];
 // Flugeinheiten brauchen client-seitig die Domäne, damit Picking (entityToScreen/pickRadius) sie an
 // ihrer Flughöhe statt am Boden anvisiert — sonst sind sie mit der Maus nicht anklickbar.
 const AIR_KINDS = new Set(['recon_drone', 'gunship', 'bomber', 'cloud_seeder', 'transport_air']);
@@ -30,9 +31,12 @@ export class Net {
     this.jobs = [];             // offene Terraform-Aufträge + Erdhügel-Marker
     this.waterBase = [];        // initial sichtbare Hochseen/Flüsse; Snapshots liefern nur Abweichungen
     this.controls = { speed: 1, timeMode: 'auto', aiOnly: false, insanity: 2 };
+    this.games = [];
+    this.room = null;
     this.name = 'Spieler';
     this.handlers = {};
     this._pendingWatchSeat = null;
+    this._outbox = [];
   }
 
   on(type, fn) { (this.handlers[type] || (this.handlers[type] = [])).push(fn); }
@@ -43,7 +47,11 @@ export class Net {
     this.ws = new WebSocket(`${proto}://${location.host}`);
     this.ws.onmessage = (ev) => this.onMessage(JSON.parse(ev.data));
     this.ws.onclose = () => this.emit('disconnect');
-    this.ws.onopen = () => this.emit('connect');
+    this.ws.onopen = () => {
+      const out = this._outbox.splice(0);
+      for (const o of out) this.send(o);
+      this.emit('connect');
+    };
   }
 
   onMessage(m) {
@@ -62,6 +70,14 @@ export class Net {
         if (m.controls) this.controls = m.controls;
         this.applySnap(m.snapshot);
         this.emit('init', m);
+        break;
+      case 'gameList':
+        this.games = Array.isArray(m.games) ? m.games : [];
+        this.emit('gameList', this.games);
+        break;
+      case 'roomInfo':
+        this.room = m.room || null;
+        this.emit('roomInfo', this.room);
         break;
       case 'snap':
         this.applySnap(m);
@@ -84,9 +100,13 @@ export class Net {
         this.emit('viewseat', { seat: this.viewSeat });
         break;
       case 'lobby':
-        this.players = m.players;
+        this.players = this.mergePlayers(m.players || []);
+        if (m.room) { this.room = m.room; this.emit('roomInfo', this.room); }
         if (m.controls) { this.controls = m.controls; this.emit('controls', m.controls); }
         this.emit('lobby', m);
+        break;
+      case 'joinDenied':
+        this.emit('joinDenied', m);
         break;
       case 'saveGame':
         this.emit('saveGame', m);
@@ -105,6 +125,14 @@ export class Net {
     this.water = null;
     this.terra = null;
     this.oil = null;
+  }
+
+  mergePlayers(players) {
+    const prev = new Map(this.players.map(p => [p.id, p]));
+    return players.map(p => {
+      const old = prev.get(p.id);
+      return old ? { ...old, ...p, res: old.res, cap: old.cap, energy: old.energy } : p;
+    });
   }
 
   applySnap(snap) {
@@ -181,6 +209,7 @@ export class Net {
         // C&C-Baufortschritt: Fortschritt des vorderen Items (0..1) + Warteschlange als Kind-Namen.
         prodFront: isUnit ? 0 : (e[15] || 0) / 100,
         prodKinds: isUnit ? null : (e[16] ? e[16].map(i => KIND_TABLE[i]) : null),
+        pipeResource: isUnit ? null : (PIPE_RESOURCE_TABLE[e[17] || 0] || null),
       });
     }
     return out;
@@ -188,8 +217,25 @@ export class Net {
 
   join(name, seat, opts = {}) {
     this.name = name || this.name || 'Spieler';
-    this.send({ t: 'join', name: this.name, seat, insanity: opts.insanity });
+    this.send({ t: 'join', name: this.name, seat, roomId: opts.roomId, code: opts.code, insanity: opts.insanity });
   }
+  createGame(name, opts = {}) {
+    this.name = name || this.name || 'Spieler';
+    this.send({
+      t: 'createGame',
+      name: this.name,
+      visibility: opts.visibility,
+      slots: opts.slots,
+      startMode: opts.startMode,
+      timeMode: opts.timeMode,
+      insanity: opts.insanity,
+    });
+  }
+  joinGame(game, name, opts = {}) {
+    const roomId = typeof game === 'string' ? game : game?.id;
+    this.join(name, opts.seat ?? null, { ...opts, roomId, code: opts.code });
+  }
+  requestGameList() { this.send({ t: 'listGames' }); }
   watch(seat = null, name = 'Zuschauer', opts = {}) {
     this.name = name || this.name || 'Zuschauer';
     const viewSeat = seat ?? this.players[0]?.id ?? 0;
@@ -223,7 +269,10 @@ export class Net {
   newGame(sameMap = false, opts = {}) { this.send({ t: 'newGame', sameMap: !!sameMap, insanity: opts.insanity }); }
   requestSave() { this.send({ t: 'saveGame' }); }
   loadGame(save) { this.send({ t: 'loadGame', save }); }
-  send(o) { if (this.ws && this.ws.readyState === 1) this.ws.send(JSON.stringify(o)); }
+  send(o) {
+    if (this.ws && this.ws.readyState === 1) this.ws.send(JSON.stringify(o));
+    else this._outbox.push(o);
+  }
 }
 
 export { KIND_TABLE };

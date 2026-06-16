@@ -32,7 +32,7 @@ async function boot() {
         audio.moveVoice(voiceUnits);
         // Motorengeräusch nur, wenn tatsächlich Fahrzeuge losfahren — Infanterie macht Schritte.
         const vehicles = moved.filter(e => !INFANTRY.has(e.kind));
-        if (vehicles.length) audio.motor(vehicles.every(e => WORK_VEHICLES.has(e.kind)) ? 0.25 : 0.8);
+        if (vehicles.length) audio.motor(vehicles.every(e => WORK_VEHICLES.has(e.kind)) ? 0.10 : 0.38);
         else if (moved.length) audio.steps(0.8);
       }
     }
@@ -47,7 +47,9 @@ async function boot() {
 
   ui.setupLobby((name, seat, opts = {}) => {
     applyFogOption(!!opts.fow);
-    if (opts.spectator) net.watch(seat, name, opts);
+    if (opts.create) net.createGame(name, opts);
+    else if (opts.roomId || opts.code) net.joinGame(opts.roomId || null, name, opts);
+    else if (opts.spectator) net.watch(seat, name, opts);
     else net.join(name, seat, opts);
   });
   ui.setupMenu(renderer, audio);

@@ -39,7 +39,7 @@ const seenBuildings = new Set();
 const producedUnits = new Set();
 const completedBuildings = new Set();
 
-console.log('\n=== Iron Frontier -- KI-Abdeckungstest ===');
+console.log('\n=== Faultline Command -- KI-Abdeckungstest ===');
 console.log(`Seed ${SEED} · ${players.length} KI-Spieler · max. ${MAX_TICKS} Ticks`);
 console.log(`Ziele: ${targetBuildings.length} Gebaeudetypen, ${targetUnits.length} Einheitentypen\n`);
 

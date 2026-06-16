@@ -16,7 +16,7 @@ for (let i = 0; i < NPLAYERS; i++)
 
 const world = createWorld({ data, seed: SEED, players });
 
-console.log(`\n=== Iron Frontier — Headless KI-Test ===`);
+console.log(`\n=== Faultline Command — Headless KI-Test ===`);
 console.log(`Karte ${world.map.w}x${world.map.h} · ${NPLAYERS} KI-Spieler · Seed ${SEED} · ${TICKS} Ticks\n`);
 
 let maxTick = 0, sumTick = 0, slowTicks = 0;

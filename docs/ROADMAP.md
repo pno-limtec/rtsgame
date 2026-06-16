@@ -1,4 +1,4 @@
-# Iron Frontier — Entwicklungs-Roadmap
+# Faultline Command — Entwicklungs-Roadmap
 
 Iterativer Ausbau. Jede Phase endet mit lauffähigem Code + headless KI-Tests.
 Status: ✅ fertig · 🟡 in Arbeit · ⬜ offen

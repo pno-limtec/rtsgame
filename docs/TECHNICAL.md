@@ -1,4 +1,4 @@
-# Iron Frontier — technische Dokumentation
+# Faultline Command — technische Dokumentation
 
 Diese Datei beschreibt, wie die wichtigsten Systeme technisch funktionieren und wo der Code
 liegt. Sie ist als Arbeitsreferenz gedacht: Einstieg oben, Details nach Systemen.

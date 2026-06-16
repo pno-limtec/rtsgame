@@ -95,8 +95,10 @@ function stepPipes(world) {
   for (const e of world.entities.values()) {
     if (e.etype !== 'building' || e.dead || e.buildProgress < 1) continue;
     let g = byOwner.get(e.owner); if (!g) byOwner.set(e.owner, g = { pipes: [], depots: new Map(), producers: [] });
-    if (e.def.pipe) g.pipes.push(e);
-    else {
+    if (e.def.pipe) {
+      e._pipeResource = null;
+      g.pipes.push(e);
+    } else {
       const resources = depotResources(e, true);
       for (const res of resources) {
         let list = g.depots.get(res); if (!list) g.depots.set(res, list = []);
@@ -111,22 +113,36 @@ function stepPipes(world) {
     for (const prod of g.producers) {
       const res = producerResource(prod);
       const sinks = g.depots.get(res) || [];
-      const frontier = g.pipes.filter(pp => tdist(prod, pp) <= PIPE_LINK_RANGE + 1);
+      prod._pipelineConnected = false;
+      if (prod.def.pump) prod._wConnected = false;
+      const frontier = g.pipes.filter(pp => canPipeCarry(pp, res) && tdist(prod, pp) <= PIPE_LINK_RANGE + 1);
       const seen = new Set(frontier.map(pp => pp.id));
+      const visited = frontier.slice();
       let connected = false;
       while (frontier.length && !connected) {
         const cur = frontier.pop();
         if (sinks.some(s => tdist(cur, s) <= PIPE_LINK_RANGE + 1)) { connected = true; break; }
         for (const nxt of g.pipes) {
-          if (seen.has(nxt.id) || tdist(cur, nxt) > PIPE_LINK_RANGE) continue;
-          seen.add(nxt.id); frontier.push(nxt);
+          if (seen.has(nxt.id) || !canPipeCarry(nxt, res) || tdist(cur, nxt) > PIPE_LINK_RANGE) continue;
+          seen.add(nxt.id); frontier.push(nxt); visited.push(nxt);
         }
       }
       prod._pipelineConnected = connected;
       if (prod.def.pump) prod._wConnected = connected;
-      if (connected) for (const s of sinks) s._fed = true;   // dieses Lager-Netz ist versorgt
+      if (connected) {
+        for (const pp of visited) claimPipe(pp, res);
+        for (const s of sinks) s._fed = true;   // dieses Lager-Netz ist versorgt
+      }
     }
   }
+}
+
+function canPipeCarry(pipe, resource) {
+  return !pipe._pipeResource || pipe._pipeResource === resource;
+}
+
+function claimPipe(pipe, resource) {
+  if (!pipe._pipeResource) pipe._pipeResource = resource;
 }
 
 function producerResource(e) {

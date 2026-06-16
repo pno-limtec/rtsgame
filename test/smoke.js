@@ -3,7 +3,7 @@
 import { loadData } from '../shared/data-node.js';
 import { Match } from '../server/match.js';
 import { createWorld, ownerEntities, spawnBuilding, spawnUnit, applyFortification, removeFortification, applyDamage, canPlaceBuilding, isDetectable, nearestEnemy, buildSpatial, effectiveCost, buildSpeedMult } from '../shared/world.js';
-import { coverAt, isBlocked, isNavigableWater, isPassable, isWet, worldToTile, TT, tIdx, hasWaterNear, stampFortification, unstampFortification } from '../shared/terrain.js';
+import { coverAt, isBlocked, isNavigableWater, isPassable, isWet, worldToTile, TT, tIdx, hasWaterNear, stampFortification, unstampFortification, inBounds } from '../shared/terrain.js';
 import { stepWater } from '../shared/systems/water.js';
 import { step, applyCommand } from '../shared/sim.js';
 import { placeTunnel, activateTunnelIfReady, validateTunnel } from '../shared/systems/tunnel.js';
@@ -76,33 +76,96 @@ ok(Array.isArray(init.terrain.waterDepth) && init.terrain.waterDepth.length > 0,
   n.ws = { readyState: 1, send: (msg) => sent.push(JSON.parse(msg)) };
   n.join('Kommandant', 1, { insanity: 4 });
   n.watch(0, 'Zuschauer', { insanity: 3 });
+  n.createGame('Host', { visibility: 'private', slots: 4, startMode: 'wait', insanity: 1, timeMode: 'day' });
   ok(sent[0]?.t === 'join' && sent[0].insanity === 4,
     'Start-Lobby sendet Insanity-Level beim Beitreten');
   ok(sent[1]?.t === 'matchOptions' && sent[1].insanity === 3,
     'Zuschauerstart kann das Insanity-Level als Match-Option setzen');
+  ok(sent[2]?.t === 'createGame' && sent[2].visibility === 'private' && sent[2].slots === 4 && sent[2].startMode === 'wait' && sent[2].timeMode === 'day',
+    'Start-Lobby kann ein privates 4-Spieler-Spiel im Wartemodus mit festem Tag erstellen');
 }
 {
   const m = new Match({ data, seed: 779, slots: 2 });
   m.setMatchOptions({ insanity: 4 });
   ok(m.controlsView().insanity === 4, 'Match speichert Insanity-Level in den Controls');
+  m.setMatchOptions({ timeMode: 'day' });
+  ok(m.controlsView().timeMode === 'day', 'Match speichert deaktivierten Tag/Nacht-Zyklus als festen Tag');
   m.reset({ sameMap: true });
   ok(m.controlsView().insanity === 4, 'Neues Spiel behält das Insanity-Level bei');
+  ok(m.controlsView().timeMode === 'day', 'Neues Spiel behält den deaktivierten Tag/Nacht-Zyklus bei');
 }
 {
-  const { initEnv, normalizeInsanityLevel } = await import('../shared/systems/environment.js');
+  const players = ['KBN', 'HLX', 'FLG', 'KBN'].map((faction, id) => ({ id, faction, controller: 'human' }));
+  const w = createWorld({ data, seed: 919, players, controls: { insanity: 1 } });
+  ok(w.players.length === 4, 'Partien können mit 4 Spielern erzeugt werden');
+  const nearSum = (arr, hq, radius) => {
+    let sum = 0;
+    const cx = hq.tx + hq.size / 2, cy = hq.ty + hq.size / 2;
+    for (let y = Math.floor(cy - radius); y <= Math.ceil(cy + radius); y++) for (let x = Math.floor(cx - radius); x <= Math.ceil(cx + radius); x++) {
+      if (!inBounds(w.terrain, x, y) || Math.hypot(x + 0.5 - cx, y + 0.5 - cy) > radius) continue;
+      sum += arr[tIdx(w.terrain, x, y)] || 0;
+    }
+    return sum;
+  };
+  for (const hq of [...w.entities.values()].filter(e => e.kind === 'hq')) {
+    ok(nearSum(w.terrain.ore, hq, 16) > 0, `Leichter Start hat Erz auf dem Startplateau (Spieler ${hq.owner})`);
+    ok(nearSum(w.terrain.oil, hq, 16) > 0, `Leichter Start hat Öl auf dem Startplateau (Spieler ${hq.owner})`);
+  }
+}
+{
+  const { initEnv, normalizeInsanityLevel, insanityProfile } = await import('../shared/systems/environment.js');
   ok(normalizeInsanityLevel(0) === 1 && normalizeInsanityLevel(99) === 4,
     'Insanity-Level wird auf vier Startstufen begrenzt');
   const players = [{ id: 0, faction: 'KBN', controller: 'human' }, { id: 1, faction: 'HLX', controller: 'human' }];
   const calm = createWorld({ data, seed: 918, players });
+  const normal = createWorld({ data, seed: 918, players });
   const wild = createWorld({ data, seed: 918, players });
   calm.controls = { insanity: 1 };
+  normal.controls = { insanity: 2 };
   wild.controls = { insanity: 4 };
   initEnv(calm);
+  initEnv(normal);
   initEnv(wild);
   ok(wild.env.weatherLeft < calm.env.weatherLeft,
     'Insanity 4 verkürzt Wetterphasen gegenüber Easy-Peasy');
   ok(wild.env._nextQuake < calm.env._nextQuake,
     'Insanity 4 lässt Beben häufiger kommen als Easy-Peasy');
+  ok(calm.env._nextQuake > normal.env._nextQuake && normal.env._nextQuake > wild.env._nextQuake,
+    'untere Insanity-Stufen staffeln Erdbeben deutlich seltener');
+  ok(insanityProfile(calm).rainInflow < insanityProfile(normal).rainInflow && insanityProfile(normal).rainInflow < insanityProfile(wild).rainInflow,
+    'untere Insanity-Stufen drosseln den Flut-Zufluss');
+
+  const basinFloodStats = (insanity) => {
+    const w = createWorld({ data, seed: 921, map: { w: 32, h: 32 }, players });
+    w.controls = { insanity };
+    initEnv(w);
+    w.env.weather = 'storm'; w.env.weatherLeft = 1e9; w.env.solar = 0; w.env._nextQuake = 1e9; w.env._lightningCd = 1e9;
+    const t = w.terrain, cx = 16, cy = 16;
+    t.sources.length = 0; t.waterActive.clear(); t.startMeltLeft = 0;
+    for (let y = 0; y < t.h; y++) for (let x = 0; x < t.w; x++) {
+      const i = y * t.w + x;
+      const d = Math.hypot(x - cx, y - cy);
+      t.type[i] = TT.LAND; t.height[i] = d <= 11 ? 0.36 + d * 0.018 : 0.72; t.height0[i] = t.height[i];
+      t.water[i] = 0; t.baseWater[i] = 0; t.waterBlock[i] = 0; t.block[i] = 0;
+      if (t.lakeMask) t.lakeMask[i] = 0;
+      if (t.startSafe) t.startSafe[i] = 0;
+      if (t.snow) t.snow[i] = 0;
+    }
+    for (let k = 0; k < 260; k++) { stepWater(w); w.tick++; }
+    let mass = 0, flooded = 0;
+    for (let i = 0; i < t.water.length; i++) {
+      mass += Math.max(0, t.water[i] - t.baseWater[i]);
+      if (t.water[i] > WET_DEPTH && t.baseWater[i] <= WET_DEPTH) flooded++;
+    }
+    return { mass, flooded };
+  };
+  const easyFlood = basinFloodStats(1);
+  const mediumFlood = basinFloodStats(2);
+  const hardFlood = basinFloodStats(3);
+  ok(easyFlood.mass < hardFlood.mass * 0.65 && mediumFlood.mass < hardFlood.mass * 0.90,
+    `Easy/Medium erzeugen deutlich weniger Sturmflut-Masse als Stufe 3 (${easyFlood.mass.toFixed(2)} / ${mediumFlood.mass.toFixed(2)} / ${hardFlood.mass.toFixed(2)})`);
+  ok(easyFlood.flooded < mediumFlood.flooded && mediumFlood.flooded <= hardFlood.flooded,
+    `Easy/Medium fluten weniger Landzellen (${easyFlood.flooded} / ${mediumFlood.flooded} / ${hardFlood.flooded})`);
 }
 {
   for (let seed = 30; seed < 38; seed++) {
@@ -607,6 +670,7 @@ ok(match.player(0).controller === 'ai', 'Sitz fällt nach Disconnect-Timeout an 
   for (let i = 0; i < t.water.length; i++) {
     t.water[i] = 0; t.baseWater[i] = 0; t.type[i] = TT.LAND; t.waterBlock[i] = 0; t.block[i] = 0;
     if (t.lakeMask) t.lakeMask[i] = 0;
+    if (t.startSafe) t.startSafe[i] = 0;
   }
   for (let y = 0; y < W; y++) for (let x = 0; x < W; x++) t.height[tIdx(t, x, y)] = 0.5 + x * 0.004;
 
@@ -625,6 +689,7 @@ ok(match.player(0).controller === 'ai', 'Sitz fällt nach Disconnect-Timeout an 
   for (let i = 0; i < t2.water.length; i++) {
     t2.water[i] = 0; t2.baseWater[i] = 0; t2.type[i] = TT.LAND; t2.waterBlock[i] = 0;
     if (t2.lakeMask) t2.lakeMask[i] = 0;
+    if (t2.startSafe) t2.startSafe[i] = 0;
   }
   for (let y = 0; y < W2; y++) for (let x = 0; x < W2; x++) t2.height[tIdx(t2, x, y)] = 0.5 + x * 0.004;
   for (let y = 14; y < 34; y++) t2.waterBlock[tIdx(t2, 24, y)] = 1; // senkrechter Damm bei x=24
@@ -702,7 +767,7 @@ ok(match.player(0).controller === 'ai', 'Sitz fällt nach Disconnect-Timeout an 
 
   // 9c) Silberjodid-Flugzeug: Zielpunkt-Wolke speist lokal Wasser in die Simulation.
   const { initEnv: initCloudEnv } = await import('../shared/systems/environment.js');
-  const wcw = createWorld({ data, seed: 23, map: { w: 32, h: 32 }, players: [{ id: 0, faction: 'KBN', controller: 'human' }] });
+  const wcw = createWorld({ data, seed: 23, map: { w: 32, h: 32 }, players: [{ id: 0, faction: 'KBN', controller: 'human' }], controls: { insanity: 3 } });
   initCloudEnv(wcw);
   wcw.env.weather = 'clear'; wcw.env.weatherLeft = 1e9; wcw.env._nextQuake = 1e9; wcw.env._lightningCd = 1e9;
   wcw.players[0].resources.ammo = 100;
@@ -1081,6 +1146,7 @@ ok(match.player(0).controller === 'ai', 'Sitz fällt nach Disconnect-Timeout an 
     bt.type[i] = TT.LAND; bt.height[i] = 0.80; bt.height0[i] = 0.80;
     bt.water[i] = 0; bt.baseWater[i] = 0; bt.waterBlock[i] = 0; bt.block[i] = 0;
     if (bt.lakeMask) bt.lakeMask[i] = 0;
+    if (bt.startSafe) bt.startSafe[i] = 0;
   }
   const basin = by * bt.w + bx;
   const lip = by * bt.w + (bx + 1);
@@ -1649,7 +1715,7 @@ ok(match.player(0).controller === 'ai', 'Sitz fällt nach Disconnect-Timeout an 
   ok(floodableValleys.length >= 3, `Täler sind trocken, aber leicht flutbar (${floodableValleys.length})`);
 
   if (highLakes.length) {
-    const lakeWorld = createWorld({ data, seed: 2026, players: [{ id: 0, faction: 'KBN', controller: 'human' }] });
+    const lakeWorld = createWorld({ data, seed: 2026, players: [{ id: 0, faction: 'KBN', controller: 'human' }], controls: { insanity: 3 } });
     initEnv(lakeWorld);
     const lt = lakeWorld.terrain, LL = lt.lakes[0], li = LL.y * lt.w + LL.x;
     const baseLake = lt.baseWater[li], lake0 = lt.water[li];

@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Iron Frontier — RTS</title>
+<title>Faultline Command — RTS</title>
 <style>
   :root { --hud:#0d1117ee; --accent:#36c5f0; --line:#2a3340; --text:#cdd6e0; }
   * { box-sizing: border-box; }
@@ -34,6 +34,9 @@
   .roleicon { width:13px; height:13px; vertical-align:-2px; }
   #topbar .dot { width:9px;height:9px;border-radius:50%; }
   #topbar .sep { width:1px; align-self:stretch; background:var(--line); }
+  #topbar .res[data-res] { padding:3px 6px; border:1px solid color-mix(in srgb, var(--res-color) 52%, #18202a);
+    border-radius:5px; background:color-mix(in srgb, var(--res-color) 14%, #101722); }
+  #topbar .res[data-res] .ricon, #topbar .res[data-res] b { color:var(--res-color); }
   .low { color:#ff6b6b !important; }
 
   #menubtn { position:fixed; left:8px; top:8px; z-index:15; display:flex; align-items:center; gap:6px;
@@ -146,7 +149,7 @@
   }
 
   /* Bauleiste rechts: schwebendes Panel, nur so hoch wie nötig, 2-spaltige Buttons */
-  #buildbar { position:fixed; right:8px; top:54px; width:300px; max-height:calc(100vh - 200px);
+  #buildbar { position:fixed; right:8px; top:54px; width:min(360px, calc(100vw - 16px)); max-height:calc(100vh - 200px);
     background:var(--hud); border:1px solid var(--line); border-radius:9px; overflow-y:auto; overflow-x:hidden;
     padding:8px; z-index:10; box-shadow:0 3px 14px #0008; }
   #buildbar:empty { display:none; }
@@ -203,8 +206,10 @@
 
   /* Lobby-Overlay */
   #lobby { position:fixed; inset:0; background:#05080cdd; z-index:50; display:flex; align-items:center; justify-content:center; }
-  #lobby .card { background:#0d1117; border:1px solid var(--line); border-radius:8px; padding:24px 28px; width:380px; }
-  #lobby h1 { margin:0 0 4px; font-size:22px; color:#fff; }
+  #lobby .card { background:#0d1117; border:1px solid var(--line); border-radius:8px; padding:18px; width:min(560px, calc(100vw - 20px)); max-height:calc(100vh - 24px); overflow:auto; }
+  #lobby .brand { display:grid; justify-items:center; gap:3px; margin:0 0 8px; }
+  #lobby .logo { width:min(330px, 82vw); height:auto; display:block; }
+  #lobby h1 { margin:0; font-size:1px; color:transparent; }
   #lobby .sub { color:#7d8aa0; font-size:13px; margin-bottom:16px; }
   #lobby label { display:block; font-size:12px; margin:10px 0 4px; color:#9aa7bd; }
   #lobby input, #lobby select { width:100%; padding:8px; background:#161d27; border:1px solid var(--line); color:#fff; border-radius:4px; }
@@ -213,6 +218,26 @@
   #lobby .watchbtn { margin-top:8px; background:#161d27; color:#dbe7f4; border:1px solid var(--line); }
   #seatlist { margin-top:12px; font-size:12px; }
   #seatlist .seat { display:flex; justify-content:space-between; padding:4px 0; border-bottom:1px solid var(--line); }
+  #lobby .lobbytabs { display:grid; grid-template-columns:1fr 1fr; gap:0; margin:14px 0 0; padding:4px 4px 0;
+    background:#070d15; border:1px solid #263548; border-bottom:none; border-radius:8px 8px 0 0; }
+  #lobby .lobbytab { margin:0; height:34px; background:#101722; border:1px solid transparent; border-bottom-color:#263548;
+    color:#9caec4; border-radius:5px 5px 0 0; cursor:pointer; font-size:12px; box-shadow:none; }
+  #lobby .lobbytab + .lobbytab { margin-left:4px; }
+  #lobby .lobbytab[aria-selected="true"] { border-color:var(--accent); border-bottom-color:#0b121b;
+    background:#0b121b; color:#eefbff; box-shadow:0 -1px 10px #36c5f022; }
+  #lobby .lobbypanel[hidden] { display:none; }
+  #lobby .lobbypanel { padding:12px; background:#0b121b; border:1px solid #263548; border-radius:0 0 8px 8px;
+    box-shadow:inset 0 1px 0 #36c5f016; }
+  #lobby .row2 { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
+  #lobby .segmented { display:grid; grid-template-columns:1fr 1fr; gap:4px; margin-top:4px; }
+  #lobby .segmented button { margin:0; width:auto; padding:8px; background:#161d27; color:#dbe7f4; border:1px solid var(--line); }
+  #lobby .segmented button[aria-pressed="true"] { border-color:var(--accent); background:#10212b; color:#eefbff; }
+  #gamelist { margin-top:10px; display:grid; gap:5px; max-height:220px; overflow:auto; }
+  #gamelist .gamerow { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:8px; align-items:center;
+    padding:7px 8px; background:#111822; border:1px solid var(--line); border-radius:5px; font-size:12px; }
+  #gamelist .gmeta { color:#8fa0b8; font-size:11px; }
+  #gamelist button { margin:0; width:auto; padding:6px 9px; font-size:12px; }
+  #lobbystatus { min-height:16px; margin-top:8px; color:#8fa0b8; font-size:12px; }
   #spectatorbar { position:fixed; right:8px; top:54px; z-index:12; display:none; flex-direction:column; align-items:stretch; gap:4px;
     background:var(--hud); border:1px solid var(--line); border-radius:7px; padding:4px 5px; box-shadow:0 3px 14px #0008;
     font-size:11px; color:#aeb9c7; width:min(420px, calc(100vw - 16px)); }
@@ -235,11 +260,11 @@
   #spectatorevents { display:flex; flex-wrap:nowrap; gap:2px; }
   #spectatorevents[hidden] { display:none; }
   #spectatorevents button { padding:3px 5px; }
-  .lobbyopt { display:flex; align-items:center; gap:8px; margin-top:10px; font-size:12px; color:#aeb9c7; }
-  .lobbyopt input { width:15px; height:15px; accent-color:var(--accent); }
-  .lobbyopt span { line-height:1.25; }
-  .lobbyselect { justify-content:space-between; }
-  .lobbyselect select { width:auto; min-width:190px; padding:5px 6px; font-size:12px; }
+  #lobby .lobbyopt { display:flex; align-items:center; justify-content:flex-start; width:fit-content; gap:8px; margin:10px 0 4px; font-size:12px; color:#aeb9c7; }
+  #lobby .lobbyopt input[type="checkbox"] { flex:0 0 auto; width:15px; height:15px; padding:0; margin:0; accent-color:var(--accent); }
+  #lobby .lobbyopt span { line-height:1.25; }
+  #lobby .lobbyselect { width:100%; justify-content:space-between; }
+  #lobby .lobbyselect select { width:auto; min-width:190px; padding:5px 6px; font-size:12px; }
   #scoreboard { position:fixed; left:8px; bottom:142px; width:172px; z-index:9;
     background:var(--hud); border:1px solid var(--line); border-radius:7px; padding:5px 6px;
     box-shadow:0 3px 14px #0008; font-size:11px; color:#cdd6e0; }
@@ -248,6 +273,11 @@
   #scoreboard .score-dot { width:7px; height:7px; border-radius:50%; }
   #scoreboard .score-name { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   #scoreboard .score-value { color:#fff; font-variant-numeric:tabular-nums; font-weight:700; }
+  #joincodehud { position:fixed; left:8px; bottom:calc(142px + 112px); width:172px; z-index:9;
+    background:var(--hud); border:1px solid var(--line); border-radius:7px; padding:6px;
+    box-shadow:0 3px 14px #0008; font-size:11px; color:#8fa0b8; }
+  #joincodehud:empty { display:none; }
+  #joincodehud b { display:block; color:#fff; font-size:15px; letter-spacing:.8px; margin-top:2px; }
 </style>
 </head>
 <body>
@@ -303,32 +333,74 @@
       </div>
     </div>
   </div>
+  <div id="joincodehud" aria-live="polite"></div>
   <div id="scoreboard" aria-live="polite"></div>
 
   <div id="lobby">
     <div class="card">
-      <h1>Iron Frontier</h1>
+      <div class="brand">
+        <img class="logo" src="/client/assets/logo-faultline-command.png" alt="Faultline Command">
+        <h1>Faultline Command</h1>
+      </div>
       <div class="sub">Industrielles Echtzeitstrategie-Gefecht</div>
       <label>Spielername</label>
       <input id="pname" value="Kommandant" maxlength="16">
-      <label>Sitz (KI übernehmen oder freien wählen)</label>
-      <select id="seatsel"></select>
-      <label class="lobbyopt" title="Karte bleibt sichtbar, aber außerhalb eigener Sicht grau. Gegner werden nur in Sichtweite eindeutig angezeigt.">
-        <input id="fowstart" type="checkbox" checked>
-        <span>Nebel des Krieges aktivieren</span>
-      </label>
-      <label class="lobbyopt lobbyselect" title="Steuert, wie häufig und hart Wetter, Beben, Rutschungen und andere Naturereignisse zuschlagen.">
-        <span>Level of Insanity</span>
-        <select id="insanitystart">
-          <option value="1">Easy-Peasy</option>
-          <option value="2" selected>Spicy Weather</option>
-          <option value="3">Mother Nature is angry</option>
-          <option value="4">Nature fucks you hard</option>
-        </select>
-      </label>
-      <div id="seatlist"></div>
-      <button id="joinbtn">Match beitreten</button>
-      <button id="watchbtn" class="watchbtn">Zuschauen</button>
+      <div class="lobbytabs" role="tablist" aria-label="Spielstart">
+        <button class="lobbytab" type="button" data-lobbytab="join" aria-selected="true">Spiel beitreten</button>
+        <button class="lobbytab" type="button" data-lobbytab="create" aria-selected="false">Spiel erstellen</button>
+      </div>
+      <div id="joinpanel" class="lobbypanel" data-lobbypanel="join">
+        <div class="row2">
+          <label>Privater Beitrittscode<input id="joincode" maxlength="8" autocomplete="off"></label>
+          <button id="joincodebtn" type="button">Code beitreten</button>
+        </div>
+        <div id="gamelist" aria-live="polite"></div>
+      </div>
+      <div id="createpanel" class="lobbypanel" data-lobbypanel="create" hidden>
+        <div class="row2">
+          <label>Spieltyp
+            <select id="visibilitystart">
+              <option value="public">Öffentliches Spiel</option>
+              <option value="private">Privates Spiel</option>
+            </select>
+          </label>
+          <label>Spieler
+            <select id="slotstart">
+              <option value="2" selected>2 Spieler</option>
+              <option value="3">3 Spieler</option>
+              <option value="4">4 Spieler</option>
+            </select>
+          </label>
+        </div>
+        <label>Startmodus</label>
+        <div class="segmented" id="startmodeseg">
+          <button type="button" data-startmode="instant" aria-pressed="true">Sofort loslegen</button>
+          <button type="button" data-startmode="wait" aria-pressed="false">Auf andere Spieler warten</button>
+        </div>
+        <label class="lobbyopt" title="Karte bleibt sichtbar, aber außerhalb eigener Sicht grau. Gegner werden nur in Sichtweite eindeutig angezeigt.">
+          <span>Nebel des Krieges aktivieren</span>
+          <input id="fowstart" type="checkbox" checked>
+        </label>
+        <label class="lobbyopt" title="Wenn aktiv, läuft die Tageszeit automatisch weiter. Wenn aus, startet und bleibt die Partie bei Tag.">
+          <span>Tag/Nacht Zyklus aktivieren</span>
+          <input id="daynightstart" type="checkbox" checked>
+        </label>
+        <label class="lobbyopt lobbyselect" title="Steuert, wie häufig und hart Wetter, Beben, Rutschungen und andere Naturereignisse zuschlagen.">
+          <span>Level of Insanity</span>
+          <select id="insanitystart">
+            <option value="1">Easy-Peasy</option>
+            <option value="2" selected>Spicy Weather</option>
+            <option value="3">Mother Nature is angry</option>
+            <option value="4">Nature fucks you hard</option>
+          </select>
+        </label>
+        <button id="creategamebtn" type="button">Spiel erstellen</button>
+      </div>
+      <select id="seatsel" hidden></select>
+      <div id="seatlist" hidden></div>
+      <button id="joinbtn" hidden>Match beitreten</button>
+      <button id="watchbtn" class="watchbtn" hidden>Zuschauen</button>
+      <div id="lobbystatus" aria-live="polite"></div>
     </div>
   </div>
   <div id="spectatorbar">
