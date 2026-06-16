@@ -632,7 +632,8 @@ export class Renderer {
 
     // Straßen-/Brücken-/Pipeline-Overlays: ein zusammenhängendes Mesh pro Netz statt
     // einzelner Kacheln/Objektstücke. Die Spiellogik bleibt zellbasiert, nur die Optik glättet.
-    this.roadMat = new THREE.MeshLambertMaterial({ color: 0x3b3f44 });
+    // Straßenbelag halbtransparent (50 %), damit das Gelände darunter durchscheint.
+    this.roadMat = new THREE.MeshLambertMaterial({ color: 0x3b3f44, transparent: true, opacity: 0.5, depthWrite: false });
     this.roadMesh = new THREE.Mesh(this._makeEmptyOverlayGeometry(), this.roadMat);
     this.roadMesh.renderOrder = 2;
     this.roadMesh.receiveShadow = true;
@@ -1425,7 +1426,6 @@ export class Renderer {
     for (let cy = 0; cy < fh; cy++) for (let cx = 0; cx < fw; cx++) {
       const px = cx - 0.5, py = cy - 0.5;
       let totalWeight = 0, waterWeight = 0, surfSum = 0, flowSumX = 0, flowSumZ = 0, depthSum = 0, seaSum = 0;
-      let surfaceFloor = 0;
       for (let yy = Math.max(0, cy - 2); yy <= Math.min(h - 1, cy + 1); yy++) {
         for (let xx = Math.max(0, cx - 2); xx <= Math.min(w - 1, cx + 1); xx++) {
           const dx = xx - px, dy = yy - py, d2 = dx * dx + dy * dy;
@@ -1438,7 +1438,6 @@ export class Renderer {
           if (wc <= 0) continue;
           waterWeight += wc;
           surfSum += surface[idx] * wc;
-          surfaceFloor = Math.max(surfaceFloor, this.height[idx] * HEIGHT_SCALE + WATER_SURFACE_CLEAR);
           flowSumX += flowX[idx] * wc;
           flowSumZ += flowZ[idx] * wc;
           depthSum += depthVis[idx] * wc;
@@ -1450,8 +1449,13 @@ export class Renderer {
       const nearestY = Math.max(0, Math.min(h - 1, Math.round(py)));
       const nearest = nearestY * w + nearestX;
       cover[key] = totalWeight > 0 ? waterWeight / totalWeight : 0;
+      // Eckpegel = gewichteter Mittelwert der (bereits über ihrem Bett liegenden) Zell-Oberflächen.
+      // Boden NUR durch das Gelände AN DIESER ECKE, nicht durch das höchste Ufer der Umgebung —
+      // sonst wurden Randecken über den flachen See gehoben und bildeten schwebende, überlappende
+      // Wasserlappen am Ufer. So bleibt die Seefläche eben und der Rand legt sich aufs Gelände.
+      const cornerGroundY = this.heightAt(cornerX(cx), cornerZ(cy)) + WATER_EDGE_TUCK_Y;
       cornerSurface[key] = waterWeight > 0
-        ? Math.max(surfSum / waterWeight, surfaceFloor)
+        ? Math.max(surfSum / waterWeight, cornerGroundY)
         : (surface[nearest] || this.height[nearest] * HEIGHT_SCALE + WATER_SURFACE_CLEAR);
       cornerFlowX[key] = waterWeight > 0 ? flowSumX / waterWeight : 0;
       cornerFlowZ[key] = waterWeight > 0 ? flowSumZ / waterWeight : 0;
