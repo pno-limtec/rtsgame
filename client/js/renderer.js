@@ -50,7 +50,7 @@ const WATER_DARK_DEPTH_START = 0.085;
 const WATER_DARK_DEPTH_RANGE = 0.34;
 const WATER_EDGE_TUCK_Y = -0.012;  // Uferkante leicht ins Gelände eingraben, statt darüber zu schweben
 const WATER_NIGHT_COLOR_MIN = 0.16;
-const WATER_NIGHT_OPACITY_MIN = 0.28;   // transparenteres Wasser (Grund scheint mehr durch); Himmelsspiegelung am Streifwinkel macht es trotzdem plastisch
+const WATER_NIGHT_OPACITY_MIN = 0.46;   // Grund-Deckkraft (nachts); deckenderes Wasser, Grund scheint nur noch dezent durch
 const WATER_STANDING_FLOW_MAX = 0.13;
 const WATER_STANDING_LEVEL_QUANTILE = 0.68;
 
@@ -5398,7 +5398,7 @@ export class Renderer {
       if (env.w === 'fog') this.waterMat.color.lerp(new THREE.Color(0x7aa5b0), 0.22);
       else if (stormTarget > 0) this.waterMat.color.lerp(new THREE.Color(0x2b78a5), 0.18 + stormTarget * 0.16);
       this.waterMat.color.multiplyScalar(waterLight);
-      this.waterMat.opacity = WATER_NIGHT_OPACITY_MIN + d * 0.28 + this._waterStorm * 0.04;
+      this.waterMat.opacity = WATER_NIGHT_OPACITY_MIN + d * 0.36 + this._waterStorm * 0.04;
       // Himmelsspiegelung im Wasser-Shader nachführen: Himmelsfarbe + Stärke (tagsüber mehr).
       if (this.waterMat.userData.uSky) this.waterMat.userData.uSky.value.copy(sky);
       if (this.waterMat.userData.uSkyAmt) this.waterMat.userData.uSkyAmt.value = 0.18 + d * 0.34;
