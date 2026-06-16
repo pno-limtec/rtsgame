@@ -26,7 +26,7 @@ const WATER_SHOW_DEPTH = 0.05;
 const WATER_HIDE_DEPTH = 0.032;
 // Wasser-Glättung: die sichtbare Tiefe gleitet in kleinen Schritten zur Snapshot-Zieltiefe,
 // statt alle 250 ms ruckartig zu springen (staccato). Reine Optik, keine Simulationswirkung.
-const WATER_EASE_RATE = 3.2;        // Annäherungsrate pro Sekunde — niedriger = der Pegel steigt/fällt sanfter
+const WATER_EASE_RATE = 1.5;        // Annäherungsrate pro Sekunde — niedriger = der Pegel steigt/fällt sanfter
 const WATER_EASE_SNAP = 5e-4;       // unter dieser Restdifferenz auf den Zielwert einrasten
 const WATER_ANIM_INTERVAL = 1 / 30; // Glättung mit ~30 Hz auffrischen (begrenzt Mesh-Neuaufbau)
 const FLOOD_RUNOFF_DEPTH = 0.022;   // schon dünner Abfluss zählt als Wasser (zeigt Textur, wo es abläuft)
@@ -43,7 +43,7 @@ const WATER_EDGE_CLOSE_MAX_LIFT = 0.05;  // wie hoch Wasser eine Trockenlücke �
 const WATER_PLANE_LINK_EPS = 0.42;     // world units: Zellen mit ähnlichem Pegel bilden eine ebene Fläche
 const WATER_PLANE_QUANT = 0;           // 0 = kein Pegel-Raster; Pegel steigt/sinkt kontinuierlich
 const WATER_PLANE_DEADBAND = 0.018;    // nur winziges CA-Rauschen ignorieren
-const WATER_PLANE_RISE_SMOOTH = 0.070; // Regenpegel weich, aber sichtbar nachführen
+const WATER_PLANE_RISE_SMOOTH = 0.032; // Regenpegel weich nachführen — niedriger = Pegel steigt langsamer
 const WATER_PLANE_FALL_SMOOTH = 0.045; // Abfluss trocknet langsamer aus als er flutet
 const FLOOD_CHANNEL_DEPTH = 0.026;  // dünne Abflussrinnen bekommen schon früh eine Wasseroberfläche
 const WATER_DARK_DEPTH_START = 0.085;
@@ -1464,6 +1464,19 @@ export class Renderer {
       cornerFlowZ[key] = waterWeight > 0 ? flowSumZ / waterWeight : 0;
       cornerDepth[key] = waterWeight > 0 ? depthSum / waterWeight : (depthVis[nearest] || 0);
       cornerSea[key] = waterWeight > 0 ? seaSum / waterWeight : (seaVis[nearest] || 0);
+    }
+
+    // Eckdeckung räumlich glätten: die Marching-Squares-Kontur folgt sonst hart dem Zellraster und
+    // franst treppig/eckig aus (einzelne Zellen ragen als Quadrate heraus). Ein paar weiche
+    // Glättungsdurchläufe runden die Iso-Linie, ohne die Wasserfläche nennenswert zu verschieben.
+    for (let pass = 0; pass < 2; pass++) {
+      const src = cover.slice();
+      for (let cy = 1; cy < fh - 1; cy++) for (let cx = 1; cx < fw - 1; cx++) {
+        const k = cy * fw + cx;
+        cover[k] = src[k] * 0.36
+          + (src[k - 1] + src[k + 1] + src[k - fw] + src[k + fw]) * 0.13
+          + (src[k - 1 - fw] + src[k + 1 - fw] + src[k - 1 + fw] + src[k + 1 + fw]) * 0.03;
+      }
     }
 
     const corner = (cx, cy) => {
