@@ -39,6 +39,16 @@ const UPHILL_FLOW_BIAS = 110;
 const SURFACE_RELAX = 0.13;
 const FLOW_MIN_MOBILITY = 0.28;
 const FLOW_FULL_MOBILITY_DEPTH = WET_DEPTH * 1.05;
+// Wasserdruck: eine hohe Wassersäule steht unter mehr Druck und strömt schneller ab/zu
+// (Torricelli, v ∝ √Tiefe). Nur die Tiefe ÜBER der Mobilitätsschwelle erzeugt Zusatzdruck —
+// flaches Wasser/Regenfilm bleibt wie gehabt träge. Gedeckelt für CA-Stabilität.
+const PRESSURE_REF = FLOW_FULL_MOBILITY_DEPTH; // ab dieser Tiefe beginnt der Druckbonus
+const PRESSURE_GAIN = 1.8;                      // Stärke des Druckeffekts (tiefes Wasser fließt schneller)
+const PRESSURE_MAX = 3.0;                       // Obergrenze des Druckfaktors
+const PRESSURE_REF_SQRT = Math.sqrt(PRESSURE_REF);
+function pressureFactor(depth) {
+  return Math.min(PRESSURE_MAX, 1 + PRESSURE_GAIN * Math.max(0, Math.sqrt(Math.max(0, depth)) - PRESSURE_REF_SQRT));
+}
 const DIR8 = [
   [-1, 0, 1], [1, 0, 1], [0, -1, 1], [0, 1, 1],
   [-1, -1, Math.SQRT2], [1, -1, Math.SQRT2], [-1, 1, Math.SQRT2], [1, 1, Math.SQRT2],
@@ -394,10 +404,15 @@ function simulateCA(t, dtW, world) {
     if (lower) {
       // Flaches Wasser fließt träger; hohe Gefälle/mehr Tiefe laufen spürbar schneller.
       const mobility = Math.min(1, Math.max(FLOW_MIN_MOBILITY, avail / Math.max(FLOW_FULL_MOBILITY_DEPTH, 0.026)));
+      // Wasserdruck: tiefe Säule (avail) → höherer Druck → schnellerer ABFLUSS bergab. Nur bei
+      // echtem Bodengefälle (talwärts) angewandt — reine Oberflächen-Angleichung/Überlauf über einen
+      // Rücken (kein/negatives Gefälle) bleibt unbeschleunigt, damit Stau-/Umleitungs-Mechanik stabil
+      // bleibt. out ist weiter durch flowCap/avail gedeckelt → masseerhaltend.
+      const pressure = maxGroundDrop > 0.004 ? pressureFactor(avail) : 1;
       const basinDamping = (t.lakeMask && t.lakeMask[i]) ? 0.18 : 1;
       const equalizeCap = Math.max(0, si - surfaceSum / surfaceCount) * 0.82;
       const flowCap = Math.min(avail, equalizeCap + maxGroundDrop * SLOPE_FLOW_RELIEF);
-      const out = Math.min(avail, flowCap, headSum * 0.72 * WATER_FLOW * mobility * basinDamping);
+      const out = Math.min(avail, flowCap, headSum * 0.72 * WATER_FLOW * mobility * pressure * basinDamping);
       if (out > SETTLE_EPS) {
         for (const [j, weight] of lower) {
           const q = out * (weight / headSum);
