@@ -29,7 +29,12 @@ const BUILD_ORDER = [
   { kind: 'power_plant', want: (s) => s.energyRatio < 1 },
   // 2) Hochtechen: Fahrzeuge sind der Standard-Siegpfad; Marine auf Küstenkarten vor Luft.
   { kind: 'shipyard',    reserve: true, want: (s) => s.coastal && s.shipyards < 1 && s.factories >= 1 && s.vehicleArmy >= 3 },
-  { kind: 'airbase',     reserve: true, want: (s) => s.airbases < 1 && s.factories >= 1 && s.vehicleArmy >= 5 && (!s.coastal || s.shipyards >= 1 || s.faction === 'HLX') && s.credits > 1800 },
+  // Luftbasis-Schwelle gesenkt (vehicleArmy 5→3, credits 1800→1100): die alte Schwelle wurde in KI-vs-KI-
+  // Partien praktisch NIE erreicht (vehicleArmy bleibt oft 0–3, s. Kommentar in manageProduction) → airbase
+  // + ALLE Luft-Einheiten + die 'airstrike'-Doktrin waren tot (coverage.js Ziel C: 0/5 Luft-Typen; Ziel A:
+  // 'air'-Archetyp fehlte). reserve:true sorgt weiterhin dafür, dass nur aus Erz-Überschuss gebaut wird →
+  // der Fahrzeugkern wird nicht ausgehungert. HLX (Luftfraktion) darf wie gehabt auch küstennah direkt.
+  { kind: 'airbase',     reserve: true, want: (s) => s.airbases < 1 && s.factories >= 1 && s.vehicleArmy >= 3 && (!s.coastal || s.shipyards >= 1 || s.faction === 'HLX') && s.credits > 1100 },
   { kind: 'mg_turret',   want: (s) => s.turrets < 1 && s.barracks >= 1 },
   // Proaktive Basis-Flugabwehr als Geschwister des mg_turret (gleiches frühes Bau-Fenster, solange noch
   // Erz fließt). Die reguläre flak_turret-Bedingung weiter unten verlangt enemyAir/army≥8, was in
@@ -830,7 +835,7 @@ function manageProduction(world, player, s, applyCommand) {
   if (pressure < 2) {
     if (s.factories < 1) reserve = Math.max(reserve, effectiveCost(world, player.id, world.data.buildings.factory).ore || 0);
     if (s.coastal && s.shipyards < 1 && s.factories >= 1 && s.vehicleArmy >= 2) reserve = Math.max(reserve, effectiveCost(world, player.id, world.data.buildings.shipyard).ore || 0);
-    if (s.airbases < 1 && s.factories >= 1 && s.vehicleArmy >= 5 && (!s.coastal || s.shipyards >= 1 || s.faction === 'HLX')) {
+    if (s.airbases < 1 && s.factories >= 1 && s.vehicleArmy >= 3 && (!s.coastal || s.shipyards >= 1 || s.faction === 'HLX')) {
       reserve = Math.max(reserve, effectiveCost(world, player.id, world.data.buildings.airbase).ore || 0);
     }
   }
@@ -963,8 +968,15 @@ function manageProduction(world, player, s, applyCommand) {
   }
 
   // Luft-Doktrin: spät und begrenzt. HLX darf etwas mehr, aber die Grundkosten bleiben hoch.
-  const airReady = s.vehicleArmy >= (player.faction === 'HLX' ? 5 : 6)
-    && (!s.coastal || navalUnits >= (player.faction === 'FLG' ? 3 : 2) || pressure >= 4);
+  // Luft-Produktionsschwelle gesenkt parallel zur Luftbasis (vehicleArmy 5/6→3/4, küstennahe Marine-
+  // Vorbedingung von 2–3 Schiffen → 1 bzw. pressure≥2 statt ≥4). Vorher unerreichbar → Luftbasis stand
+  // leer (coverage.js Ziel C). Luft bleibt durch afford()/AIR_TARGET begrenzt und kommt erst nach einem
+  // Fahrzeugkern → kein Verdrängen des Siegpfads.
+  // Gate auf GESAMT-Armee statt stehender Fahrzeugzahl (die im Krieg bei 0–2 verharrt → Luft kam selbst
+  // bei stehender Luftbasis nie). Sobald eine Luftbasis steht und eine kleine Armee existiert, läuft die
+  // Luftproduktion (durch afford()/AIR_TARGET begrenzt). HLX (Luftfraktion) startet etwas früher.
+  const airReady = s.army.length >= (player.faction === 'HLX' ? 4 : 6)
+    && (!s.coastal || navalUnits >= 1 || pressure >= 2);
   const bomberShare = player.faction === 'HLX' ? 0.55 : 0.28;
   for (const air of airbases) {
     if (!airReady || air.queue.length >= 1 || airUnits >= AIR_TARGET) continue;
@@ -989,12 +1001,21 @@ function manageProduction(world, player, s, applyCommand) {
 // Typen sind in der regulären Liste DEADLOCKED und kamen real nie vor. Der proaktive Filler übernimmt
 // sie (billige Luftabwehr/Sensorik ist realistische Doktrin — der Gegner KANN Luft bauen). solar/depot/
 // turret kann die reguläre Liste selbst erreichen → niedrigere Priorität.
-const COVERAGE_FILL_BUILDINGS = ['flak_turret', 'sam_site', 'sonar', 'solar_plant', 'depot', 'turret'];
+// airbase zuerst: die Luftbasis ist der Schlüssel zu VIER toten Einheitentypen (recon_drone/gunship/
+// bomber/cloud_seeder) + der 'airstrike'-Doktrin. Über die reguläre BUILD_ORDER kam sie nie zum Zug
+// (frühe Wirtschaftseinträge belegen jede Runde den 1-Gebäude-Slot). Ist sie zu teuer (1200 Erz +
+// Tank-Puffer), fällt die Schleife per `continue` auf die billigeren Verteidigungsbauten zurück.
+const COVERAGE_FILL_BUILDINGS = ['airbase', 'flak_turret', 'sam_site', 'sonar', 'solar_plant', 'depot', 'turret'];
 function manageDefensiveCoverage(world, player, s, applyCommand) {
   if (!s.hq) return;
   const pressure = world.aiDirector?.pressure || 0;
   if (pressure >= 2) return;                            // ab Endspieldruck fließt Erz in die Armee, nicht in Filler
-  if (s.vehicleArmy < 3) return;                        // erst ein tragfähiger Fahrzeugkern, dann Festigung
+  // GATE-FIX: nicht auf STEHENDE Fahrzeugzahl gaten — die bleibt im aktiven KI-vs-KI-Krieg bei 0–2
+  // (Fahrzeuge sterben so schnell wie sie gebaut werden, gemessen: vehicleArmy-Peak=2), wodurch der
+  // Filler praktisch NIE lief → flak_turret/sam_site/depot/airbase blieben tot (coverage.js Ziel C).
+  // Stattdessen: eine Fahrzeug-Fabrik (Wirtschaftsbasis steht) + eine minimale Armee. Der Erz-Überschuss-
+  // Gate weiter unten (nach Bau noch ein Tank bezahlbar) schützt den Siegpfad weiterhin.
+  if (s.factories < 1 || s.army.length < 4) return;
   const underConstruction = s.buildings.filter(b => b.buildProgress < 1 && !INFRA_KINDS.has(b.kind));
   if (underConstruction.length >= 2) return;
   const have = new Set(s.buildings.map(b => b.kind));
@@ -1048,6 +1069,17 @@ function manageRecovery(world, player, s, applyCommand) {
   if (!hasKind('tractor') && s.vehicleArmy >= 4 && can('tractor')) {
     const fac = free('factory');
     if (fac) { applyCommand(world, { type: 'produce', building: fac.id, kind: 'tractor' }, player.id); return; }
+  }
+
+  // Brückenleger: einer, sobald die KI tatsächlich Brücken baut (s.bridges≥1 — in fast jeder Partie,
+  // coverage.js zeigt 9–17 Brücken/Partie). Er war eine TOTE Bauoption (Ziel C: bridgelayer kam nie vor),
+  // obwohl die KI ständig Querungen baut. Er hat 'construct' (kein weapon → zählt nicht gegen
+  // VEHICLE_TARGET) → landet im Bautrupp-Pool und kann von den laufenden Brücken-/Routen-`build`-Befehlen
+  // mit übernommen werden (Ziel D: er WIRKT an der Infrastruktur, statt nur dazustehen). Gegated auf eine
+  // bestehende Armee + freie Fabrik → kein Verdrängen des Siegpfads.
+  if (!hasKind('bridgelayer') && s.bridges >= 1 && s.army.length >= 4 && can('bridgelayer')) {
+    const fac = free('factory');
+    if (fac) { applyCommand(world, { type: 'produce', building: fac.id, kind: 'bridgelayer' }, player.id); return; }
   }
 
   // Vorhandene Traktoren auf nahe verlassene Fahrzeuge ansetzen (nur im Umkreis der eigenen Basis,
