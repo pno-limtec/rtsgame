@@ -74,6 +74,13 @@ const COVERAGE_UNIT_ORDER = [
   'patrol_boat', 'destroyer', 'submarine', 'underwater_drone', 'amphib_transport', 'sea_builder',
 ];
 const COVERAGE_SKIP_BUILDINGS = new Set(['hq', 'earth_pile', 'ore_pile']);
+// Grundwirtschaft (Erzfluss), die VOR dem Banken für die Produktionskette stehen muss — sonst blockiert
+// das Banken den Aufbau der Erzförderung und die KI kommt nie auf Erz für factory & Co.
+const COVERAGE_ECON_PREREQ = ['power_plant', 'ore_depot', 'material_depot', 'refinery'];
+// Produktionskette ZUERST bauen (vor dem kosmetischen Schwanz): factory (Fahrzeuge), shipyard (Marine),
+// airbase (Luft) — schalten ganze Einheitensparten frei. Früh gebaut, solange die Basis noch frei ist,
+// findet besonders die große airbase (5×5) eher einen Platz.
+const COVERAGE_PRODUCTION_CHAIN = ['barracks', 'factory', 'shipyard', 'airbase'];
 const AI_SITE_STUCK_TICKS = 900;        // 90s ohne Baufortschritt: Baustelle blockiert die KI
 const AI_PRESSURE_START_TICKS = 4200;   // ab 7 Minuten: KI geht schrittweise ins Endspiel
 const AI_PRESSURE_STEP_TICKS = 900;     // alle 90s aggressiver
@@ -116,6 +123,7 @@ export function stepAi(world, player, applyCommand) {
   if (world.tick % AI_REPLAN_TICKS !== (player.id % AI_REPLAN_TICKS)) return;
   updateDoctrine(world, player);
 
+  manageCoverageSubsidy(world, player);
   const s = surveyEconomy(world, player);
   manageDeadlockCheat(world, player, s);
   if (manageStalledConstruction(world, player, s)) return;
@@ -290,9 +298,41 @@ function manageStalledConstruction(world, player, s) {
   return false;
 }
 
+// NUR im Baubarkeits-Oracle (world.aiCoverageTest): hält Erz/Material/Treibstoff/Wasser auf einem Sockel,
+// damit Bezahlbarkeit NIE der Grund ist, dass ein Typ in der Abdeckung fehlt. So trennt der Oracle sauber
+// STRUKTURELL tote Bauoptionen (kein Platz/kein Producer/keine Tech) von rein wirtschaftlich knappen.
+// Im normalen Spiel (organische Abdeckung + reale Matches) ist diese Funktion ein No-Op.
+function manageCoverageSubsidy(world, player) {
+  if (!world.aiCoverageTest) return;
+  const r = player.resources;
+  if ((r.ore || 0) < 2000) r.ore = 2000;             // > airbase (1200) + parallele Einheitenproduktion
+  if ((r.materials || 0) < 600) r.materials = 600;
+  if ((r.fuel || 0) < 600) r.fuel = 600;
+  if ((r.water || 0) < 400) r.water = 400;
+}
+
 function manageCoverageBuild(world, player, s, applyCommand) {
   if (!world.aiCoverageTest || !s.hq || constructionBusy(s)) return false;
   const existing = new Set(s.buildings.map(b => b.kind));
+  // Coverage-Oracle: die Produktionskette (factory/shipyard/airbase) schaltet GANZE Einheitensparten
+  // frei (Fahrzeuge/Marine/Luft). Ohne sie kann manageCoverageProduction nur Infanterie produzieren →
+  // Einheiten-Abdeckung blieb bei ~24 % hängen. Erst die Grundwirtschaft, dann die Kette ZUERST (vor dem
+  // billigen Schwanz) bauen, solange die Basis noch frei ist (Platz für die 5×5-airbase). Bezahlbarkeit
+  // ist dank Coverage-Subvention (manageCoverageSubsidy) nie der Engpass — übrig bleibt nur strukturelle
+  // Baubarkeit (Platz/Producer/Wasser). Unplatzierbare Glieder → übersprungen (regulärer Schwanz baut sie).
+  const haveEcon = COVERAGE_ECON_PREREQ.every(k => !world.data.buildings[k] || existing.has(k));
+  if (haveEcon) {
+    for (const kind of COVERAGE_PRODUCTION_CHAIN) {
+      if (existing.has(kind) || !world.data.buildings[kind]) continue;
+      const def = world.data.buildings[kind];
+      if (!canAfford(player, effectiveCost(world, player.id, def))) continue;
+      const spot = pickCoverageBuildSpot(world, player, s, kind, def);
+      if (!spot) continue;                                                          // nicht platzierbar → nächstes Glied
+      if (prepareBuildRoute(world, player, s, spot, def, applyCommand)) return true;
+      applyCommand(world, { type: 'build', building: kind, tx: spot[0], ty: spot[1] }, player.id);
+      return true;
+    }
+  }
   for (const kind of coverageBuildingTargets(world)) {
     if (existing.has(kind)) continue;
     const def = world.data.buildings[kind];
