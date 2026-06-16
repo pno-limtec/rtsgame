@@ -173,6 +173,7 @@
     },
     "buildTime": 12,
     "weapon": "rocket_salvo",
+    "turret": true,
     "upkeep": {
       "fuel": 0.55
     },
@@ -193,6 +194,7 @@
     },
     "buildTime": 9,
     "weapon": "flak_gun",
+    "turret": true,
     "upkeep": {
       "fuel": 0.5
     },

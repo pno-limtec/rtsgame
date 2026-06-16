@@ -160,14 +160,28 @@ export function serializeSnapshot(world) {
         Math.max(0, Math.round(e.hp)), e.maxHp, r2(e.facing), load, e.vet || 0, roleId(roleField),
         working ? 1 : 0,
         e.abandoned ? 1 : 0,
-        unitFlags(world, e), ownerMask(e._sonarBy)]);
+        unitFlags(world, e), ownerMask(e._sonarBy),
+        // Index 16: Turm-Ausrichtung. Mit Ziel zeigt der Turm zum Ziel (e.aim), ohne Ziel ruht er in
+        // Fahrtrichtung (facing) — sonst stünde der Turm bei frisch gebauten Einheiten quer.
+        e.turret ? r2(e.target != null ? (e.aim || 0) : e.facing) : 0]);
     } else {
       // Index 11 = Strom-Flag: 0 wenn das Gebäude beim Lastabwurf abgeschaltet wurde (Licht aus).
-      ents.push([e.id, 1, kindId(e.kind), e.owner, r1(e.x), r1(e.y),
+      const brow = [e.id, 1, kindId(e.kind), e.owner, r1(e.x), r1(e.y),
         Math.max(0, Math.round(e.hp)), e.maxHp, e.size, Math.round(e.buildProgress * 100),
         (e.kind === 'earth_pile' || e.kind === 'ore_pile') ? Math.round(e.amount || 0) : e.queue.length,
         e._powered === false ? 0 : 1, e.earthPileId || 0,
-        buildingWarn(e) ? 1 : 0]);  // Index 13: Warn-Markierung (kann nicht produzieren/fördern)
+        buildingWarn(e) ? 1 : 0,  // Index 13: Warn-Markierung (kann nicht produzieren/fördern)
+        // Index 14: Turm-Ausrichtung wenn ein Ziel bekämpft wird, sonst Sentinel 9 (Turm scannt im Leerlauf).
+        e.turret && e.target != null ? r2(e.aim || 0) : 9];
+      // C&C-Baufortschritt: bei laufender Produktion das vordere Item (Fortschritt 0..100) und die
+      // komplette Warteschlangen-Zusammensetzung (Kind-IDs) anhängen, damit das Baumenü pro
+      // Einheitentyp ein Fortschritts-Overlay und die Auftragszahl anzeigen kann.
+      if (e.queue && e.queue.length) {
+        const front = e.queue[0];
+        const fp = front.total ? Math.round((1 - Math.max(0, front.timeLeft) / front.total) * 100) : 0;
+        brow.push(fp, e.queue.map(it => kindId(it.kind)));  // Index 15: Fortschritt, Index 16: Kind-Liste
+      }
+      ents.push(brow);
     }
   }
   const t = world.terrain;

@@ -2784,7 +2784,13 @@ export class Renderer {
         g.position.set(e.x, targetY, e.y);
       }
       const renderY = g.position.y - lift;
-      if (e.etype === 'building') { this._updateBuildingAmbientFx(g, e); this._updateBuildingWarn(g, e); this._updateBuildingProduction(g, e); }
+      if (e.etype === 'building') {
+        this._updateBuildingAmbientFx(g, e); this._updateBuildingWarn(g, e); this._updateBuildingProduction(g, e);
+        // Turm-Ziel-Ausrichtung: aim===9 (Sentinel) = kein Ziel → Leerlauf-Scan; sonst Azimut zum Ziel.
+        // Gebäude stehen unrotiert (g.rotation.y=0), also lokaler Kopf-Yaw = PI/2 − aim.
+        g.userData.turretAimYaw = (g.userData.turretHead && Math.abs(e.aim || 0) <= Math.PI + 0.01)
+          ? (Math.PI / 2 - e.aim) : null;
+      }
       if (e.kind === 'pipe') this._orientPipe(g, e);
       if (e.etype === 'unit' && !e.abandoned && g.userData.vehicleLight) {
         const front = 1.15, side = 0.36;
@@ -2844,6 +2850,16 @@ export class Renderer {
             g.rotation.z + (roll - g.rotation.z) * tiltAlpha);
         } else {
           g.rotation.y = g.userData._smoothYaw;
+        }
+        // Geschützturm dreht unabhängig vom Rumpf zum Ziel (e.aim). Lokaler Winkel = Weltziel-Yaw
+        // minus Rumpf-Yaw; sanft eingeschwenkt (Turm-Traverse statt hartem Springen).
+        if (g.userData.turretMesh) {
+          const tgtLocal = wrapAngle((Math.PI / 2 - (e.aim || 0)) - g.userData._smoothYaw);
+          const tm = g.userData.turretMesh;
+          const ta = smoothAlpha(this._lastDt, 8);
+          tm.rotation.y = tm.userData._sa == null
+            ? (tm.userData._sa = tgtLocal)
+            : (tm.userData._sa += wrapAngle(tgtLocal - tm.userData._sa) * ta);
         }
         if (SURFACE_SHIP_KINDS.has(e.kind)) {
           const waveTilt = this._seaWaveTiltAt(e.x, e.y, e.facing);
@@ -3554,6 +3570,7 @@ export class Renderer {
         }
         if (body.userData.anims) g.userData.buildingAnims = body.userData.anims;
         if (body.userData.smokeStacks) g.userData.smokeStacks = body.userData.smokeStacks;
+        if (body.userData.turretHead) g.userData.turretHead = body.userData.turretHead;
       }
       g.userData.lift = 0; g.userData.big = e.size >= 3;
       // Schwimmende Wasserbauten (Pumpwerk/Werft/Ponton) bekommen KEIN Betonfundament — sie sitzen auf
@@ -3637,7 +3654,12 @@ export class Renderer {
         body.add(boxMesh(1.25, 0.45, 1.9, dark, 0, 0.38, -0.05));
         body.add(boxMesh(0.9, 0.55, 0.8, m, 0, 0.85, 0.35));
         body.add(boxMesh(0.62, 0.22, 0.08, this.envMats.glass, 0, 0.95, 0.78));
-        body.add(boxMesh(0.5, 0.18, 0.42, dark, 0, 1.16, -0.2));
+        // Drehbarer MG-Turm oben: Sockel + kurzes Maschinenkanonenrohr, folgt dem Ziel.
+        const scoutTurret = new THREE.Group();
+        scoutTurret.add(boxMesh(0.5, 0.18, 0.42, dark, 0, 1.16, -0.2));
+        const sgun = cylMesh(0.045, 0.06, 0.95, metal, 0, 1.2, 0.32, 7);
+        sgun.rotation.x = Math.PI / 2; scoutTurret.add(sgun);
+        body.add(scoutTurret); g.userData.turretMesh = scoutTurret;
         const antenna = cylMesh(0.025, 0.025, 0.9, metal, -0.42, 1.32, -0.35, 5);
         antenna.rotation.z = -0.35; body.add(antenna);
         for (const sx of [-0.62, 0.62]) for (const sz of [-0.58, 0.58]) {
@@ -3650,12 +3672,15 @@ export class Renderer {
         body = new THREE.Group();
         for (const sx of [-0.66, 0.66]) body.add(boxMesh(0.38, 0.42, 2.35, dark, sx, 0.32, -0.05));
         body.add(boxMesh(1.45, 0.58, 2.05, m, 0, 0.68, -0.02));
-        body.add(boxMesh(1.1, 0.36, 0.9, dark, 0, 1.1, 0.08));
+        // Drehbarer Geschützturm (Plattform + Turm + Rohr + Kuppel) — folgt dem Ziel, der Rumpf der Fahrt.
+        const tankTurret = new THREE.Group();
+        tankTurret.add(boxMesh(1.1, 0.36, 0.9, dark, 0, 1.1, 0.08));
         const turret = cylMesh(0.5, 0.58, 0.34, m, 0, 1.22, 0.08, 8);
-        turret.rotation.y = Math.PI / 8; body.add(turret);
+        turret.rotation.y = Math.PI / 8; tankTurret.add(turret);
         const barrel = cylMesh(0.08, 0.11, 1.75, metal, 0, 1.27, 1.08, 8);
-        barrel.rotation.x = Math.PI / 2; body.add(barrel);
-        body.add(boxMesh(0.32, 0.16, 0.34, this.envMats.glass, -0.24, 1.42, -0.28));
+        barrel.rotation.x = Math.PI / 2; tankTurret.add(barrel);
+        tankTurret.add(boxMesh(0.32, 0.16, 0.34, this.envMats.glass, -0.24, 1.42, -0.28));
+        body.add(tankTurret); g.userData.turretMesh = tankTurret;
         g.userData.lift = 0;
       } else if (e.kind === 'flak_track') {
         // Flakfahrzeug: Halbketten-Chassis mit offenem Doppelrohr oben.
@@ -3664,12 +3689,15 @@ export class Renderer {
         body.add(boxMesh(1.05, 0.58, 1.35, m, 0, 0.78, -0.28));
         body.add(boxMesh(0.9, 0.62, 0.72, m, 0, 0.92, 0.68));
         body.add(boxMesh(0.62, 0.2, 0.08, this.envMats.glass, 0, 1.02, 1.05));
+        // Drehbarer Flak-Sockel mit Doppelrohr — schwenkt zum Luft-/Bodenziel, unabhängig von der Fahrt.
+        const flakTurret = new THREE.Group();
         const mount = cylMesh(0.28, 0.34, 0.24, metal, 0, 1.28, -0.42, 8);
-        mount.rotation.y = Math.PI / 6; body.add(mount);
+        mount.rotation.y = Math.PI / 6; flakTurret.add(mount);
         for (const sx of [-0.12, 0.12]) {
           const gun = cylMesh(0.045, 0.06, 1.1, metal, sx, 1.55, 0.06, 7);
-          gun.rotation.x = Math.PI / 2 - 0.45; body.add(gun);
+          gun.rotation.x = Math.PI / 2 - 0.45; flakTurret.add(gun);
         }
+        body.add(flakTurret); g.userData.turretMesh = flakTurret;
         for (const sx of [-0.62, 0.62]) for (const sz of [-0.65, 0.52]) {
           const wh = cylMesh(0.2, 0.2, 0.14, dark, sx, 0.28, sz, 9);
           wh.rotation.z = Math.PI / 2; body.add(wh);
@@ -3772,23 +3800,30 @@ export class Renderer {
         for (const sx of [-0.64, 0.64]) body.add(boxMesh(0.36, 0.36, 2.25, dark, sx, 0.32, -0.04));
         body.add(boxMesh(1.42, 0.5, 2.05, m, 0, 0.62, -0.06));
         body.add(boxMesh(0.85, 0.55, 0.7, this.envMats.glass, 0, 0.98, 0.62));
+        // Drehbarer Werferaufbau: äußere Gruppe schwenkt (Traverse, rotation.y), innerer Kasten
+        // behält die feste Abschuss-Elevation (rotation.x). So zielt der Werfer unabhängig zur Fahrt.
+        const rlTurret = new THREE.Group();
+        rlTurret.position.set(0, 1.22, -0.42);
         const rack = new THREE.Group();
-        rack.position.set(0, 1.22, -0.42);
         rack.rotation.x = -0.46;
         rack.add(boxMesh(1.15, 0.42, 1.05, dark, 0, 0, 0));
         for (const sx of [-0.34, 0, 0.34]) for (const sy of [-0.12, 0.12]) {
           const tube = cylMesh(0.055, 0.065, 1.15, metal, sx, sy, 0.05, 7);
           tube.rotation.x = Math.PI / 2; rack.add(tube);
         }
-        body.add(rack);
+        rlTurret.add(rack);
+        body.add(rlTurret); g.userData.turretMesh = rlTurret;
         g.userData.lift = 0;
       } else if (e.kind === 'artillery') {
         // Haubitze: flaches Chassis, Lafette, langes aufgerichtetes Rohr.
         body = new THREE.Group();
         body.add(boxMesh(1.7, 0.6, 2.6, m, 0, 0.45, 0));
-        body.add(boxMesh(0.9, 0.5, 1.2, dark, 0, 0.95, -0.3));
-        const barrel = cylMesh(0.09, 0.13, 3.0, metal, 0, 1.55, 0.7);
-        barrel.rotation.x = Math.PI / 2 - 0.5; body.add(barrel);
+        // Drehbare Lafette: Geschützmutter + langes Rohr schwenken zum Ziel (Rohr-Elevation bleibt fix).
+        const artTurret = new THREE.Group();
+        artTurret.add(boxMesh(0.9, 0.5, 1.2, dark, 0, 0.95, -0.3));
+        const abarrel = cylMesh(0.09, 0.13, 3.0, metal, 0, 1.55, 0.7);
+        abarrel.rotation.x = Math.PI / 2 - 0.5; artTurret.add(abarrel);
+        body.add(artTurret); g.userData.turretMesh = artTurret;
         body.add(boxMesh(1.9, 0.3, 0.5, dark, 0, 0.2, -1.3));               // Erdsporn
         g.userData.lift = 0;
       } else if (e.kind === 'bomber' || e.kind === 'transport_air' || e.kind === 'cloud_seeder') {
@@ -5018,8 +5053,8 @@ export class Renderer {
     if (this._currentFxAt > 0) return;
     this._currentFxAt = gap;
     const tries = this.quality === 'low' ? 8 : this.quality === 'medium' ? 13 : 20;
-    // Wenige, dafür DICHTE Läufe — jeder Lauf zeichnet ein durchgehendes blaues Band (s. _traceFlowToSea).
-    const maxMade = this.quality === 'low' ? 1 : this.quality === 'medium' ? 2 : 3;
+    // Wenige, dafür durchgehende Läufe (s. _traceFlowToSea) — dezent gehalten.
+    const maxMade = this.quality === 'low' ? 1 : this.quality === 'medium' ? 1 : 2;
     const radius = Math.max(14, Math.min(42, this.camDist * 0.22));
     let made = 0;
     for (let n = 0; n < tries && made < maxMade && this._canSpawnEffect(1); n++) {
@@ -5078,27 +5113,27 @@ export class Renderer {
       // blaue Partikel ENTLANG der Verbindungslinie setzen (wenig Jitter, wenig Drift) — so verschmelzen
       // sie zu einem zusammenhängenden Band statt einzelner Tropfen. Schaum kommt sparsam obendrauf.
       const sx = cx * TILE, sz = cy * TILE, ex = bx * TILE, ez = by * TILE;
-      const bandSize = 0.95 + surge * 0.7;
-      for (const t of [0.18, 0.5, 0.82]) {
+      // Dezent: kleinere, transparentere Partikel und nur 2 je Segment (statt 3).
+      const bandSize = 0.6 + surge * 0.5;
+      for (const t of [0.3, 0.7]) {
         if (!this._canSpawnEffect(1)) break;
         const wx = sx + (ex - sx) * t + (Math.random() - 0.5) * 0.3;
         const wz = sz + (ez - sz) * t + (Math.random() - 0.5) * 0.3;
         const y = (depth > 0.02 ? this.waterSurfaceAt(wx, wz) : this.height[ci] * HEIGHT_SCALE) + 0.07;
         // fadeIn 0.5 + längere Lebensdauer: jedes Band-Partikel blendet GANZ LANGSAM ein (statt
-        // plötzlich aufzutauchen), bleibt sichtbar und blendet dann wieder aus. opacity angehoben,
-        // weil das Hüllkurven-Maximum (fadeIn·fadeOut) sonst niedriger liegt.
+        // plötzlich aufzutauchen), bleibt sichtbar und blendet dann wieder aus.
         this._sprite(blue, wx, y, wz, bandSize, 2.0 + surge * 0.7, {
           vx: fx * (0.45 + surge * 0.5), vz: fz * (0.45 + surge * 0.5), vy: 0.03 + surge * 0.06,
-          grow: 1.04 + surge * 0.22, opacity: (0.78 + surge * 0.3) * fade, fadeIn: 0.5,
+          grow: 1.04 + surge * 0.22, opacity: (0.42 + surge * 0.26) * fade, fadeIn: 0.5,
         });
       }
-      // Weiße Schaumkrone obenauf (Funkeln/Gischt), sparsam — nur jeden 2. Schritt; blendet ebenfalls weich ein.
-      if (this._canSpawnEffect(1) && (step % 2 === 0 || surge > 0.5)) {
+      // Weiße Schaumkrone obenauf (Funkeln/Gischt), nur SPARSAM — jeden 3. Schritt; blendet weich ein.
+      if (this._canSpawnEffect(1) && (step % 3 === 0 || surge > 0.6)) {
         const wx = sx + (ex - sx) * 0.5, wz = sz + (ez - sz) * 0.5;
         const y = (depth > 0.02 ? this.waterSurfaceAt(wx, wz) : this.height[ci] * HEIGHT_SCALE) + 0.16;
         this._sprite(0xffffff, wx + (Math.random() - 0.5) * 0.5, y, wz + (Math.random() - 0.5) * 0.5,
-          0.24 + surge * 0.22, 0.9 + surge * 0.4,
-          { vx: fx * 0.6, vz: fz * 0.6, vy: 0.12 + surge * 0.1, grow: 1.25, opacity: (0.55 + surge * 0.4) * fade, fadeIn: 0.45, additive: true });
+          0.16 + surge * 0.18, 0.9 + surge * 0.4,
+          { vx: fx * 0.6, vz: fz * 0.6, vy: 0.12 + surge * 0.1, grow: 1.2, opacity: (0.38 + surge * 0.3) * fade, fadeIn: 0.45, additive: true });
       }
       cx = bx; cy = by;
       if (this.terrainType?.[by * W + bx] === 3) break; // Meer erreicht
@@ -5497,6 +5532,15 @@ export class Renderer {
       if (g.userData.chevrons) for (const ch of g.userData.chevrons) if (ch.visible) ch.quaternion.copy(this.camera.quaternion);
       if (g.userData.spin) g.userData.spin.rotation.y = this.time * (g.userData.spinSpeed || 1.2);
       if (g.userData.buildingAnims) this._animateBuildingAnims(g);
+      // Turm zum Ziel schwenken (überschreibt den Leerlauf-Scan aus den buildingAnims, der zuvor lief).
+      if (g.userData.turretHead && g.userData.turretAimYaw != null) {
+        const h = g.userData.turretHead;
+        const ta = smoothAlpha(this._lastDt, 7);
+        h.userData._sa = h.userData._sa == null
+          ? (h.userData._sa = g.userData.turretAimYaw)
+          : (h.userData._sa += wrapAngle(g.userData.turretAimYaw - h.userData._sa) * ta);
+        h.rotation.y = h.userData._sa;
+      }
     }
     this._commitShadowRefresh();
     this.renderer.render(this.scene, this.camera);

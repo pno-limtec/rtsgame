@@ -56,8 +56,12 @@ export function stepCombat(world) {
     if (!tgt) continue;
 
     const d = dist(e, tgt);
+    const aimAngle = Math.atan2(tgt.y - e.y, tgt.x - e.x);
+    // Mit Geschützturm verfolgt nur der Turm (aim) das Ziel — auch außer Reichweite/in Fahrt —,
+    // der Rumpf (facing) behält seine Fahrtrichtung. Ohne Turm dreht sich die ganze Einheit.
+    if (e.turret) e.aim = aimAngle;
     if (d <= weaponRange(world, e, tgt) && d >= (e.weapon.minRange || 0)) {
-      e.facing = Math.atan2(tgt.y - e.y, tgt.x - e.x);
+      if (!e.turret) e.facing = aimAngle;
       if (e.cd <= 0) fire(world, e, tgt);
     } else if (e.etype === 'unit' && order !== 'move' && order !== 'hold') {
       // Verfolgen (gedrosseltes Repathing)

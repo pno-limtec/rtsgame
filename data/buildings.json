@@ -107,25 +107,25 @@
   "turret": {
     "label": "Kanonenturm", "role": "defense",
     "hp": 800, "cost": { "ore": 600 }, "buildTime": 10,
-    "power": -25, "size": 1, "sight": 10, "weapon": "turret_cannon",
+    "power": -25, "size": 1, "sight": 10, "weapon": "turret_cannon", "turret": true,
     "desc": "Stationäre Kanonenverteidigung gegen Fahrzeuge, Gebäude und Schiffe in Küstennähe."
   },
   "mg_turret": {
     "label": "MG-Turm", "role": "defense",
     "hp": 520, "cost": { "ore": 350 }, "buildTime": 7,
-    "power": -15, "size": 1, "sight": 9, "weapon": "turret_mg",
+    "power": -15, "size": 1, "sight": 9, "weapon": "turret_mg", "turret": true,
     "desc": "Günstiger Schutzturm gegen Infanterie und leichte Ziele."
   },
   "flak_turret": {
     "label": "Flak-Turm", "role": "defense",
     "hp": 650, "cost": { "ore": 650 }, "buildTime": 9,
-    "power": -25, "size": 1, "sight": 12, "weapon": "turret_flak",
+    "power": -25, "size": 1, "sight": 12, "weapon": "turret_flak", "turret": true,
     "desc": "Stationäre Rohr-Flak. Hält Luftangriffe auf Distanz und kann leichte Ziele stören."
   },
   "sam_site": {
     "label": "SAM-Stellung", "role": "defense",
     "hp": 600, "cost": { "ore": 700 }, "buildTime": 10,
-    "power": -25, "size": 1, "sight": 12, "weapon": "sam_missile",
+    "power": -25, "size": 1, "sight": 12, "weapon": "sam_missile", "turret": true,
     "desc": "Stationäre Raketen-Flugabwehr mit hoher Reichweite."
   },
   "sonar": {

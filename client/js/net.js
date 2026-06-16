@@ -170,10 +170,14 @@ export class Net {
         subExposed: isUnit ? !!((e[14] || 0) & 2) : false,
         inTunnel: isUnit ? !!((e[14] || 0) & 4) : false,
         sonarMask: isUnit ? (e[15] || 0) : 0,
+        aim: isUnit ? (e[16] || 0) : (e[14] || 0),   // Geschützturm-Ausrichtung (0 = kein Turm)
         size: isUnit ? 1 : e[8], buildProgress: isUnit ? 1 : e[9] / 100, queue: isUnit ? 0 : e[10],
         powered: isUnit ? true : e[11] !== 0,   // Lastabwurf: Licht aus + Produktion steht
         pile: isUnit ? 0 : (e[12] || 0),
         warn: isUnit ? false : e[13] === 1,     // kann seine Funktion nicht erfüllen → Warndreieck
+        // C&C-Baufortschritt: Fortschritt des vorderen Items (0..1) + Warteschlange als Kind-Namen.
+        prodFront: isUnit ? 0 : (e[15] || 0) / 100,
+        prodKinds: isUnit ? null : (e[16] ? e[16].map(i => KIND_TABLE[i]) : null),
       });
     }
     return out;

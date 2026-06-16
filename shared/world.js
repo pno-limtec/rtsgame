@@ -569,6 +569,9 @@ export function spawnUnit(world, owner, kind, x, y) {
     speed: def.speed, sight: def.sight, weapon: w, cd: 0,
     order: { type: 'idle' }, path: [], pathGoal: null, target: null, repathCd: 0,
     abilities: def.abilities || [],
+    // Drehbarer Geschützturm: Rumpf behält die Fahrtrichtung (facing), nur der Turm (aim)
+    // dreht sich zum Ziel. Ohne Turm dreht sich die ganze Einheit (aim folgt facing).
+    turret: !!def.turret, aim: 0,
     resourceRole: kind === 'builder' ? 'build' : null,
     cargo: 0, harvestRate: def.harvestRate || 0, harvestCap: def.harvestCap || 0, harvestState: 'seek',
     facing: 0,
@@ -625,6 +628,7 @@ export function spawnBuilding(world, owner, kind, tx, ty) {
     tx, ty, size, x, y, hp: def.hp, maxHp: def.hp, power: def.power || 0,
     sight: def.sight || 4, weapon: w, cd: 0,
     queue: [], rally: null, buildProgress: def.buildTime ? 0 : 1,
+    turret: !!def.turret, aim: 0, facing: 0,  // Geschützturm dreht sich zum Ziel (aim)
     def,
   };
   world.entities.set(e.id, e);

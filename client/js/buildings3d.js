@@ -331,6 +331,7 @@ export function makeBuildingMesh(kind, size, mats) {
         gun.rotation.x = Math.PI / 2; head.add(gun);
       }
       g.add(head); addAnim(g, 'swingY', head, { speed: 0.9, amp: 0.45 });
+      g.userData.turretHead = head;   // dreht im Gefecht zum Ziel statt zu scannen
       break;
     }
     case 'turret': {
@@ -343,6 +344,7 @@ export function makeBuildingMesh(kind, size, mats) {
       const barrel = cyl(0.08, 0.1, 1.6, metal, 0, 1.35, 0.8, 8);
       barrel.rotation.x = Math.PI / 2 - 0.12; head.add(barrel);               // Rohr
       g.add(head); addAnim(g, 'swingY', head, { speed: 0.7, amp: 0.55 });
+      g.userData.turretHead = head;
       break;
     }
     case 'flak_turret': {
@@ -355,6 +357,7 @@ export function makeBuildingMesh(kind, size, mats) {
         gun.rotation.x = Math.PI / 2 - 0.42; head.add(gun);
       }
       g.add(head); addAnim(g, 'swingY', head, { speed: 1.0, amp: 0.5 });
+      g.userData.turretHead = head;
       break;
     }
     case 'sam_site': {
@@ -367,6 +370,7 @@ export function makeBuildingMesh(kind, size, mats) {
         tip.rotation.x = Math.PI / 2; rack.add(tip);
       }
       g.add(rack); addAnim(g, 'swingX', rack, { speed: 0.75, amp: 0.18 });
+      g.userData.turretHead = rack;   // schwenkt zusätzlich in der Azimut-Ebene zum Ziel
       g.add(box(0.5, 0.5, 0.5, body, 0.7, 0.45, -0.5));                      // Leitkabine
       break;
     }

@@ -160,10 +160,20 @@
   #buildbar summary::after { content:"+"; color:#5f7189; font-size:13px; line-height:1; }
   #buildbar details[open] summary::after { content:"-"; }
   #buildbar .grid { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:3px; }
-  .bbtn { display:grid; grid-template-columns:66px minmax(0,1fr); align-items:center; gap:7px; text-align:left; padding:5px 6px; cursor:pointer; line-height:1.15;
+  .bbtn { position:relative; display:grid; grid-template-columns:66px minmax(0,1fr); align-items:center; gap:7px; text-align:left; padding:5px 6px; cursor:pointer; line-height:1.15;
     min-width:0; min-height:68px; background:#161d27; color:var(--text); border:1px solid var(--line); border-radius:5px; font-size:11px; overflow:hidden; }
   .bbtn:hover { border-color:var(--accent); }
   .bbtn:disabled { opacity:.4; cursor:not-allowed; }
+  /* C&C-Baufortschritt: das vordere Item füllt den Knopf von unten nach oben. */
+  .bbtn .bprog { position:absolute; left:0; right:0; bottom:0; height:0; pointer-events:none;
+    background:linear-gradient(to top, rgba(70,200,255,.30), rgba(70,200,255,.10)); border-top:1px solid var(--accent);
+    transition:height .18s linear; opacity:0; }
+  .bbtn.producing .bprog { opacity:1; }
+  /* Warteschlangen-Anzahl als Zähler-Badge oben rechts. */
+  .bbtn .bqty { position:absolute; top:3px; right:3px; min-width:15px; height:15px; padding:0 3px; box-sizing:border-box;
+    display:none; align-items:center; justify-content:center; border-radius:8px; background:var(--accent); color:#04222e;
+    font-size:10px; font-weight:700; line-height:1; box-shadow:0 1px 3px rgba(0,0,0,.5); }
+  .bbtn.producing .bqty { display:flex; }
   .bbtn .bicon { width:20px; height:20px; flex:0 0 20px; display:grid; place-items:center;
     background:#0d141d; border:1px solid #2a3340; border-radius:4px; color:#eaf6ff; }
   .bbtn .bicon .svgicon { width:15px; height:15px; }
