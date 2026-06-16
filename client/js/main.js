@@ -102,6 +102,7 @@ async function boot() {
     ui.renderSpectatorbar();
     ui.renderMinimap(renderer);
     ui.checkWarnings();
+    ui.updateBuildProgress();   // C&C-Baufortschritt/Auftragszahl im Baumenü (ohne Neu-Render)
     audio.setWeather(net.env ? net.env.w : 'clear'); // Regen-Ambiente an Wetterlage koppeln
     renderer.updateWater(net.water);   // dynamische Flutflächen aktualisieren
     renderer.updateTerraform(net.terra); // terraformte Geländehöhen übernehmen

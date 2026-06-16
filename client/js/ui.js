@@ -931,12 +931,14 @@ export class UI {
       extra,
     ].filter(Boolean).join('\n');
     const esc = (s) => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-    const buttonHtml = ({ cls = '', attrs = '', icon, label, cost, title, previewType = '', previewKind = '' }) =>
+    const buttonHtml = ({ cls = '', attrs = '', icon, label, cost, title, previewType = '', previewKind = '', overlay = false }) =>
       `<button class="bbtn ${cls}" ${attrs} title="${esc(title)}" aria-label="${esc(label)}">`
       + (previewType && previewKind
         ? `<span class="bthumb" aria-hidden="true">${this.modelPreviewHtml(previewType, previewKind, 'buttonmodel')}<span class="bicon mini">${iconSvg(icon || 'box')}</span></span>`
         : `<span class="bicon" aria-hidden="true">${iconSvg(icon || 'box')}</span>`)
-      + `<span class="bmeta"><span class="blabel">${esc(label)}</span><span class="cost">${cost}</span></span></button>`;
+      + `<span class="bmeta"><span class="blabel">${esc(label)}</span><span class="cost">${cost}</span></span>`
+      + (overlay ? `<span class="bprog" aria-hidden="true"></span><span class="bqty" aria-hidden="true"></span>` : '')
+      + `</button>`;
     const canPay = (cost) => (me.res?.ore ?? 0) >= (cost.ore || 0)
       && (me.res?.materials ?? 0) >= (cost.materials || 0)
       && (me.res?.ore ?? 0) >= (cost.ore || 0)
@@ -989,6 +991,7 @@ export class UI {
           title: tooltip(def.label, def, def.upkeep ? `Unterhalt: ${costText(def.upkeep)}` : ''),
           previewType: 'unit',
           previewKind: kind,
+          overlay: true,
         });
       }
       html += '</div></details>';
@@ -1008,6 +1011,39 @@ export class UI {
     bar.querySelectorAll('[data-build]').forEach(b => b.onclick = () => { this.input.buildMode = b.dataset.build; this.renderBuildbar(); });
     bar.querySelectorAll('[data-terra]').forEach(b => b.onclick = () => { this.input.buildMode = '_terra_' + b.dataset.terra; this.renderBuildbar(); });
     bar.querySelectorAll('[data-produce]').forEach(b => b.onclick = () => this.net.cmd({ type: 'produce', building: +b.dataset.bid, kind: b.dataset.produce }));
+    this.updateBuildProgress();
+  }
+
+  // C&C-Baufortschritt: füllt das Fortschritts-Overlay des laufenden Items und blendet die
+  // Auftragszahl je Einheitentyp ein. Läuft häufig (UI-Intervall), ohne das Menü neu zu rendern —
+  // schreibt nur Stil/Text der vorhandenen Overlay-Elemente, damit Tooltips/offene Gruppen bleiben.
+  updateBuildProgress() {
+    const bar = document.getElementById('buildbar');
+    if (!bar) return;
+    const btns = bar.querySelectorAll('[data-produce]');
+    if (!btns.length) return;
+    // Das Produktionsgebäude des Baumenüs anhand der bid des ersten Knopfes nachschlagen.
+    const bid = +btns[0].dataset.bid;
+    const b = this.curEntity(bid);
+    const kinds = (b && b.prodKinds) || [];
+    const counts = {};
+    for (const k of kinds) counts[k] = (counts[k] || 0) + 1;
+    const frontKind = kinds[0];
+    for (const btn of btns) {
+      const kind = btn.dataset.produce;
+      const n = counts[kind] || 0;
+      const prog = btn.querySelector('.bprog');
+      const qty = btn.querySelector('.bqty');
+      if (n > 0) {
+        btn.classList.add('producing');
+        // Fortschritt nur am vorderen (gerade gebauten) Item zeigen; weitere warten bei 0.
+        if (prog) prog.style.height = (kind === frontKind ? Math.round((b.prodFront || 0) * 100) : 0) + '%';
+        if (qty) { qty.textContent = n > 1 ? String(n) : ''; qty.style.display = n > 1 ? 'flex' : 'none'; }
+      } else {
+        btn.classList.remove('producing');
+        if (prog) prog.style.height = '0%';
+      }
+    }
   }
 
   curEntity(id) { return this.net.entities(1).find(e => e.id === id); }

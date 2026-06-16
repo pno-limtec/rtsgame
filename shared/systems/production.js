@@ -28,7 +28,9 @@ export function stepProduction(world) {
     if (e.queue && e.queue.length) {
       if (e._powered === false) continue;
       const item = e.queue[0];
-      item.timeLeft -= DT * ratio;
+      // Mehrere gleichartige Produktionsgebäude beschleunigen die Fertigung (abnehmender Ertrag):
+      // 1×=1.0, 2×=1.5, 3×=2.0, … gedeckelt bei 3.0 — wie in C&C, wo zusätzliche Fabriken schneller bauen.
+      item.timeLeft -= DT * ratio * siblingSpeedFactor(world, e);
       if (item.timeLeft <= 0) {
         const domain = (world.data.units[item.kind] || {}).domain || 'land';
         const spot = freeSpot(world, e, domain);
@@ -41,6 +43,17 @@ export function stepProduction(world) {
       }
     }
   }
+}
+
+// Anzahl betriebsbereiter Produktionsgebäude desselben Typs → Geschwindigkeitsfaktor mit
+// abnehmendem Ertrag (jedes weitere Gebäude +0.5, gedeckelt bei 3.0).
+function siblingSpeedFactor(world, e) {
+  let count = 0;
+  for (const o of world.entities.values()) {
+    if (o.etype === 'building' && !o.dead && o.owner === e.owner && o.kind === e.kind
+      && o.buildProgress >= 1 && o._powered !== false) count++;
+  }
+  return 1 + Math.min(2, Math.max(0, count - 1) * 0.5);
 }
 
 function onBuildingComplete(world, e) {
