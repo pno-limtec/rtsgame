@@ -5355,7 +5355,7 @@ export class Renderer {
       this.waterMat.opacity = WATER_NIGHT_OPACITY_MIN + d * 0.28 + this._waterStorm * 0.04;
       // Himmelsspiegelung im Wasser-Shader nachführen: Himmelsfarbe + Stärke (tagsüber mehr).
       if (this.waterMat.userData.uSky) this.waterMat.userData.uSky.value.copy(sky);
-      if (this.waterMat.userData.uSkyAmt) this.waterMat.userData.uSkyAmt.value = 0.30 + d * 0.55;
+      if (this.waterMat.userData.uSkyAmt) this.waterMat.userData.uSkyAmt.value = 0.18 + d * 0.34;
     }
     if (this.floodWaterMat) {
       const farFloodFade = this.camDist <= 150 ? 1 : Math.max(0, 1 - (this.camDist - 150) / 95);
@@ -5783,9 +5783,13 @@ function makeWaterMaterial() {
       '#include <dithering_fragment>',
       `#include <dithering_fragment>
       vec3 vDir = normalize(cameraPosition - vWaterWPos);
-      float fres = pow(1.0 - clamp(vDir.y, 0.0, 1.0), 3.2);   // 0 = von oben, 1 = streifend
-      gl_FragColor.rgb = mix(gl_FragColor.rgb, uSky, fres * uSkyAmt);
-      gl_FragColor.a = clamp(gl_FragColor.a + fres * 0.5 * uSkyAmt, 0.0, 0.96);`,
+      // Schärferer Fresnel (höherer Exponent) → Himmelsspiegelung nur am SEHR streifenden Saum,
+      // nicht über große, im Kippwinkel betrachtete Tiefwasser-/Meerflächen (die sonst himmelblau
+      // ausbleichen). Zusätzlich gedeckelt, damit das tiefe Wasser seine dunkle Eigenfarbe behält.
+      float fres = pow(1.0 - clamp(vDir.y, 0.0, 1.0), 5.0);   // 0 = von oben, 1 = streifend
+      float skyMix = min(0.42, fres * uSkyAmt);
+      gl_FragColor.rgb = mix(gl_FragColor.rgb, uSky, skyMix);
+      gl_FragColor.a = clamp(gl_FragColor.a + fres * 0.32 * uSkyAmt, 0.0, 0.96);`,
     );
   };
   return mat;
