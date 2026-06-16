@@ -34,6 +34,7 @@ const FLOOD_SURFACE_DEPTH = 0.024;  // ab dieser Tiefe bekommt auch dünnes Abla
 const WET_GROUND_MIN_DEPTH = 0.004;     // schon hauchdünnes Ablaufwasser färbt den Boden nass (entlang der Partikelströme)
 const WET_GROUND_FULL_DEPTH = 0.036;
 const WET_GROUND_NEIGHBOR_DEPTH = 0.008;
+const WET_GROUND_BANK_MARGIN = 0.02;    // wie weit über den Wasserspiegel die Nass-Färbung noch greifen darf (sonst türkise Uferböschung über dem Wasser)
 const WATER_EDGE_THRESHOLD = 0.46;
 const FLOOD_VIS_SHOW = 0.42;   // niedriger → Ablaufwasser blendet früher und weicher ein (smoother)
 const FLOOD_VIS_HIDE = 0.22;
@@ -2065,38 +2066,65 @@ export class Renderer {
     return geo;
   }
 
-  // Brücken-Deckhöhen: damit eine Brücke eine SCHLUCHT in angemessener Höhe überspannt (statt in den
-  // Graben zu tauchen), liegt das Deck auf Höhe der Uferränder. Pro Brückenzelle die maximale Boden-
-  // höhe der angrenzenden Nicht-Brückenzellen (= Ufer) ermitteln und über die zusammenhängende Brücke
-  // verteilen (max), sodass das Deck flach auf Randniveau verläuft; nie unter Wasser-/Bodenfläche.
+  // Brücken-Deckhöhen: Eine Brücke ist eine DURCHGEHENDE GERADE FLÄCHE, deren Höhe von ihren beiden
+  // Endpunkten (den Ufern) bestimmt wird. Je zusammenhängender Brücke werden die zwei am weitesten
+  // entfernten Zellen als Spannweiten-Enden gewählt; ihre Uferhöhe (rim) bildet Start-/Endhöhe. Jede
+  // Deckzelle erhält die LINEAR interpolierte Höhe entlang dieser Achse → flaches bzw. gleichmäßig
+  // geneigtes Deck statt terrain-folgender Beulen. Nie unter Wasser-/Bodenfläche.
   _bridgeDeckHeights(cells, offset) {
     const set = new Set(cells);
-    const deck = new Map();
     const N8 = [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [1, -1], [-1, 1], [-1, -1]];
+    // Uferhöhe je Zelle: höchster Boden einer angrenzenden Nicht-Brückenzelle (= Ufer/Rand).
+    const rim = new Map();
     for (const idx of cells) {
       const gx = idx % this.mapW, gy = (idx / this.mapW) | 0;
-      let rim = -Infinity;
+      let r = -Infinity;
       for (const [dx, dy] of N8) {
         const nx = gx + dx, ny = gy + dy;
         if (nx < 0 || ny < 0 || nx >= this.mapW || ny >= this.mapH) continue;
-        if (set.has(ny * this.mapW + nx)) continue;       // Brückenzelle → kein Ufer
-        rim = Math.max(rim, this.heightAt(nx * TILE, ny * TILE));
+        if (set.has(ny * this.mapW + nx)) continue;
+        r = Math.max(r, this.heightAt(nx * TILE, ny * TILE));
       }
-      deck.set(idx, rim);
+      rim.set(idx, r);
     }
-    // Randhöhe über die Brücke verteilen (mehrere Durchläufe bis stabil) → flaches Deck.
-    for (let pass = 0; pass < 64; pass++) {
-      let changed = false;
-      for (const idx of cells) {
-        const gx = idx % this.mapW, gy = (idx / this.mapW) | 0;
-        let best = deck.get(idx);
+    // Zusammenhangskomponenten (8er-Nachbarschaft) bestimmen.
+    const comp = new Map(); let cid = 0; const groups = [];
+    for (const idx of cells) {
+      if (comp.has(idx)) continue;
+      const stack = [idx], group = []; comp.set(idx, cid);
+      while (stack.length) {
+        const c = stack.pop(); group.push(c);
+        const gx = c % this.mapW, gy = (c / this.mapW) | 0;
         for (const [dx, dy] of N8) {
           const ni = (gy + dy) * this.mapW + (gx + dx);
-          if (set.has(ni)) { const v = deck.get(ni); if (v > best) best = v; }
+          if (set.has(ni) && !comp.has(ni)) { comp.set(ni, cid); stack.push(ni); }
         }
-        if (best > deck.get(idx)) { deck.set(idx, best); changed = true; }
       }
-      if (!changed) break;
+      groups.push(group); cid++;
+    }
+    const endHeight = (idx) => { const r = rim.get(idx); return r > -Infinity ? r : this.heightAt((idx % this.mapW) * TILE, ((idx / this.mapW) | 0) * TILE); };
+    const deck = new Map();
+    for (const group of groups) {
+      // Spannweiten-Enden = das am weitesten entfernte Zellenpaar der Komponente.
+      let A = group[0], B = group[0], bestD = -1;
+      for (let i = 0; i < group.length; i++) {
+        const ax = group[i] % this.mapW, ay = (group[i] / this.mapW) | 0;
+        for (let j = i + 1; j < group.length; j++) {
+          const bx = group[j] % this.mapW, by = (group[j] / this.mapW) | 0;
+          const d = (ax - bx) ** 2 + (ay - by) ** 2;
+          if (d > bestD) { bestD = d; A = group[i]; B = group[j]; }
+        }
+      }
+      const ax = A % this.mapW, ay = (A / this.mapW) | 0;
+      const bx = B % this.mapW, by = (B / this.mapW) | 0;
+      const ha = endHeight(A), hb = endHeight(B);
+      const vx = bx - ax, vy = by - ay; const vlen2 = vx * vx + vy * vy || 1;
+      for (const idx of group) {
+        const gx = idx % this.mapW, gy = (idx / this.mapW) | 0;
+        let t = ((gx - ax) * vx + (gy - ay) * vy) / vlen2;
+        t = t < 0 ? 0 : t > 1 ? 1 : t;
+        deck.set(idx, ha + (hb - ha) * t);   // gerade Fläche zwischen den Endpunkten
+      }
     }
     // Deck nie unter die lokale Wasser-/Bodenfläche; Boden für die Pfeiler merken.
     const out = new Map();
@@ -2105,8 +2133,7 @@ export class Renderer {
       const x = gx * TILE, z = gy * TILE;
       const ground = this.heightAt(x, z);
       const base = this._overlayY(x, z, offset, true);
-      const rim = deck.get(idx);
-      const top = Math.max(base, (rim > -Infinity ? rim + offset : base));
+      const top = Math.max(base, deck.get(idx) + offset);
       out.set(idx, { x, z, top, ground });
     }
     return out;
@@ -2324,14 +2351,20 @@ export class Renderer {
         const wet = this._wetAmount[idx];
         if (wet <= 0.018) continue;
         const x = idx % w, y = (idx / w) | 0;
+        // Wasserspiegel dieser nassen Zelle (Rohhöhe). Die Nass-Färbung darf NICHT auf Nachbarn
+        // klettern, die spürbar darüber liegen — sonst werden trockene Uferböschungen türkis
+        // eingefärbt und ragen als blauer Saum über die Wasseroberfläche hinaus.
+        const wetSurf = (this.height[idx] || 0) + (this.waterDepth[idx] || 0) + WET_GROUND_BANK_MARGIN;
         for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
           const nx = x + dx, ny = y + dy;
           if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
+          const j = ny * w + nx;
+          if ((this.height[j] || 0) > wetSurf) continue; // Böschung über dem Wasser bleibt trocken
           const d = Math.hypot(dx, dy);
           const weight = d < 0.1 ? 1 : d < 1.1 ? 0.42 : 0.16;
           // Nass-Färbung in Richtung Wasserton (dunkles Türkis) — entlang der Abflussströme deutlich sichtbar.
           const f = Math.min(0.66, wet * 0.78 * weight);
-          const o = (ny * w + nx) * 3;
+          const o = j * 3;
           base[o] = base[o] * (1 - f) + 0.10 * f;
           base[o + 1] = base[o + 1] * (1 - f) + 0.26 * f;
           base[o + 2] = base[o + 2] * (1 - f) + 0.28 * f;
