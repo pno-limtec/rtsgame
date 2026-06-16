@@ -1059,17 +1059,6 @@ function manageRecovery(world, player, s, applyCommand) {
     if (fac) { applyCommand(world, { type: 'produce', building: fac.id, kind: 'tractor' }, player.id); return; }
   }
 
-  // Brückenleger: einer, sobald die KI tatsächlich Brücken baut (s.bridges≥1 — in fast jeder Partie,
-  // coverage.js zeigt 9–17 Brücken/Partie). Er war eine TOTE Bauoption (Ziel C: bridgelayer kam nie vor),
-  // obwohl die KI ständig Querungen baut. Er hat 'construct' (kein weapon → zählt nicht gegen
-  // VEHICLE_TARGET) → landet im Bautrupp-Pool und kann von den laufenden Brücken-/Routen-`build`-Befehlen
-  // mit übernommen werden (Ziel D: er WIRKT an der Infrastruktur, statt nur dazustehen). Gegated auf eine
-  // bestehende Armee + freie Fabrik → kein Verdrängen des Siegpfads.
-  if (!hasKind('bridgelayer') && s.bridges >= 1 && s.army.length >= 4 && can('bridgelayer')) {
-    const fac = free('factory');
-    if (fac) { applyCommand(world, { type: 'produce', building: fac.id, kind: 'bridgelayer' }, player.id); return; }
-  }
-
   // Vorhandene Traktoren auf nahe verlassene Fahrzeuge ansetzen (nur im Umkreis der eigenen Basis,
   // kein Selbstmord-Trip ins Feindgebiet). Verlassene Fahrzeuge sind owner -1 (neutral) → frei bergbar.
   const tractors = s.units.filter(u => u.kind === 'tractor' && u.abilities?.includes('tow') && !u.abandoned);
