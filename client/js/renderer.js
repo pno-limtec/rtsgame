@@ -4351,6 +4351,26 @@ export class Renderer {
     }
   }
 
+  // Direkter Treffer eines Geschosses OHNE Sprengwirkung (Gewehr/MG/Autokanone/Panzerabwehr/
+  // Flak/Rakete/Torpedo/Turm): scharfer Funkenblitz + spritzende Funken + ein kurzer Staubtupfer
+  // am Einschlag. BEWUSST KEIN Rauchpilz / Trümmerregen — das bleibt den Sprenggeschossen
+  // (splash≥1.2) vorbehalten. So liest sich ein Einschlag eindeutig als Treffer (Ziel E), und
+  // schnelles Dauerfeuer überflutet das Bild nicht mehr mit Explosionsrauch.
+  spawnImpact(x, y, z, scale = 1) {
+    const cy = y + 1;
+    // greller, sehr kurzer Einschlag-Funkenblitz
+    this._sprite(0xfff1c2, x, cy, z, 0.7 * scale, 0.09, { additive: true, opacity: 1 });
+    // ein paar Funken spritzen nach außen/oben
+    const sparks = Math.min(5, 2 + Math.round(scale));
+    for (let i = 0; i < sparks && this._canSpawnEffect(); i++) {
+      const a = (i / sparks) * Math.PI * 2 + scale * 1.3;
+      this._sprite(0xffc24a, x, cy, z, 0.13, 0.18 + Math.random() * 0.12,
+        { additive: true, vx: Math.cos(a) * (3 + Math.random() * 2.5), vz: Math.sin(a) * (3 + Math.random() * 2.5), vy: 1.4 + Math.random() * 1.6, opacity: 0.95 });
+    }
+    // kurzer aufgewirbelter Staubtupfer am Boden, bleicht schnell aus (kein aufsteigender Rauch)
+    this._sprite(0x8c8071, x, cy - 0.35, z, 0.55 * scale, 0.34, { grow: 1.3, vy: 0.55, opacity: 0.42 });
+  }
+
   spawnWashout(ev, sourceGroup = null) {
     const x = ev.x, z = ev.y;
     const info = this._waterInfoAt(x, z);
@@ -4884,11 +4904,19 @@ export class Renderer {
     for (const ev of events) {
       const vol = this._volAt(ev.x, ev.y);
       if (ev.type === 'explosion') {
-        const sc = 1 + (ev.splash || 0) * 0.6;
-        this.spawnExplosion(ev.x, this.heightAt(ev.x, ev.y), ev.y, sc);
-        // Große Waffen (ordentlicher Splash) hinterlassen einen bleibenden Krater am Boden.
-        if ((ev.splash || 0) >= 1.4 && !this._isSeaWorldPoint(ev.x, ev.y)) this.spawnCrater(ev.x, ev.y, 0.7 + (ev.splash || 0) * 0.35);
-        if (audio) audio.explosion(sc, vol);
+        const splash = ev.splash || 0;
+        if (splash >= 1.2) {
+          // Sprenggeschoss (Panzer/Artillerie/Rakete/Schiffsgeschütz/Bombe): voller Rauchpilz.
+          const sc = 1 + splash * 0.6;
+          this.spawnExplosion(ev.x, this.heightAt(ev.x, ev.y), ev.y, sc);
+          // Große Waffen (ordentlicher Splash) hinterlassen einen bleibenden Krater am Boden.
+          if (splash >= 1.4 && !this._isSeaWorldPoint(ev.x, ev.y)) this.spawnCrater(ev.x, ev.y, 0.7 + splash * 0.35);
+          if (audio) audio.explosion(sc, vol);
+        } else {
+          // Direkter Treffer ohne Sprengwirkung: scharfer Funken-/Staubeinschlag statt Rauchpilz.
+          // Kein Explosions-Sound — der Schuss-Sound (fire-Event) trägt das Kaliber bereits.
+          this.spawnImpact(ev.x, this.heightAt(ev.x, ev.y), ev.y, 1);
+        }
       } else if (ev.type === 'fire') {
         this.spawnTracer(ev.x, this.heightAt(ev.x, ev.y), ev.y, ev.tx, this.heightAt(ev.tx, ev.ty), ev.ty);
         this.spawnShotParticles(ev.x, ev.y, ev.tx, ev.ty, ev.kind);
