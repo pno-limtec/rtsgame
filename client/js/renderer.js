@@ -1178,6 +1178,7 @@ export class Renderer {
     geo.setAttribute('uv', new THREE.Float32BufferAttribute([], 2));
     geo.setAttribute('color', new THREE.Float32BufferAttribute([], 3));
     geo.setAttribute('aSea', new THREE.Float32BufferAttribute([], 1));
+    geo.setAttribute('aFlow', new THREE.Float32BufferAttribute([], 1));
     geo.setIndex([]);
     return geo;
   }
@@ -1431,7 +1432,7 @@ export class Renderer {
       return;
     }
 
-    const positions = [], uvs = [], colors = [], seaVals = [], indices = [];
+    const positions = [], uvs = [], colors = [], seaVals = [], flowVals = [], indices = [];
     const seaIndices = [];
     const fw = w + 1, fh = h + 1, fn = fw * fh;
     const cover = new Float32Array(fn);
@@ -1576,6 +1577,7 @@ export class Renderer {
       colors.push(c.r, c.g, c.b);
       const seaVal = Math.max(0, Math.min(1, p.sea));
       seaVals.push(seaVal);
+      flowVals.push(Math.min(1, fl)); // Strömungsstärke pro Vertex (für Wasser V2: gerichtete Strömungslinien)
       if (seaVal > 0.35) seaIndices.push(vx);
       return vx;
     };
@@ -1620,6 +1622,7 @@ export class Renderer {
     geo.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
     geo.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
     geo.setAttribute('aSea', new THREE.Float32BufferAttribute(seaVals, 1));
+    geo.setAttribute('aFlow', new THREE.Float32BufferAttribute(flowVals, 1));
     geo.setIndex(indices);
     geo.computeBoundingSphere();
     const old = this.waterMesh.geometry;

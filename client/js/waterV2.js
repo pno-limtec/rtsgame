@@ -13,10 +13,12 @@ const VERT = /* glsl */`
   uniform float uTime;
   uniform float uWaveAmp;      // Wellen-Amplitude (Welt-Einheiten) für offenes Meer
   attribute float aSea;        // 0..1 Meeresanteil (steuert Wellenstärke)
+  attribute float aFlow;       // 0..1 Strömungsstärke (für gerichtete Strömungslinien)
   attribute vec3 color;        // tiefenabhängige Grundfarbe (vom Renderer)
   varying vec3 vWorld;
   varying vec3 vNormalW;
   varying float vSea;
+  varying float vFlow;
   varying vec3 vColor;
   varying float vCrest;        // normierte Wellenhöhe (für Schaumkronen)
   varying vec2 vUv;
@@ -37,6 +39,7 @@ const VERT = /* glsl */`
   void main() {
     vColor = color;
     vSea = aSea;
+    vFlow = aFlow;
     vUv = uv;
     vec4 wpos = modelMatrix * vec4(position, 1.0);
     float amp = uWaveAmp * mix(0.12, 1.0, clamp(aSea, 0.0, 1.0)); // Binnenwasser ruhiger
@@ -61,6 +64,7 @@ const FRAG = /* glsl */`
   varying vec3 vWorld;
   varying vec3 vNormalW;
   varying float vSea;
+  varying float vFlow;
   varying vec3 vColor;
   varying float vCrest;
   varying vec2 vUv;
@@ -68,16 +72,19 @@ const FRAG = /* glsl */`
   float luma(vec3 c) { return dot(c, vec3(0.299, 0.587, 0.114)); }
 
   // Feine Detail-Normale aus mehreren hochfrequenten Wellen (analytische Ableitung) → sichtbare
-  // Kräuselung + Glitzern. Zwei Geschwindigkeiten, damit das Muster nicht starr wirkt.
+  // Kräuselung + Glitzern. Domain-Warping (eine langsame Welle versetzt die Abtastposition) bricht
+  // die Regelmäßigkeit auf, sodass kein gitterartiges Muster entsteht. Frequenzen nicht-harmonisch.
   vec3 detailNormal(vec2 p, float t, float strength) {
+    // langsamer Versatz → organischeres, weniger regelmäßiges Muster
+    p += 0.7 * vec2(sin(p.y * 0.21 + t * 0.5), cos(p.x * 0.19 - t * 0.4));
     vec2 g = vec2(0.0);
-    vec2 e1 = normalize(vec2(0.9, 0.2));  float k1 = 1.1, s1 = 2.4, a1 = 1.0;
+    vec2 e1 = normalize(vec2(0.92, 0.18));  float k1 = 1.07, s1 = 2.3, a1 = 1.0;
     g += e1 * cos(dot(p, e1) * k1 + t * s1) * a1 * k1;
-    vec2 e2 = normalize(vec2(-0.2, 1.0)); float k2 = 1.8, s2 = 3.1, a2 = 0.7;
+    vec2 e2 = normalize(vec2(-0.27, 0.96)); float k2 = 1.73, s2 = 3.05, a2 = 0.7;
     g += e2 * cos(dot(p, e2) * k2 + t * s2) * a2 * k2;
-    vec2 e3 = normalize(vec2(0.6, -0.7)); float k3 = 3.1, s3 = 4.2, a3 = 0.45;
+    vec2 e3 = normalize(vec2(0.61, -0.79)); float k3 = 2.91, s3 = 4.1, a3 = 0.45;
     g += e3 * cos(dot(p, e3) * k3 + t * s3) * a3 * k3;
-    vec2 e4 = normalize(vec2(-0.8, -0.5)); float k4 = 5.0, s4 = 5.6, a4 = 0.25;
+    vec2 e4 = normalize(vec2(-0.83, -0.52)); float k4 = 4.67, s4 = 5.5, a4 = 0.25;
     g += e4 * cos(dot(p, e4) * k4 - t * s4) * a4 * k4;
     return normalize(vec3(-g.x * strength, 1.0, -g.y * strength));
   }
@@ -109,9 +116,18 @@ const FRAG = /* glsl */`
     float spec = pow(ndh, 240.0) * 3.4 + pow(ndh, 30.0) * 0.40;
     col += uSunColor * spec * uDaylight;
 
-    // Strömungs-Kräuselung: dezente helle Linien wandern entlang der (strömungsausgerichteten) UV.
-    float flow = sin(vUv.y * 26.0 - uTime * 2.2) * 0.5 + 0.5;
-    col += smoothstep(0.86, 1.0, flow) * (1.0 - sea) * 0.05 * uDaylight;
+    // STRÖMUNG (Flow-Sim-Visualisierung): die UVs sind strömungsausgerichtet (uv.y = Fließrichtung).
+    // Wo das Sim-Flussfeld stark ist (vFlow), wandern helle Schaum-/Strömungslinien sichtbar mit der
+    // Strömung talwärts — Tempo und Stärke skalieren mit der Strömungsstärke. So sieht man, WO und
+    // WIE SCHNELL Wasser fließt (abläuft/zuläuft).
+    float flowStr = clamp(vFlow, 0.0, 1.0);
+    float scroll = vUv.y * 22.0 - uTime * (1.6 + flowStr * 3.5);
+    float streak = sin(scroll) * 0.5 + 0.5;
+    streak = smoothstep(0.62, 1.0, streak) * pow(flowStr, 0.6);
+    // feinere zweite Lage gegen Regelmäßigkeit
+    float streak2 = smoothstep(0.7, 1.0, sin(vUv.y * 41.0 - uTime * (2.4 + flowStr * 4.0) + vUv.x * 6.0) * 0.5 + 0.5);
+    float current = clamp(streak * 0.7 + streak2 * 0.3, 0.0, 1.0) * flowStr;
+    col = mix(col, vec3(0.86, 0.93, 0.98), current * 0.5);
 
     // Uferschaum: NUR an der echten Wasserlinie (dünnstes/hellstes Wasser) + Meereskämme. Sonst
     // würde flaches Wasser (Flüsse) flächig weiß ausbleichen.
@@ -121,7 +137,7 @@ const FRAG = /* glsl */`
                      smoothstep(0.80, 1.0, vCrest) * smoothstep(0.55, 0.92, sea) * 0.45);
     col = mix(col, vec3(0.92, 0.97, 1.0), clamp(foam, 0.0, 0.8));
 
-    float a = clamp(uOpacity + fres * 0.18 + foam * 0.3, 0.0, 0.99);
+    float a = clamp(uOpacity + fres * 0.18 + foam * 0.3 + current * 0.2, 0.0, 0.99);
     gl_FragColor = vec4(col, a);
   }
 `;
