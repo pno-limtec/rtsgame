@@ -1466,24 +1466,16 @@ export class Renderer {
       cornerSea[key] = waterWeight > 0 ? seaSum / waterWeight : (seaVis[nearest] || 0);
     }
 
-    // Eckdeckung räumlich glätten: die Marching-Squares-Kontur folgt sonst hart dem Zellraster und
-    // franst treppig/eckig aus (einzelne Zellen ragen als Quadrate heraus). Mehrere flache
-    // Glättungsdurchläufe (Box-naher Kernel) runden die Iso-Linie spürbar, ohne die Wasserfläche
-    // nennenswert zu verschieben. Danach den Kontrast leicht zurückholen, damit die Fläche nicht
-    // insgesamt schrumpft (Schwellwert-Erhalt um 0.5).
-    for (let pass = 0; pass < 4; pass++) {
+    // Eckdeckung leicht räumlich glätten (sanft, damit dünne Flüsse nicht erodieren/zerfallen).
+    // Die eigentliche Entzackung macht die Unterteilung der Randzellen weiter unten (mehr Auflösung).
+    for (let pass = 0; pass < 2; pass++) {
       const src = cover.slice();
       for (let cy = 1; cy < fh - 1; cy++) for (let cx = 1; cx < fw - 1; cx++) {
         const k = cy * fw + cx;
-        cover[k] = src[k] * 0.25
-          + (src[k - 1] + src[k + 1] + src[k - fw] + src[k + fw]) * 0.125
-          + (src[k - 1 - fw] + src[k + 1 - fw] + src[k - 1 + fw] + src[k + 1 + fw]) * 0.0625;
+        cover[k] = src[k] * 0.36
+          + (src[k - 1] + src[k + 1] + src[k - fw] + src[k + fw]) * 0.13
+          + (src[k - 1 - fw] + src[k + 1 - fw] + src[k - 1 + fw] + src[k + 1 + fw]) * 0.03;
       }
-    }
-    // Gegen das Schrumpfen durch starke Glättung: Werte um die Schwelle herum wieder spreizen, damit
-    // die Wasserkante an Ort und Stelle bleibt und nur die Zacken weggerundet werden.
-    for (let k = 0; k < cover.length; k++) {
-      cover[k] = Math.max(0, Math.min(1, WATER_EDGE_THRESHOLD + (cover[k] - WATER_EDGE_THRESHOLD) * 1.6));
     }
 
     const corner = (cx, cy) => {
@@ -1553,17 +1545,40 @@ export class Renderer {
       return vx;
     };
 
-    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
-      const poly = clipWaterPoly([
-        corner(x, y),
-        corner(x + 1, y),
-        corner(x + 1, y + 1),
-        corner(x, y + 1),
-      ]);
-      if (poly.length < 3) continue;
+    const emitPoly = (poly) => {
+      if (poly.length < 3) return;
       const base = positions.length / 3;
       for (const p of poly) pushWaterVertex(p);
       for (let k = 1; k < poly.length - 1; k++) indices.push(base, base + k, base + k + 1);
+    };
+    // Eckpunkt-Attribute linear mischen (für die Unterteilung der Randzellen).
+    const blendPt = (a, b, t) => ({
+      x: a.x + (b.x - a.x) * t, z: a.z + (b.z - a.z) * t,
+      v: a.v + (b.v - a.v) * t, y: a.y + (b.y - a.y) * t,
+      fx: a.fx + (b.fx - a.fx) * t, fz: a.fz + (b.fz - a.fz) * t,
+      depth: a.depth + (b.depth - a.depth) * t, sea: a.sea + (b.sea - a.sea) * t,
+    });
+    const SUB = 3; // Unterteilung der Randzellen → glattere Uferkontur (mehr Auflösung als das Zellraster)
+    const TH = WATER_EDGE_THRESHOLD;
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+      const c00 = corner(x, y), c10 = corner(x + 1, y), c11 = corner(x + 1, y + 1), c01 = corner(x, y + 1);
+      const inCount = (c00.v >= TH ? 1 : 0) + (c10.v >= TH ? 1 : 0) + (c11.v >= TH ? 1 : 0) + (c01.v >= TH ? 1 : 0);
+      if (inCount === 0) continue;                       // komplett trocken → nichts
+      if (inCount === 4) { emitPoly([c00, c10, c11, c01]); continue; } // komplett nass → ein Quad
+      // Randzelle: in SUB×SUB Unterzellen zerlegen und jede einzeln an der Iso-Linie clippen.
+      // Bilineare Interpolation der Eckwerte liefert die Uferkante in feinerer Auflösung → weniger Zacken.
+      for (let j = 0; j < SUB; j++) {
+        const vTop = j / SUB, vBot = (j + 1) / SUB;
+        const lT = blendPt(c00, c01, vTop), lB = blendPt(c00, c01, vBot);
+        const rT = blendPt(c10, c11, vTop), rB = blendPt(c10, c11, vBot);
+        for (let i = 0; i < SUB; i++) {
+          const uL = i / SUB, uR = (i + 1) / SUB;
+          emitPoly(clipWaterPoly([
+            blendPt(lT, rT, uL), blendPt(lT, rT, uR),
+            blendPt(lB, rB, uR), blendPt(lB, rB, uL),
+          ]));
+        }
+      }
     }
 
     const geo = new THREE.BufferGeometry();
