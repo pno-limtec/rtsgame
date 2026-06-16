@@ -90,38 +90,38 @@ const FRAG = /* glsl */`
     vec3 V = normalize(cameraPosition - vWorld);
     float fres = pow(1.0 - max(dot(N, V), 0.0), 4.0);
 
-    // Tiefenhinweis aus der Grundfarbe: helleres Wasser = flacher.
-    float shallow = smoothstep(0.30, 0.52, luma(vColor));
+    // Grundfarbe; ganz flaches Wasser nur SEHR dezent aufhellen (Untergrund schimmert durch).
+    float shallowTint = smoothstep(0.40, 0.60, luma(vColor));
+    vec3 col = vColor + shallowTint * vec3(0.01, 0.025, 0.03);
 
-    // Grundfarbe + leicht aufgehelltes Flachwasser (Untergrund schimmert durch).
-    vec3 col = vColor + shallow * vec3(0.02, 0.05, 0.06);
-
-    // Sichtbare Kräuselung: leichte diffuse Helligkeitsmodulation nach Sonnenstand — geneigte
-    // Wellenflanken fangen Licht, sodass die Oberfläche auch ohne Glanz strukturiert wirkt.
+    // Sichtbare Kräuselung: dezente diffuse Helligkeitsmodulation nach Sonnenstand — geneigte
+    // Wellenflanken fangen Licht, sodass die Oberfläche strukturiert wirkt, ohne auszubleichen.
     float diff = dot(N, normalize(uSunDir + vec3(0.0, 0.6, 0.0))) * 0.5 + 0.5;
-    col *= 0.82 + diff * 0.42 * (0.5 + 0.5 * uDaylight);
+    col *= 0.90 + diff * 0.22 * (0.5 + 0.5 * uDaylight);
 
     // Fresnel-Himmelsspiegelung mit Horizont-Verlauf (am Streifwinkel heller/horizontnah).
     vec3 skyRefl = mix(uSky, uSkyHorizon, clamp(fres, 0.0, 1.0));
-    col = mix(col, skyRefl, clamp(fres, 0.0, 1.0) * (0.45 + sea * 0.15));
+    col = mix(col, skyRefl, clamp(fres, 0.0, 1.0) * (0.40 + sea * 0.18));
 
     // Sonnen-Specular: scharfer Kern (Glitzern) + breiter Schein.
     vec3 Hh = normalize(uSunDir + V);
     float ndh = max(dot(N, Hh), 0.0);
-    float spec = pow(ndh, 240.0) * 3.4 + pow(ndh, 30.0) * 0.45;
+    float spec = pow(ndh, 240.0) * 3.4 + pow(ndh, 30.0) * 0.40;
     col += uSunColor * spec * uDaylight;
 
-    // Strömungs-Kräuselung: helle Linien wandern entlang der (strömungsausgerichteten) UV.
+    // Strömungs-Kräuselung: dezente helle Linien wandern entlang der (strömungsausgerichteten) UV.
     float flow = sin(vUv.y * 26.0 - uTime * 2.2) * 0.5 + 0.5;
-    float ripple = smoothstep(0.82, 1.0, flow) * (1.0 - sea) * 0.10 * uDaylight;
-    col += ripple;
+    col += smoothstep(0.86, 1.0, flow) * (1.0 - sea) * 0.05 * uDaylight;
 
-    // Uferschaum: am Flachwasser auf den Wellenkämmen; Meereskämme zusätzlich.
-    float crestFoam = smoothstep(0.55, 1.0, vCrest);
-    float foam = max(shallow * crestFoam * 0.9, smoothstep(0.78, 1.0, vCrest) * smoothstep(0.5, 0.9, sea) * 0.5);
-    col = mix(col, vec3(0.92, 0.97, 1.0), clamp(foam, 0.0, 0.85));
+    // Uferschaum: NUR an der echten Wasserlinie (dünnstes/hellstes Wasser) + Meereskämme. Sonst
+    // würde flaches Wasser (Flüsse) flächig weiß ausbleichen.
+    float shoreEdge = smoothstep(0.52, 0.66, luma(vColor));
+    float crestFoam = smoothstep(0.5, 1.0, vCrest);
+    float foam = max(shoreEdge * (0.4 + 0.6 * crestFoam) * 0.8,
+                     smoothstep(0.80, 1.0, vCrest) * smoothstep(0.55, 0.92, sea) * 0.45);
+    col = mix(col, vec3(0.92, 0.97, 1.0), clamp(foam, 0.0, 0.8));
 
-    float a = clamp(uOpacity + fres * 0.20 + foam * 0.35, 0.0, 0.99);
+    float a = clamp(uOpacity + fres * 0.18 + foam * 0.3, 0.0, 0.99);
     gl_FragColor = vec4(col, a);
   }
 `;
