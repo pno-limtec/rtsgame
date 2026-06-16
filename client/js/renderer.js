@@ -8,6 +8,10 @@ import { createWaterV2, updateWaterV2 } from './waterV2.js';
 
 const HEIGHT_SCALE = 16;   // Weltmeter pro Höhen-Einheit (0..1) — imposantere Berge
 const TILE = 2;
+// „Null-Level": fester Basisboden unter der ganzen Karte. Liegt UNTER dem tiefsten möglichen
+// Gelände (min. Höhe 0.02 → 0.32 Welt), damit das Geländemesh in tiefen Löchern selbst der
+// sichtbare Boden ist (kein verdeckender Skirt) und die Randwände bis hierher hinabreichen.
+const WORLD_BASE_Y = -2.0;
 export const CAMERA_TILT_MIN = 0.45;
 export const CAMERA_TILT_MAX = 1.25;
 const VET_COLORS = [0xcd7f32, 0xc0c0c0, 0xffd54a]; // Veteranen-Rang: Bronze, Silber, Gold
@@ -597,16 +601,47 @@ export class Renderer {
     this.seaY = waterY;
     this._rebuildWaterMesh(true);
 
-    // Umgebungs-„Skirt": riesige Ozeanfläche rund um die Karte, damit am Kartenrand kein
-    // schwarzes Loch klafft. Deutlich unter der Seefläche — kein Z-Fighting in der Distanz.
+    // Umgebungs-„Skirt" = Basisboden (Null-Level) rund um und unter der Karte. Liegt jetzt unter
+    // dem tiefsten Gelände (WORLD_BASE_Y), damit er das Gelände in tiefen Löchern NICHT mehr verdeckt
+    // (dort ist das Geländemesh selbst der Boden) und am Kartenrand kein Loch/Void bleibt.
     const skirtGeo = new THREE.PlaneGeometry(w * TILE * 14, h * TILE * 14);
     skirtGeo.rotateX(-Math.PI / 2);
     this.skirtMat = new THREE.MeshLambertMaterial({ color: DEEP_SEA_SKIRT_COLOR });
     const skirt = new THREE.Mesh(skirtGeo, this.skirtMat);
-    skirt.position.set(w * TILE / 2, waterY - 1.4, h * TILE / 2);
+    skirt.position.set(w * TILE / 2, WORLD_BASE_Y, h * TILE / 2);
     skirt.receiveShadow = true;
     this.scene.add(skirt);
     this.skirtMesh = skirt;
+
+    // Randwände: schließen die Kartenseiten von der Geländekante bis zum Basisboden, damit die Karte
+    // wie ein fester Block auf dem Null-Level sitzt (kein „schwebender" Rand, kein Void mit Wasser).
+    {
+      const wp = [], wc = [], wi = [];
+      const cTopW = new THREE.Color(0x3b352a), cBotW = new THREE.Color(0x14110c); // Erde oben → dunkles Gestein unten
+      const pushW = (x, y, z, col) => { const vi = wp.length / 3; wp.push(x, y, z); wc.push(col.r, col.g, col.b); return vi; };
+      const seam = (ax, az, ai, bx, bz, bi) => {
+        const ay = height[ai] * HEIGHT_SCALE, by = height[bi] * HEIGHT_SCALE;
+        const t0 = pushW(ax, ay, az, cTopW), t1 = pushW(bx, by, bz, cTopW);
+        const b1 = pushW(bx, WORLD_BASE_Y, bz, cBotW), b0 = pushW(ax, WORLD_BASE_Y, az, cBotW);
+        wi.push(t0, t1, b1, t0, b1, b0);
+      };
+      for (let gx = 0; gx < w - 1; gx++) {
+        seam(gx * TILE, 0, gx, (gx + 1) * TILE, 0, gx + 1);                                   // Nordkante
+        seam(gx * TILE, (h - 1) * TILE, (h - 1) * w + gx, (gx + 1) * TILE, (h - 1) * TILE, (h - 1) * w + gx + 1); // Südkante
+      }
+      for (let gy = 0; gy < h - 1; gy++) {
+        seam(0, gy * TILE, gy * w, 0, (gy + 1) * TILE, (gy + 1) * w);                          // Westkante
+        seam((w - 1) * TILE, gy * TILE, gy * w + (w - 1), (w - 1) * TILE, (gy + 1) * TILE, (gy + 1) * w + (w - 1)); // Ostkante
+      }
+      const wallGeo = new THREE.BufferGeometry();
+      wallGeo.setAttribute('position', new THREE.Float32BufferAttribute(wp, 3));
+      wallGeo.setAttribute('color', new THREE.Float32BufferAttribute(wc, 3));
+      wallGeo.setIndex(wi);
+      wallGeo.computeVertexNormals();
+      this.worldWalls = new THREE.Mesh(wallGeo, new THREE.MeshLambertMaterial({ vertexColors: true, side: THREE.DoubleSide }));
+      this.worldWalls.receiveShadow = true;
+      this.scene.add(this.worldWalls);
+    }
 
     // Legacy-Overlay bleibt als leeres InstancedMesh erhalten; dynamische Fluten laufen über das
     // kontinuierliche Wassermesh, damit sie aus der Distanz nicht als Blockraster erscheinen.
