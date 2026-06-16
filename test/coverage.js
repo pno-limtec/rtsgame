@@ -22,6 +22,14 @@ const data = loadData();
 const N = parseInt(process.argv[2] || '8', 10);
 const MAX_TICKS = parseInt(process.argv[3] || '9000', 10);
 const BASE = parseInt(process.argv[4] || '5000', 10);
+// Modus (4. Arg): 'organic' (Default) misst, was die KI im normalen Spiel von SELBST baut —
+// das eigentliche Ziel-C-Maß (keine untergenutzten Typen). 'buildable'/'all'/'force' aktiviert
+// dagegen den schon in ai.js vorhandenen Abdeckungs-Modus `world.aiCoverageTest`, der jede KI
+// nacheinander JEDEN Typ bauen lässt → trennt TOTE Bauoptionen (strukturell unbaubar/kaputt)
+// von bloß doktrin-bedingt seltenen Typen. 100 % im buildable-Modus = keine echte tote Option;
+// die organische Lücke ist dann reines Doktrin-/Balance-Problem (ai.js-Schwellen), kein Code-Loch.
+const MODE = (process.argv[5] || 'organic').toLowerCase();
+const FORCE_ALL = MODE === 'buildable' || MODE === 'all' || MODE === 'force';
 const SAMPLE = 50;                  // alle 50 Ticks (= 5 s) Einheiten/Infrastruktur abtasten
 const factions = ['HLX', 'KBN', 'FLG'];
 
@@ -61,6 +69,7 @@ for (let s = 0; s < N; s++) {
     { id: 1, faction: fb, controller: 'ai' },
   ];
   const world = createWorld({ data, seed: BASE + s * 131, players });
+  if (FORCE_ALL) world.aiCoverageTest = true;   // KI baut/produziert jeden Typ → Baubarkeits-Abdeckung
   const t = world.terrain;
 
   let mWaterUnit = 0, mWaterBld = 0, mTunnelUse = 0, mBridgeUse = 0;
@@ -124,7 +133,8 @@ const bldCov = seenBuildings.size / BUILDABLE.length;
 const missingUnits = ALL_UNITS.filter(u => !seenUnits.has(u));
 const missingBld = BUILDABLE.filter(b => !seenBuildings.has(b));
 
-console.log(`\n=== KI-Abdeckung: ${N} Partien · max ${MAX_TICKS} Ticks · Seeds ${BASE}+ ===`);
+console.log(`\n=== KI-Abdeckung: ${N} Partien · max ${MAX_TICKS} Ticks · Seeds ${BASE}+ · Modus ${FORCE_ALL ? 'BAUBARKEIT (aiCoverageTest)' : 'organisch'} ===`);
+if (FORCE_ALL) console.log('  (Baubarkeits-Modus: KI versucht jeden Typ zu bauen → 100 % = keine tote Option; <100 % = strukturell unbaubarer/kaputter Typ)');
 for (const r of rows) console.log(r);
 
 console.log(`\n--- (C) Typen-Abdeckung ---`);
