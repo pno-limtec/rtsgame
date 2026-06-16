@@ -1466,16 +1466,23 @@ export class Renderer {
       cornerSea[key] = waterWeight > 0 ? seaSum / waterWeight : (seaVis[nearest] || 0);
     }
 
-    // Eckdeckung leicht räumlich glätten (sanft, damit dünne Flüsse nicht erodieren/zerfallen).
-    // Die eigentliche Entzackung macht die Unterteilung der Randzellen weiter unten (mehr Auflösung).
-    for (let pass = 0; pass < 2; pass++) {
+    // Eckdeckung kräftig räumlich glätten, damit die Uferkontur über mehrere Zellen rundet (sonst
+    // bleiben an breiten Ufern/Meeresküsten Treppenstufen). Die feine Darstellung dieser glatten
+    // Iso-Linie übernimmt die Randzellen-Unterteilung weiter unten.
+    const coverPre = cover.slice();
+    for (let pass = 0; pass < 5; pass++) {
       const src = cover.slice();
       for (let cy = 1; cy < fh - 1; cy++) for (let cx = 1; cx < fw - 1; cx++) {
         const k = cy * fw + cx;
-        cover[k] = src[k] * 0.36
+        cover[k] = src[k] * 0.28
           + (src[k - 1] + src[k + 1] + src[k - fw] + src[k + fw]) * 0.13
-          + (src[k - 1 - fw] + src[k + 1 - fw] + src[k - 1 + fw] + src[k + 1 + fw]) * 0.03;
+          + (src[k - 1 - fw] + src[k + 1 - fw] + src[k - 1 + fw] + src[k + 1 + fw]) * 0.05;
       }
+    }
+    // Dünnes Wasser schützen: ein ursprünglich nasser Eckpunkt bleibt mindestens an der Schwelle —
+    // so erodiert die starke Glättung schmale Flüsse/Kanäle nicht weg, glättet aber freie Ufer voll.
+    for (let k = 0; k < cover.length; k++) {
+      if (coverPre[k] >= WATER_EDGE_THRESHOLD) cover[k] = Math.max(cover[k], WATER_EDGE_THRESHOLD);
     }
 
     const corner = (cx, cy) => {
@@ -1558,7 +1565,7 @@ export class Renderer {
       fx: a.fx + (b.fx - a.fx) * t, fz: a.fz + (b.fz - a.fz) * t,
       depth: a.depth + (b.depth - a.depth) * t, sea: a.sea + (b.sea - a.sea) * t,
     });
-    const SUB = 3; // Unterteilung der Randzellen → glattere Uferkontur (mehr Auflösung als das Zellraster)
+    const SUB = 4; // Unterteilung der Randzellen → glattere Uferkontur (mehr Auflösung als das Zellraster)
     const TH = WATER_EDGE_THRESHOLD;
     for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
       const c00 = corner(x, y), c10 = corner(x + 1, y), c11 = corner(x + 1, y + 1), c01 = corner(x, y + 1);
