@@ -19,6 +19,14 @@ export function setNextEntityId(id) {
 }
 
 export function createWorld({ data, seed = 1, map = DEFAULT_MAP, players = [] }) {
+  // Entity-ID-Zähler je Welt zurücksetzen → Matches sind voneinander UNABHÄNGIG. Ohne diesen Reset
+  // schleppte der modulglobale _gid den Endstand der vorigen Partie in die nächste (Mehr-Match-Prozesse
+  // wie coverage.js/match-sim.js/smoke.js): id-abhängige Logik (repathCd-Stagger id%7, Tie-Breaks)
+  // divergierte dann je nachdem, wie viele Entities die VORIGE Partie erzeugt hatte → Coverage-/Smoke-
+  // Ergebnisse waren nicht reproduzierbar bzw. nicht über maxTicks vergleichbar (bekannte SMOKE-FLAKINESS).
+  // Es läuft nie mehr als EINE Welt gleichzeitig (Server: ein Match; Tests: sequenziell); Savegames
+  // überschreiben den Zähler direkt nach createWorld via setNextEntityId → unkritisch.
+  _gid = 1;
   const terrain = generateTerrain({ w: map.w, h: map.h, seed });
   const world = {
     tick: 0, time: 0, data, seed, terrain,
