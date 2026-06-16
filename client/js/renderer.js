@@ -479,9 +479,7 @@ export class Renderer {
     const pos = geo.attributes.position;
     const colors = new Float32Array(pos.count * 3);
     const cLand = new THREE.Color(0x4a5d34), cHill = new THREE.Color(0x6b5d3e),
-      // Seeboden gedämpftes Dunkelteal statt grellem Blau: das durchscheinende Wassermesh liefert
-      // die Blaufärbung; ein heller blauer Grund wirkte durchs Wasser wie Himmel (bodenlos).
-      cCliff = new THREE.Color(0x556069), cWater = new THREE.Color(0x163f52), cBridge = new THREE.Color(0x4a4036),
+      cCliff = new THREE.Color(0x556069), cBridge = new THREE.Color(0x4a4036),
       cBeach = new THREE.Color(0xb8a36f);
     for (let i = 0; i < pos.count; i++) {
       const gx = i % w, gy = (i / w) | 0;
@@ -492,12 +490,12 @@ export class Renderer {
       pos.setZ(i, gy * TILE);
       const t = type[gy * w + gx];
       const beach = t !== 3 && t !== 4 && e >= waterLevel - 0.01 && e <= waterLevel + 0.085 && this._isNearSeaCell(gx, gy, 3, type);
-      const c = beach ? cBeach : t === 3 ? cWater : t === 2 ? cCliff : t === 1 ? cHill : t === 4 ? cBridge : cLand;
+      // Seeboden = derselbe Erdton wie Land (cLand). Eine eigene blaue Bodenfarbe schien durch das
+      // durchscheinende Wassermesh wie Himmel; jetzt liegt unter dem Wasser schlicht abgesunkenes
+      // Gelände, und die Blaufärbung kommt allein vom Wassermesh darüber.
+      const c = beach ? cBeach : t === 3 ? cLand : t === 2 ? cCliff : t === 1 ? cHill : t === 4 ? cBridge : cLand;
       const v = beach ? 0.92 + hash01(gx, gy, 19) * 0.16 : 0.85 + e * 0.3;
-      // Seeboden mit der Tiefe deutlich abdunkeln: das helle Wasserblau (cWater) schien sonst durch
-      // das durchscheinende Wasser und ließ tiefe Becken/Meer „himmelblau" und bodenlos wirken.
-      const deepDark = t === 3 ? 1 - Math.min(0.80, Math.max(0, waterLevel - e) * 2.4) : 1;
-      colors[i * 3] = c.r * v * deepDark; colors[i * 3 + 1] = c.g * v * deepDark; colors[i * 3 + 2] = c.b * v * deepDark;
+      colors[i * 3] = c.r * v; colors[i * 3 + 1] = c.g * v; colors[i * 3 + 2] = c.b * v;
     }
     geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
     geo.computeVertexNormals();
