@@ -1467,16 +1467,23 @@ export class Renderer {
     }
 
     // Eckdeckung räumlich glätten: die Marching-Squares-Kontur folgt sonst hart dem Zellraster und
-    // franst treppig/eckig aus (einzelne Zellen ragen als Quadrate heraus). Ein paar weiche
-    // Glättungsdurchläufe runden die Iso-Linie, ohne die Wasserfläche nennenswert zu verschieben.
-    for (let pass = 0; pass < 2; pass++) {
+    // franst treppig/eckig aus (einzelne Zellen ragen als Quadrate heraus). Mehrere flache
+    // Glättungsdurchläufe (Box-naher Kernel) runden die Iso-Linie spürbar, ohne die Wasserfläche
+    // nennenswert zu verschieben. Danach den Kontrast leicht zurückholen, damit die Fläche nicht
+    // insgesamt schrumpft (Schwellwert-Erhalt um 0.5).
+    for (let pass = 0; pass < 4; pass++) {
       const src = cover.slice();
       for (let cy = 1; cy < fh - 1; cy++) for (let cx = 1; cx < fw - 1; cx++) {
         const k = cy * fw + cx;
-        cover[k] = src[k] * 0.36
-          + (src[k - 1] + src[k + 1] + src[k - fw] + src[k + fw]) * 0.13
-          + (src[k - 1 - fw] + src[k + 1 - fw] + src[k - 1 + fw] + src[k + 1 + fw]) * 0.03;
+        cover[k] = src[k] * 0.25
+          + (src[k - 1] + src[k + 1] + src[k - fw] + src[k + fw]) * 0.125
+          + (src[k - 1 - fw] + src[k + 1 - fw] + src[k - 1 + fw] + src[k + 1 + fw]) * 0.0625;
       }
+    }
+    // Gegen das Schrumpfen durch starke Glättung: Werte um die Schwelle herum wieder spreizen, damit
+    // die Wasserkante an Ort und Stelle bleibt und nur die Zacken weggerundet werden.
+    for (let k = 0; k < cover.length; k++) {
+      cover[k] = Math.max(0, Math.min(1, WATER_EDGE_THRESHOLD + (cover[k] - WATER_EDGE_THRESHOLD) * 1.6));
     }
 
     const corner = (cx, cy) => {
