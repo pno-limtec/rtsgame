@@ -2539,12 +2539,13 @@ export class Renderer {
   }
 
   _seaWaveUnchecked(wx, wz) {
-    const edgeOpen = this._seaEdgeOpenAt(wx, wz);
+    // Spiegelt die Hauptdünung des Wasser-Shaders (uWaveSea·(1+Sturm·0.6)), damit Boote exakt
+    // auf den sichtbaren Wellen schwimmen. Meer = aSea≈1 → volle See-Amplitude.
     const storm = this._waterStorm || 0;
-    const amp = 0.075 + edgeOpen * 0.075 + storm * 0.045;
+    const amp = 0.12 * (1 + storm * 0.6);
     const t = this.time;
-    return (Math.sin(wx * 0.085 + wz * 0.020 + t * (1.55 + storm * 0.45))
-      + Math.sin(wz * 0.070 - wx * 0.032 + t * (1.05 + storm * 0.35)) * 0.58) * amp;
+    return (Math.sin(wx * 0.085 + wz * 0.020 + t * 1.55)
+      + Math.sin(wz * 0.070 - wx * 0.032 + t * 1.05) * 0.58) * amp;
   }
 
   _seaWaveTiltAt(wx, wz, facing) {
@@ -5607,7 +5608,11 @@ export class Renderer {
   }
 
   render() {
-    this._animateSeaWaterMesh();
+    // Wellen laufen jetzt im Wasser-Shader (Vertex-Höhe); pro Frame nur Zeit/Sturm nachführen.
+    if (this.waterMat) {
+      if (this.waterMat.userData.uTime) this.waterMat.userData.uTime.value = this.time;
+      if (this.waterMat.userData.uStorm) this.waterMat.userData.uStorm.value = this._waterStorm || 0;
+    }
     if (this.perf.faunaStep > 0) {
       this._faunaUpdateT += this._lastDt;
       if (this._faunaUpdateT >= this.perf.faunaStep) {
@@ -5770,30 +5775,64 @@ function makeWaterMaterial() {
   });
   mat.userData.flowTexture = flowTexture;
   mat.userData.baseColor = new THREE.Color(0x55c8f2);
-  // Himmelsspiegelung: am streifenden Blickwinkel spiegelt die Wasseroberfläche den Himmel (Fresnel),
-  // beim Blick von oben bleibt sie transparent (Grund scheint durch). uSky/uSkyAmt werden pro Frame
-  // aus der Szenen-Himmelsfarbe nachgeführt.
+  // Wasseroberflächen-Shader: leichte Wellensimulation im Vertex-Shader (Vertex-Höhe schwingt) +
+  // Himmelsspiegelung und wandernde Glanzlichter im Fragment-Shader. Über aSea (Meer-Anteil je
+  // Vertex) skaliert: Binnengewässer bekommen kleine, ruhige Wellen, Meereswasser deutlich mehr.
+  // uTime/uStorm/uSky werden pro Frame nachgeführt.
   mat.userData.uSky = { value: new THREE.Color(0x9ec8e8) };
   mat.userData.uSkyAmt = { value: 0.8 };
+  mat.userData.uTime = { value: 0 };
+  mat.userData.uStorm = { value: 0 };
+  mat.userData.uWaveInland = { value: 0.035 }; // Wellen-Amplitude Binnengewässer (ruhig)
+  mat.userData.uWaveSea = { value: 0.12 };     // Wellen-Amplitude Meer (lebhafter)
   mat.onBeforeCompile = (shader) => {
     shader.uniforms.uSky = mat.userData.uSky;
     shader.uniforms.uSkyAmt = mat.userData.uSkyAmt;
-    shader.vertexShader = 'varying vec3 vWaterWPos;\n' + shader.vertexShader.replace(
-      '#include <begin_vertex>',
-      '#include <begin_vertex>\n  vWaterWPos = (modelMatrix * vec4(transformed, 1.0)).xyz;',
-    );
-    shader.fragmentShader = 'uniform vec3 uSky;\nuniform float uSkyAmt;\nvarying vec3 vWaterWPos;\n' + shader.fragmentShader.replace(
-      '#include <dithering_fragment>',
-      `#include <dithering_fragment>
-      vec3 vDir = normalize(cameraPosition - vWaterWPos);
-      // Schärferer Fresnel (höherer Exponent) → Himmelsspiegelung nur am SEHR streifenden Saum,
-      // nicht über große, im Kippwinkel betrachtete Tiefwasser-/Meerflächen (die sonst himmelblau
-      // ausbleichen). Zusätzlich gedeckelt, damit das tiefe Wasser seine dunkle Eigenfarbe behält.
-      float fres = pow(1.0 - clamp(vDir.y, 0.0, 1.0), 5.0);   // 0 = von oben, 1 = streifend
-      float skyMix = min(0.42, fres * uSkyAmt);
-      gl_FragColor.rgb = mix(gl_FragColor.rgb, uSky, skyMix);
-      gl_FragColor.a = clamp(gl_FragColor.a + fres * 0.32 * uSkyAmt, 0.0, 0.96);`,
-    );
+    shader.uniforms.uTime = mat.userData.uTime;
+    shader.uniforms.uStorm = mat.userData.uStorm;
+    shader.uniforms.uWaveInland = mat.userData.uWaveInland;
+    shader.uniforms.uWaveSea = mat.userData.uWaveSea;
+    shader.vertexShader =
+      'attribute float aSea;\nvarying vec3 vWaterWPos;\nvarying float vSea;\nvarying float vCrest;\n'
+      + 'uniform float uTime;\nuniform float uStorm;\nuniform float uWaveInland;\nuniform float uWaveSea;\n'
+      + shader.vertexShader.replace(
+        '#include <begin_vertex>',
+        `#include <begin_vertex>
+        vSea = aSea;
+        // Amplitude je nach Meer-Anteil: Binnen wenig, Meer viel; Sturm verstärkt zusätzlich.
+        float waveAmp = mix(uWaveInland, uWaveSea, smoothstep(0.0, 0.6, aSea)) * (1.0 + uStorm * 0.6);
+        // Hauptdünung (zwei lange Wellenzüge) — identisch zur CPU-Formel für die Boots-Bewegung.
+        float wph = sin(transformed.x * 0.085 + transformed.z * 0.020 + uTime * 1.55)
+                  + 0.58 * sin(transformed.z * 0.070 - transformed.x * 0.032 + uTime * 1.05);
+        // feinere Kräuselung obendrauf, vor allem auf offener See.
+        float rip = sin(transformed.x * 0.34 + transformed.z * 0.28 + uTime * 2.7) * 0.22
+                  + sin(transformed.z * 0.45 - transformed.x * 0.26 + uTime * 3.2) * 0.16;
+        transformed.y += (wph + rip * smoothstep(0.2, 0.8, aSea)) * waveAmp;
+        vCrest = wph;
+        vWaterWPos = (modelMatrix * vec4(transformed, 1.0)).xyz;`,
+      );
+    shader.fragmentShader =
+      'uniform vec3 uSky;\nuniform float uSkyAmt;\nuniform float uTime;\nvarying vec3 vWaterWPos;\nvarying float vSea;\nvarying float vCrest;\n'
+      + shader.fragmentShader.replace(
+        '#include <dithering_fragment>',
+        `#include <dithering_fragment>
+        vec3 vDir = normalize(cameraPosition - vWaterWPos);
+        // Schärferer Fresnel → Himmelsspiegelung nur am sehr streifenden Saum, gedeckelt, damit
+        // tiefes Wasser seine dunkle Eigenfarbe behält.
+        float fres = pow(1.0 - clamp(vDir.y, 0.0, 1.0), 5.0);
+        float skyMix = min(0.42, fres * uSkyAmt);
+        gl_FragColor.rgb = mix(gl_FragColor.rgb, uSky, skyMix);
+        // Wellenkämme heller (Himmelsglanz) — auf See stärker als auf Binnenwasser.
+        float crest = clamp(vCrest * 0.5 + 0.5, 0.0, 1.0);
+        float glint = pow(crest, 3.0) * mix(0.05, 0.18, vSea);
+        // wandernde Funkel-Highlights pro Pixel (mehr auf See). Zwei nicht-harmonische Lagen +
+        // hoher Exponent → kleine, unregelmäßig verteilte Glitzerpunkte statt eines Punktrasters.
+        float s1 = sin(vWaterWPos.x * 0.90 + uTime * 2.2) * sin(vWaterWPos.z * 0.80 - uTime * 1.7);
+        float s2 = sin(vWaterWPos.x * 1.37 - vWaterWPos.z * 0.60 + uTime * 1.3) * sin(vWaterWPos.z * 1.21 + uTime * 2.9);
+        float spark = (pow(max(0.0, s1), 8.0) + pow(max(0.0, s2), 8.0) * 0.7) * mix(0.03, 0.12, vSea);
+        gl_FragColor.rgb += uSky * (glint + spark);
+        gl_FragColor.a = clamp(gl_FragColor.a + fres * 0.32 * uSkyAmt + spark * 0.5, 0.0, 0.97);`,
+      );
   };
   return mat;
 }
