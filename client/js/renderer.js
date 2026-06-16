@@ -4,6 +4,7 @@ import * as THREE from 'three';
 import { groundTexture, meadowTexture, oilSlickTexture, panelTexture, puffTexture } from './textures.js';
 import { ModelLibrary } from './models.js';
 import { makeBuildingMesh } from './buildings3d.js';
+import { createWaterV2, updateWaterV2 } from './waterV2.js';
 
 const HEIGHT_SCALE = 16;   // Weltmeter pro Höhen-Einheit (0..1) — imposantere Berge
 const TILE = 2;
@@ -352,7 +353,12 @@ export class Renderer {
     this.graphics = {
       shadows: opts.shadows !== false,
       lights: opts.lights !== false,
+      wasserv2: opts.wasserv2 === true,
     };
+    // Wasser V2 ein-/ausschalten: V1- und V2-Mesh teilen sich die Geometrie, nur Sichtbarkeit wechselt.
+    this.waterV2Enabled = this.graphics.wasserv2;
+    if (this.waterMesh) this.waterMesh.visible = !this.waterV2Enabled;
+    if (this.waterMeshV2) this.waterMeshV2.visible = this.waterV2Enabled;
     this.renderer.shadowMap.enabled = this.graphics.shadows;
     if (!this.graphics.shadows) {
       this.sun.castShadow = false;
@@ -577,6 +583,16 @@ export class Renderer {
     water.frustumCulled = false;   // ein Draw-Call, Vertex-Y ändert sich laufend
     this.scene.add(water);
     this.waterMesh = water;
+    // Wasser V2 (Ozean-Shader): teilt sich die GEGLÄTTETE Geometrie mit dem V1-Mesh, rendert sie
+    // aber mit dem neuen Wellen-/Licht-Shader. Sichtbarkeit per Einstellung umgeschaltet.
+    this.waterMatV2 = createWaterV2();
+    const waterV2 = new THREE.Mesh(wgeo, this.waterMatV2);
+    waterV2.renderOrder = 1;
+    waterV2.frustumCulled = false;
+    waterV2.visible = !!this.waterV2Enabled;
+    this.scene.add(waterV2);
+    this.waterMeshV2 = waterV2;
+    if (this.waterV2Enabled) water.visible = false;
     this.seaLevel = waterLevel;
     this.seaY = waterY;
     this._rebuildWaterMesh(true);
@@ -1409,6 +1425,7 @@ export class Renderer {
       const old = this.waterMesh.geometry;
       const geo = this._makeEmptyWaterGeometry();
       this.waterMesh.geometry = geo;
+      if (this.waterMeshV2) this.waterMeshV2.geometry = geo;
       if (old && old !== geo) old.dispose();
       this._setWaterGeometryRefs(geo, []);
       return;
@@ -1607,6 +1624,7 @@ export class Renderer {
     geo.computeBoundingSphere();
     const old = this.waterMesh.geometry;
     this.waterMesh.geometry = geo;
+    if (this.waterMeshV2) this.waterMeshV2.geometry = geo; // V2 teilt sich dieselbe geglättete Geometrie
     if (old && old !== geo) old.dispose();
     this._setWaterGeometryRefs(geo, seaIndices);
   }
@@ -5413,6 +5431,17 @@ export class Renderer {
       if (this.waterMat.userData.uSky) this.waterMat.userData.uSky.value.copy(sky);
       if (this.waterMat.userData.uSkyAmt) this.waterMat.userData.uSkyAmt.value = 0.18 + d * 0.34;
     }
+    if (this.waterMatV2) {
+      // Wasser V2: Sonnenrichtung, Farben, Deckkraft nachführen (uTime läuft im render()).
+      this._waterV2SunDir = (this._waterV2SunDir || new THREE.Vector3()).copy(this.sun.position).sub(this.camTarget);
+      updateWaterV2(this.waterMatV2, {
+        sunDir: this._waterV2SunDir,
+        sunColor: this.sun.color,
+        sky,
+        opacity: WATER_NIGHT_OPACITY_MIN + d * 0.36 + (this._waterStorm || 0) * 0.05,
+        daylight: d,
+      });
+    }
     if (this.floodWaterMat) {
       const farFloodFade = this.camDist <= 150 ? 1 : Math.max(0, 1 - (this.camDist - 150) / 95);
       if (this.floodMesh) this.floodMesh.visible = farFloodFade > 0.03;
@@ -5665,6 +5694,7 @@ export class Renderer {
       if (this.waterMat.userData.uTime) this.waterMat.userData.uTime.value = this.time;
       if (this.waterMat.userData.uStorm) this.waterMat.userData.uStorm.value = this._waterStorm || 0;
     }
+    if (this.waterMatV2) this.waterMatV2.uniforms.uTime.value = this.time; // Wasser V2: Wellen-Zeit
     if (this.perf.faunaStep > 0) {
       this._faunaUpdateT += this._lastDt;
       if (this._faunaUpdateT >= this.perf.faunaStep) {

@@ -405,13 +405,16 @@ export class UI {
     const gfx = this.readGraphicsOptions();
     const shadowBox = document.getElementById('gfxshadows');
     const lightBox = document.getElementById('gfxlights');
+    const waterV2Box = document.getElementById('gfxwasserv2');
     if (shadowBox) shadowBox.checked = gfx.shadows;
     if (lightBox) lightBox.checked = gfx.lights;
+    if (waterV2Box) waterV2Box.checked = gfx.wasserv2;
     renderer.setGraphicsOptions?.(gfx);
     const applyGfx = () => {
       const next = {
         shadows: shadowBox ? !!shadowBox.checked : true,
         lights: lightBox ? !!lightBox.checked : true,
+        wasserv2: waterV2Box ? !!waterV2Box.checked : false,
       };
       this.writeGraphicsOptions(next);
       renderer.setGraphicsOptions?.(next);
@@ -419,6 +422,7 @@ export class UI {
     };
     shadowBox?.addEventListener('change', applyGfx);
     lightBox?.addEventListener('change', applyGfx);
+    waterV2Box?.addEventListener('change', applyGfx);
 
     // Ton: Musik und Soundeffekte getrennt schaltbar (Einstellung wird im Audio-Modul gespeichert).
     const musicBox = document.getElementById('audiomusic');
@@ -588,9 +592,9 @@ export class UI {
   readGraphicsOptions() {
     try {
       const raw = JSON.parse(localStorage.getItem('if_graphics') || '{}');
-      return { shadows: raw.shadows !== false, lights: raw.lights !== false };
+      return { shadows: raw.shadows !== false, lights: raw.lights !== false, wasserv2: raw.wasserv2 === true };
     } catch {
-      return { shadows: true, lights: true };
+      return { shadows: true, lights: true, wasserv2: false };
     }
   }
 
