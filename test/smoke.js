@@ -95,6 +95,11 @@ ok(Array.isArray(init.terrain.waterDepth) && init.terrain.waterDepth.length > 0,
   ok(m.controlsView().timeMode === 'day', 'Neues Spiel behält den deaktivierten Tag/Nacht-Zyklus bei');
 }
 {
+  const m = new Match({ data, seed: 781, slots: 4 });
+  const colors = m.world.players.map(p => p.color);
+  ok(new Set(colors).size === 4, `4-Spieler-Partien nutzen unterscheidbare Kriegsparteifarben (${colors.join(', ')})`);
+}
+{
   const players = ['KBN', 'HLX', 'FLG', 'KBN'].map((faction, id) => ({ id, faction, controller: 'human' }));
   const w = createWorld({ data, seed: 919, players, controls: { insanity: 1 } });
   ok(w.players.length === 4, 'Partien können mit 4 Spielern erzeugt werden');
@@ -1370,6 +1375,14 @@ ok(match.player(0).controller === 'ai', 'Sitz fällt nach Disconnect-Timeout an 
   const slideEvents = we.events.filter(ev => ev.type === 'landslide');
   ok(slideEvents.length >= 1 && slideEvents.some(ev => (ev.path || []).length >= 4),
     `Erdbeben löst sichtbare, längere Hangrutschpfade aus (${slideEvents.length})`);
+  const slideShapes = new Set(slideEvents.map(ev => {
+    const p = ev.path || [], dirs = [];
+    for (let n = 2; n + 1 < p.length; n += 2) dirs.push(`${Math.sign(p[n] - p[n - 2])},${Math.sign(p[n + 1] - p[n - 1])}`);
+    return dirs.join('|');
+  }));
+  const branchedSlides = slideEvents.filter(ev => Array.isArray(ev.branches) && ev.branches.length >= 2).length;
+  ok(branchedSlides > 0 || slideShapes.size > 1,
+    `Erdbeben/Hangrutsche erzeugen variablere 3D-Muster (${branchedSlides} Nebenpfade, ${slideShapes.size} Formen)`);
   // Material kann weiter kaskadieren — entscheidend: irgendwo im Bebenradius wurde angelandet (terra>0).
   let deposited = false;
   for (let i = 0; i < t.terra.length; i++) if (t.terra[i] > 1e-4) { deposited = true; break; }

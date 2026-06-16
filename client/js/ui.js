@@ -50,10 +50,6 @@ const SPECTATOR_SPEEDS = [1, 2, 4, 8];
 const SPECTATOR_TIME_MODES = ['auto', 'day', 'night'];
 const SPECTATOR_TIME_LABEL = { auto: 'Auto', day: 'Tag', night: 'Nacht' };
 const SPECTATOR_TIME_ICON = { auto: 'clock', day: 'sun', night: 'moon' };
-const SPECTATOR_TABS = [
-  ['control', 'Sicht/Sim', 'eye'],
-  ['events', 'Events', 'storm'],
-];
 const SPECTATOR_EVENT_META = {
   rain: ['rain', 'Regen'],
   drought: ['sun', 'Dürre'],
@@ -124,6 +120,12 @@ function normalizeInsanity(value, fallback = 2) {
 
 function escAttr(s) {
   return String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+function topAmountHtml(value, cap) {
+  const amount = Math.round(value || 0);
+  const capText = cap == null ? 'unb.' : Math.round(cap);
+  return `<span class="resval">${escAttr(amount)}</span><span class="rescap">/${escAttr(capText)}</span>`;
 }
 
 function iconSvg(name, cls = '') {
@@ -335,6 +337,7 @@ export class UI {
     this.joinCodeHud = document.getElementById('joincodehud');
     this.minimap = document.getElementById('minimap');
     this.mctx = this.minimap.getContext('2d');
+    this._releasePending = false;
     input.onSelectionChange = () => this.renderSelection();
     input.onBuildPlaced = () => this.renderBuildbar();
   }
@@ -441,7 +444,7 @@ export class UI {
       setStatus('Spiel wird erstellt...');
     });
     this.net.on('joined', (m) => { if (m.ok) lobby.style.display = 'none'; });
-    setTab('join');
+    setTab('create');
   }
 
   setupMenu(renderer, audio = null) {
@@ -519,15 +522,18 @@ export class UI {
     const shadowBox = document.getElementById('gfxshadows');
     const lightBox = document.getElementById('gfxlights');
     const waterV2Box = document.getElementById('gfxwasserv2');
+    const fpsBox = document.getElementById('gfxfps');
     if (shadowBox) shadowBox.checked = gfx.shadows;
     if (lightBox) lightBox.checked = gfx.lights;
     if (waterV2Box) waterV2Box.checked = gfx.wasserv2;
+    if (fpsBox) fpsBox.checked = gfx.fps;
     renderer.setGraphicsOptions?.(gfx);
     const applyGfx = () => {
       const next = {
         shadows: shadowBox ? !!shadowBox.checked : true,
         lights: lightBox ? !!lightBox.checked : true,
-        wasserv2: waterV2Box ? !!waterV2Box.checked : false,
+        wasserv2: waterV2Box ? !!waterV2Box.checked : true,
+        fps: fpsBox ? !!fpsBox.checked : false,
       };
       this.writeGraphicsOptions(next);
       renderer.setGraphicsOptions?.(next);
@@ -536,6 +542,7 @@ export class UI {
     shadowBox?.addEventListener('change', applyGfx);
     lightBox?.addEventListener('change', applyGfx);
     waterV2Box?.addEventListener('change', applyGfx);
+    fpsBox?.addEventListener('change', applyGfx);
 
     // Ton: Musik und Soundeffekte getrennt schaltbar (Einstellung wird im Audio-Modul gespeichert).
     const musicBox = document.getElementById('audiomusic');
@@ -705,9 +712,9 @@ export class UI {
   readGraphicsOptions() {
     try {
       const raw = JSON.parse(localStorage.getItem('if_graphics') || '{}');
-      return { shadows: raw.shadows !== false, lights: raw.lights !== false, wasserv2: raw.wasserv2 === true };
+      return { shadows: raw.shadows !== false, lights: raw.lights !== false, wasserv2: raw.wasserv2 !== false, fps: raw.fps === true };
     } catch {
-      return { shadows: true, lights: true, wasserv2: false };
+      return { shadows: true, lights: true, wasserv2: true, fps: false };
     }
   }
 
@@ -729,41 +736,18 @@ export class UI {
 
   renderSpectatorbar() {
     const bar = document.getElementById('spectatorbar');
-    const sel = document.getElementById('viewselsel');
-    if (!bar || !sel) return;
+    if (!bar) return;
     if (!this.net.spectator) { bar.style.display = 'none'; this._spectatorSig = ''; return; }
     bar.style.display = 'flex';
-    if (!SPECTATOR_TABS.some(([id]) => id === this.spectatorTab)) this.spectatorTab = 'control';
-    for (const btn of bar.querySelectorAll('[data-spectab]')) {
-      const tab = SPECTATOR_TABS.find(([id]) => id === btn.dataset.spectab);
-      if (!tab) continue;
-      const active = tab[0] === this.spectatorTab;
-      btn.innerHTML = `${iconSvg(tab[2], 'tinyicon')}<span>${tab[1]}</span>`;
-      btn.setAttribute('aria-selected', active ? 'true' : 'false');
-      btn.onclick = () => { this.spectatorTab = tab[0]; this.renderSpectatorbar(); };
+    const tab = bar.querySelector('.spec-tab');
+    if (tab) {
+      tab.innerHTML = `${iconSvg('eye', 'tinyicon')}<span>Zuschauer</span>`;
+      tab.setAttribute('aria-selected', 'true');
     }
-    for (const panel of bar.querySelectorAll('[data-specpanel]')) panel.hidden = panel.dataset.specpanel !== this.spectatorTab;
-    const cur = this.net.viewSeat;
-    const sig = this.net.players.map(p => `${p.id}:${p.faction}:${p.controller}:${p.defeated ? 1 : 0}`).join('|');
-    if (sig !== this._spectatorSig) {
-      this._spectatorSig = sig;
-      sel.innerHTML = '';
-      for (const p of this.net.players) {
-        const opt = document.createElement('option');
-        opt.value = p.id;
-        opt.textContent = `${this.data.factions[p.faction].label}${p.defeated ? ' (besiegt)' : ''}`;
-        sel.appendChild(opt);
-      }
-      sel.onchange = () => this.net.setViewSeat(parseInt(sel.value, 10));
-    }
-    if (String(sel.value) !== String(cur)) sel.value = String(cur);
-
     const controls = this.net.controls || {};
     const speedBtn = document.getElementById('spectatorspeed');
     const timeWrap = document.getElementById('spectatortime');
-    const takeBtn = document.getElementById('spectatortakeover');
     const eventWrap = document.getElementById('spectatorevents');
-    const viewed = this.net.players.find(p => p.id === cur);
     if (eventWrap) {
       eventWrap.hidden = false;
       for (const btn of eventWrap.querySelectorAll('[data-spectatorevent]')) {
@@ -777,19 +761,6 @@ export class UI {
           btn.onclick = () => this.net.setSpectatorControls({ event: btn.dataset.spectatorevent });
         }
       }
-    }
-    if (takeBtn) {
-      const canTake = !!viewed && !viewed.defeated && viewed.controller === 'ai';
-      takeBtn.hidden = !canTake;
-      takeBtn.classList.add('spec-iconbtn');
-      takeBtn.innerHTML = `${iconSvg('flag', 'tinyicon')}<span>Übern.</span>`;
-      takeBtn.title = canTake
-        ? `${this.data.factions[viewed.faction]?.label || 'KI-Spieler'} übernehmen`
-        : 'Nur freie KI-Sitze können übernommen werden';
-      takeBtn.onclick = () => {
-        const name = document.getElementById('pname')?.value || this.net.name || 'Spieler';
-        this.net.takeoverSeat(cur, name);
-      };
     }
     if (speedBtn) {
       const speed = SPECTATOR_SPEEDS.includes(controls.speed) ? controls.speed : 1;
@@ -824,6 +795,7 @@ export class UI {
   renderTop() {
     const me = this.net.players.find(p => p.id === (this.net.spectator ? this.net.viewSeat : this.net.seat));
     const bar = document.getElementById('topbar');
+    if (this.net.spectator || this.net.seat == null) this._releasePending = false;
     const env = this.net.env;
     // Uhrzeit & Wetter-Symbol aus dem Umwelt-Status (t: 0 = Mitternacht).
     let envHtml = '';
@@ -842,9 +814,14 @@ export class UI {
       envHtml = `<span class="sep"></span><span class="res weather" title="${escAttr(tip)}">${iconSvg(wIcon, 'topicon')} <b>${hh}:${mm}</b><span class="forecast">${nextIcon}<span class="wtime">${nextIn}</span></span></span>`;
     }
     const helpHtml = `<span class="sep"></span>${this.helpButtonHtml()}`;
-    if (!me || !me.res) { bar.innerHTML = `<span class="res">Zuschauer</span>${envHtml}${helpHtml}`; this.bindTopActions(); return; }
+    if (!me || !me.res) {
+      const spectatorControls = this.net.spectator ? this.spectatorTopControlsHtml() : '';
+      bar.innerHTML = `<span class="res">Zuschauer</span>${spectatorControls}${envHtml}${helpHtml}`;
+      this.bindTopActions();
+      return;
+    }
     if (this.net.spectator) {
-      bar.innerHTML = `<span class="res">Zuschauer</span><span class="sep"></span><span class="res"><span class="dot" style="background:${me.color}"></span><b>Sicht: ${this.data.factions[me.faction].label}</b></span>${envHtml}${helpHtml}`;
+      bar.innerHTML = `<span class="res">Zuschauer</span>${this.spectatorTopControlsHtml()}${envHtml}${helpHtml}`;
       this.bindTopActions();
       return;
     }
@@ -855,16 +832,35 @@ export class UI {
       const capText = cap == null ? 'unb.' : Math.round(cap);
       const label = `${Math.round(v)}/${capText}`;
       const low = (k === 'ammo' && v < 50) || (k === 'fuel' && v < 50) || (k === 'ore' && v < 100) || (k === 'water' && v < 30);
-      html += `<span class="res" data-res="${escAttr(k)}" style="--res-color:${RES_COLOR[k] || '#eaf6ff'}" title="${RES_TIP[k] || k}: ${label}">${resIcon(k)} <b class="${low ? 'low' : ''}">${label}</b></span>`;
+      html += `<span class="res" data-res="${escAttr(k)}" style="--res-color:${RES_COLOR[k] || '#eaf6ff'}" title="${RES_TIP[k] || k}: ${label}">${resIcon(k)} <b class="${low ? 'low' : ''}">${topAmountHtml(v, cap)}</b></span>`;
     }
     if (me.energy) {
       const def = me.energy.p < me.energy.c;
-      html += `<span class="res" data-res="energy" style="--res-color:${RES_COLOR.energy}" title="Energie: Erzeugung/Verbrauch (nachts höher — Beleuchtung)">${resIcon('energy')} <b class="${def ? 'low' : ''}">${me.energy.p}/${me.energy.c}</b></span>`;
+      html += `<span class="res" data-res="energy" style="--res-color:${RES_COLOR.energy}" title="Energie: Erzeugung/Verbrauch (nachts höher — Beleuchtung)">${resIcon('energy')} <b class="${def ? 'low' : ''}">${topAmountHtml(me.energy.p, me.energy.c)}</b></span>`;
     }
     html += envHtml;
-    html += `<span class="sep"></span>${this.helpButtonHtml()}<button id="releasecontrol" class="topaction" type="button" title="Sitz an die KI zurückgeben und weiter zuschauen">Ausklinken</button>`;
+    const releaseBusy = this._releasePending;
+    const releaseTitle = releaseBusy ? 'Wechsel in den Zuschauermodus laeuft' : 'Sitz an die KI zurückgeben und weiter zuschauen';
+    html += `<span class="sep"></span>${this.helpButtonHtml()}<button id="releasecontrol" class="topaction" type="button" ${releaseBusy ? 'disabled aria-busy="true"' : ''} title="${escAttr(releaseTitle)}">${releaseBusy ? 'Wechsle...' : 'Ausklinken'}</button>`;
     bar.innerHTML = html;
     this.bindTopActions();
+  }
+
+  spectatorTopControlsHtml() {
+    const cur = this.net.viewSeat;
+    const viewed = this.net.players.find(p => p.id === cur);
+    const canTake = !!viewed && !viewed.defeated && viewed.controller === 'ai';
+    const options = this.net.players.map(p => {
+      const label = this.data.factions[p.faction]?.label || p.name || `Sitz ${p.id + 1}`;
+      const suffix = p.defeated ? ' (besiegt)' : '';
+      const selected = String(p.id) === String(cur) ? ' selected' : '';
+      return `<option value="${escAttr(p.id)}"${selected}>${escAttr(label + suffix)}</option>`;
+    }).join('');
+    const title = canTake
+      ? `${this.data.factions[viewed.faction]?.label || 'KI-Spieler'} übernehmen`
+      : 'Nur freie KI-Sitze können übernommen werden';
+    return `<span class="sep"></span><select id="topviewsel" class="topselect" title="Fraktion beobachten">${options}</select>`
+      + `<button id="toptakeover" class="topaction" type="button" ${canTake ? '' : 'disabled'} title="${escAttr(title)}">Steuerung übernehmen</button>`;
   }
 
   bindTopActions() {
@@ -875,8 +871,22 @@ export class UI {
       this.renderTop();
       this.renderAdvisor();
     };
+    const topView = document.getElementById('topviewsel');
+    if (topView) topView.onchange = () => this.net.setViewSeat(parseInt(topView.value, 10));
+    const topTake = document.getElementById('toptakeover');
+    if (topTake) topTake.onclick = () => {
+      if (topTake.disabled) return;
+      const seat = parseInt(document.getElementById('topviewsel')?.value ?? this.net.viewSeat, 10);
+      const name = document.getElementById('pname')?.value || this.net.name || 'Spieler';
+      this.net.takeoverSeat(Number.isFinite(seat) ? seat : this.net.viewSeat, name);
+    };
     const release = document.getElementById('releasecontrol');
-    if (release) release.onclick = () => this.net.releaseSeat();
+    if (release) release.onclick = () => {
+      if (this._releasePending) return;
+      this._releasePending = true;
+      this.renderTop();
+      this.net.releaseSeat();
+    };
     this.renderAdvisor();
   }
 
@@ -1349,11 +1359,69 @@ export class UI {
       : '';
   }
 
+  minimapPoint(renderer, ev) {
+    if (!renderer?.mapW || !renderer?.mapH || !this.minimap) return null;
+    const r = this.minimap.getBoundingClientRect();
+    if (r.width <= 0 || r.height <= 0) return null;
+    const px = Math.max(0, Math.min(r.width, ev.clientX - r.left));
+    const py = Math.max(0, Math.min(r.height, ev.clientY - r.top));
+    const mapW = renderer.mapW * 2;
+    const mapH = renderer.mapH * 2;
+    return {
+      x: Math.max(4, Math.min(mapW - 4, (px / r.width) * mapW)),
+      z: Math.max(4, Math.min(mapH - 4, (py / r.height) * mapH)),
+    };
+  }
+
+  moveCameraFromMinimap(renderer, ev) {
+    const p = this.minimapPoint(renderer, ev);
+    if (!p) return;
+    renderer.camTarget.x = p.x;
+    renderer.camTarget.z = p.z;
+  }
+
+  bindMinimapDrag() {
+    if (this._mmBound || !this.minimap) return;
+    this._mmBound = true;
+    const stop = (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+    };
+    const endDrag = (ev) => {
+      if (this._mmPointerId == null || ev.pointerId !== this._mmPointerId) return;
+      try { this.minimap.releasePointerCapture?.(ev.pointerId); } catch {}
+      this._mmPointerId = null;
+      this.minimap.classList.remove('dragging');
+      stop(ev);
+    };
+    this.minimap.addEventListener('pointerdown', (ev) => {
+      if (ev.button != null && ev.button !== 0) return;
+      this._mmPointerId = ev.pointerId;
+      this.minimap.classList.add('dragging');
+      this.minimap.setPointerCapture?.(ev.pointerId);
+      this.moveCameraFromMinimap(this._mmRenderer, ev);
+      stop(ev);
+    });
+    this.minimap.addEventListener('pointermove', (ev) => {
+      if (this._mmPointerId == null || ev.pointerId !== this._mmPointerId) return;
+      this.moveCameraFromMinimap(this._mmRenderer, ev);
+      stop(ev);
+    });
+    this.minimap.addEventListener('pointerup', endDrag);
+    this.minimap.addEventListener('pointercancel', endDrag);
+    this.minimap.addEventListener('lostpointercapture', () => {
+      this._mmPointerId = null;
+      this.minimap.classList.remove('dragging');
+    });
+  }
+
   // --- Minimap ---
   renderMinimap(renderer) {
     const entities = this.net.entities(1);
     this.renderScoreboard(entities);
     const ctx = this.mctx, W = this.minimap.width, H = this.minimap.height;
+    this._mmRenderer = renderer;
+    this.bindMinimapDrag();
     if (!renderer.mapW) return;
     const sx = W / (renderer.mapW * 2), sy = H / (renderer.mapH * 2);
     ctx.fillStyle = '#08111a'; ctx.fillRect(0, 0, W, H);
@@ -1393,11 +1461,6 @@ export class UI {
     // Kamera-Sichtfeld (grob: Zielpunkt)
     const t = renderer.camTarget;
     ctx.strokeStyle = '#ffffff88'; ctx.strokeRect(t.x * sx - 14, t.z * sy - 10, 28, 20);
-    // Klick zum Springen
-    if (!this._mmBound) { this._mmBound = true; this.minimap.onclick = (ev) => {
-      const r = this.minimap.getBoundingClientRect();
-      renderer.camTarget.x = (ev.clientX - r.left) / sx; renderer.camTarget.z = (ev.clientY - r.top) / sy;
-    }; }
   }
 
   warn(key, text) {

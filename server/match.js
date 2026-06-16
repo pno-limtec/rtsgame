@@ -8,6 +8,7 @@ import { normalizeInsanityLevel, setInsanityLevel, triggerSpectatorEvent } from 
 
 const SPECTATOR_SPEEDS = [1, 2, 4, 8];
 const TIME_MODES = new Set(['auto', 'day', 'night']);
+const PLAYER_COLORS = ['#00b7ff', '#ff8a00', '#43e05f', '#d760ff'];
 
 export class Match {
   constructor({ data, seed = 1, slots = 2, map, factions = ['HLX', 'KBN', 'FLG'], insanity = 2, timeMode = 'auto' }) {
@@ -30,7 +31,7 @@ export class Match {
   makePlayers() {
     const players = [];
     for (let i = 0; i < this.slots; i++)
-      players.push({ id: i, name: `KI-${i + 1}`, faction: this.factions[i % this.factions.length], controller: 'ai' });
+      players.push({ id: i, name: `KI-${i + 1}`, faction: this.factions[i % this.factions.length], controller: 'ai', color: PLAYER_COLORS[i % PLAYER_COLORS.length] });
     return players;
   }
 

@@ -53,7 +53,7 @@ export function createWorld({ data, seed = 1, map = DEFAULT_MAP, players = [], c
       id: p.id ?? i, name: p.name || `Spieler ${i + 1}`,
       faction: p.faction || 'KBN',
       controller: p.controller || 'ai',
-      color: (data.factions[p.faction || 'KBN'] || {}).color || '#cccccc',
+      color: p.color || (data.factions[p.faction || 'KBN'] || {}).color || '#cccccc',
       resources: res, defeated: false,
       energy: { produced: 0, consumed: 0, ratio: 1 },
       ai: null,

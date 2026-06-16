@@ -234,7 +234,11 @@ export class Renderer {
     this.renderer.shadowMap.autoUpdate = false;
     this.renderer.shadowMap.needsUpdate = true;
     container.appendChild(this.renderer.domElement);
-    this.graphics = { shadows: true, lights: true };
+    this.graphics = { shadows: true, lights: true, wasserv2: true, fps: false };
+    this.waterV2Enabled = true;
+    this.fpsEl = typeof document !== 'undefined' ? document.getElementById('fpscounter') : null;
+    this._fpsFrames = 0;
+    this._fpsAccum = 0;
 
     // near=2: deutlich bessere Tiefenpuffer-Präzision → kein Z-Fighting der Wasserflächen beim Rauszoomen.
     this.camera = new THREE.PerspectiveCamera(50, innerWidth / innerHeight, 2, 1600);
@@ -398,13 +402,11 @@ export class Renderer {
     this.graphics = {
       shadows: opts.shadows !== false,
       lights: opts.lights !== false,
-      wasserv2: opts.wasserv2 === true,
+      wasserv2: opts.wasserv2 !== false,
+      fps: opts.fps === true,
     };
-    // Wasser V2 ein-/ausschalten: V1- und V2-Mesh teilen sich die Geometrie, nur Sichtbarkeit wechselt.
-    this.waterV2Enabled = this.graphics.wasserv2;
-    if (this.waterMesh) this.waterMesh.visible = !this.waterV2Enabled;
-    if (this.waterMeshV2) this.waterMeshV2.visible = this.waterV2Enabled;
-    if (this.waterHorizonV2) this.waterHorizonV2.visible = false;
+    this._syncWaterVisualMode();
+    this._syncFpsCounter();
     this.renderer.shadowMap.enabled = this.graphics.shadows;
     if (!this.graphics.shadows) {
       this.sun.castShadow = false;
@@ -427,6 +429,37 @@ export class Renderer {
       this._cachedLampSpots.length = 0;
       this._cachedBeamSpots.length = 0;
     }
+  }
+
+  _syncWaterVisualMode() {
+    this.waterV2Enabled = this.graphics?.wasserv2 !== false;
+    if (this.waterMesh) this.waterMesh.visible = !this.waterV2Enabled;
+    if (this.waterMeshV2) this.waterMeshV2.visible = this.waterV2Enabled;
+    if (this.waterHorizonV2) this.waterHorizonV2.visible = false;
+  }
+
+  _syncFpsCounter() {
+    if (!this.fpsEl && typeof document !== 'undefined') this.fpsEl = document.getElementById('fpscounter');
+    if (!this.fpsEl) return;
+    this.fpsEl.style.display = this.graphics?.fps ? 'block' : 'none';
+    if (!this.graphics?.fps) {
+      this._fpsFrames = 0;
+      this._fpsAccum = 0;
+      this.fpsEl.textContent = '-- FPS';
+    }
+  }
+
+  _updateFpsCounter() {
+    if (!this.graphics?.fps) return;
+    if (!this.fpsEl && typeof document !== 'undefined') this.fpsEl = document.getElementById('fpscounter');
+    if (!this.fpsEl) return;
+    this._fpsFrames = (this._fpsFrames || 0) + 1;
+    this._fpsAccum = (this._fpsAccum || 0) + (this._lastDt || 1 / 60);
+    if (this._fpsAccum < 0.35) return;
+    const fps = Math.round(this._fpsFrames / this._fpsAccum);
+    this.fpsEl.textContent = `${fps} FPS`;
+    this._fpsFrames = 0;
+    this._fpsAccum = 0;
   }
 
   resetWorld() {
@@ -659,7 +692,7 @@ export class Renderer {
     this.waterMeshV2 = waterV2;
     this.waterHorizonV2 = this._makeWaterV2Horizon(w, h, waterY);
     this.scene.add(this.waterHorizonV2);
-    if (this.waterV2Enabled) water.visible = false;
+    this._syncWaterVisualMode();
     this.seaY = waterY;
     this._rebuildWaterMesh(true);
 
@@ -2335,7 +2368,7 @@ export class Renderer {
     for (const idx of touched) {
       if (Math.abs(this.waterTarget[idx] - this.waterDepth[idx]) > WATER_EASE_SNAP) this._waterEasing.add(idx);
     }
-    for (const fx of frontFx) this._spawnWaterFrontCloud(fx);
+    if (this.waterV2Enabled) for (const fx of frontFx) this._spawnWaterFrontCloud(fx);
     this._floodMaskSettled = false;   // Flutmaske muss neu einschwingen
   }
 
@@ -3250,19 +3283,20 @@ export class Renderer {
   }
 
   _waterWaveAt(wx, wz) {
+    if (!this.waterV2Enabled) return 0;
     const idx = this._tileIndexAt(wx, wz);
     if (idx < 0 || !this._isPermanentWaterCell(idx) || this._visibleWaterDepth(idx) <= 0.012) return 0;
     return this._waterWaveUnchecked(wx, wz, this._isSeaWaterCell(idx, this.waterDepth?.[idx] || 0) ? 1 : 0);
   }
 
   _seaWaveAt(wx, wz) {
+    if (!this.waterV2Enabled) return 0;
     if (!this._isSeaWorldPoint(wx, wz)) return 0;
     return this._waterWaveUnchecked(wx, wz, 1);
   }
 
   _waterWaveUnchecked(wx, wz, sea = 1) {
-    // Spiegelt die Hauptwellen des Wasser-Shaders, damit Boote/Pumpen auf Meer UND Binnenwasser
-    // exakt auf der sichtbaren Oberfläche sitzen. Meer = lange Dünung, Binnen = kürzere ruhige Wellen.
+    // Spiegelt die Hauptwellen des verbesserten Wassers, damit Boote/Pumpen auf der sichtbaren Oberfläche sitzen.
     const storm = this._waterStorm || 0;
     const seaMix = smoothstep(0, 0.6, sea);
     const amp = (WATER_WAVE_INLAND_AMP * (1 - seaMix) + WATER_WAVE_SEA_AMP * seaMix)
@@ -5593,30 +5627,54 @@ export class Renderer {
     }
   }
 
-  spawnLandslide(path) {
+  spawnLandslide(path, branches = null) {
     if (!path || path.length < 2) return;
     const x0 = path[0], z0 = path[1];
     const x1 = path[path.length - 2], z1 = path[path.length - 1];
     const ang = Math.atan2(z1 - z0, x1 - x0);
+    const localAngle = (n) => {
+      const a = Math.max(0, n - 2);
+      const b = Math.min(path.length - 2, n + 2);
+      return Math.atan2(path[b + 1] - path[a + 1], path[b] - path[a]);
+    };
     for (let n = 0; n < path.length && this._canSpawnEffect(); n += 2) {
-      const x = path[n], z = path[n + 1], y = this.heightAt(x, z);
-      this._sprite(0x8b7057, x, y + 0.7, z, 1.7, 0.8 + n * 0.03,
-        { grow: 1.6, vy: 0.45, vx: Math.cos(ang) * 1.6, vz: Math.sin(ang) * 1.6, opacity: 0.58 });
+      const a = localAngle(n);
+      const side = (Math.random() - 0.5) * (0.7 + Math.random() * 0.9);
+      const px = -Math.sin(a), pz = Math.cos(a);
+      const x = path[n] + px * side, z = path[n + 1] + pz * side, y = this.heightAt(x, z);
+      const speed = 1.15 + Math.random() * 1.25;
+      this._sprite(0x8b7057, x, y + 0.65, z, 1.2 + Math.random() * 0.9, 0.65 + Math.random() * 0.5 + n * 0.018,
+        { grow: 1.25 + Math.random() * 0.75, vy: 0.34 + Math.random() * 0.28, vx: Math.cos(a) * speed + px * side * 0.12, vz: Math.sin(a) * speed + pz * side * 0.12, opacity: 0.46 + Math.random() * 0.18 });
       if (n + 3 < path.length) {
+        const b = localAngle(n + 2);
         const mx = (x + path[n + 2]) * 0.5, mz = (z + path[n + 3]) * 0.5;
-        this._sprite(0x5b493a, mx, this.heightAt(mx, mz) + 0.45, mz, 0.85, 0.65,
-          { grow: 0.7, vx: Math.cos(ang) * 2.2, vz: Math.sin(ang) * 2.2, opacity: 0.45 });
+        this._sprite(0x5b493a, mx, this.heightAt(mx, mz) + 0.45, mz, 0.65 + Math.random() * 0.55, 0.45 + Math.random() * 0.35,
+          { grow: 0.55 + Math.random() * 0.45, vx: Math.cos(b) * (1.5 + Math.random() * 1.3), vz: Math.sin(b) * (1.5 + Math.random() * 1.3), opacity: 0.34 + Math.random() * 0.18 });
       }
     }
-    for (let i = 0; i < 3 && this._canSpawnEffect(); i++) {
-      const t = i / 3;
-      const x = x0 + (x1 - x0) * t, z = z0 + (z1 - z0) * t, y = this.heightAt(x, z);
+    if (branches && branches.length >= 2) {
+      for (let n = 0; n < branches.length && this._canSpawnEffect(); n += 2) {
+        const x = branches[n], z = branches[n + 1], y = this.heightAt(x, z);
+        const a = ang + (Math.random() - 0.5) * 1.4;
+        this._sprite(0x7b6047, x, y + 0.45, z, 0.75 + Math.random() * 0.75, 0.42 + Math.random() * 0.32,
+          { grow: 0.9 + Math.random() * 0.8, vy: 0.24 + Math.random() * 0.32, vx: Math.cos(a) * (0.7 + Math.random() * 1.1), vz: Math.sin(a) * (0.7 + Math.random() * 1.1), opacity: 0.35 + Math.random() * 0.18 });
+      }
+    }
+    const rockCount = 2 + ((Math.random() * 3) | 0);
+    for (let i = 0; i < rockCount && this._canSpawnEffect(); i++) {
+      const p = Math.min(path.length - 2, ((Math.random() * Math.max(1, path.length / 2 - 1)) | 0) * 2);
+      const q = Math.min(path.length - 2, p + 2);
+      const t = Math.random();
+      const x = path[p] + (path[q] - path[p]) * t;
+      const z = path[p + 1] + (path[q + 1] - path[p + 1]) * t;
+      const y = this.heightAt(x, z);
+      const a = localAngle(p);
       const m = new THREE.Mesh(new THREE.DodecahedronGeometry(0.14 + Math.random() * 0.14, 0), this.envMats.dark);
       m.position.set(x, y + 0.8, z); m.castShadow = true;
       this.scene.add(m);
       this._addEffect({
         mesh: m, life: 0, max: 1.2, opacity: 1, noFade: true,
-        vx: Math.cos(ang) * (2.2 + Math.random() * 1.8), vz: Math.sin(ang) * (2.2 + Math.random() * 1.8), vy: 1.5,
+        vx: Math.cos(a) * (1.8 + Math.random() * 2.2), vz: Math.sin(a) * (1.8 + Math.random() * 2.2), vy: 1.2 + Math.random() * 0.7,
         grav: true, spin: 8, groundY: y,
       });
     }
@@ -6118,7 +6176,7 @@ export class Renderer {
         this.spawnAvalanche(ev.path || [ev.x, ev.y]);
         if (audio) audio.rumble();
       } else if (ev.type === 'landslide') {
-        this.spawnLandslide(ev.path || [ev.x, ev.y]);
+        this.spawnLandslide(ev.path || [ev.x, ev.y], ev.branches || null);
         if (audio && vol > 0.05) audio.rocks(vol);
       } else if (ev.type === 'mine') {
         this.spawnMining(ev.x, ev.y);
@@ -6157,9 +6215,9 @@ export class Renderer {
         u.value += (on - u.value) * Math.min(1, dt * 4);
       }
     }
-    this._spawnCurrentParticles(dt);
+    if (this.waterV2Enabled) this._spawnCurrentParticles(dt);
     this._sweepTreesByCurrent(dt);
-    this._spawnSourceParticles(dt);
+    if (this.waterV2Enabled) this._spawnSourceParticles(dt);
     for (let i = this.effects.length - 1; i >= 0; i--) {
       const f = this.effects[i]; f.life += dt;
       const effectVisible = f.alwaysVisible || visible;
@@ -6558,7 +6616,7 @@ export class Renderer {
       if (this.waterMat.userData.uSky) this.waterMat.userData.uSky.value.copy(sky);
       if (this.waterMat.userData.uSkyAmt) this.waterMat.userData.uSkyAmt.value = 0.18 + d * 0.34;
     }
-    if (this.waterMatV2) {
+    if (this.waterMatV2 && this.waterV2Enabled) {
       // Wasser V2: Sonnenrichtung, Farben, Deckkraft nachführen (uTime läuft im render()).
       this._waterV2SunDir = (this._waterV2SunDir || new THREE.Vector3()).copy(this.sun.position).sub(this.camTarget);
       updateWaterV2(this.waterMatV2, {
@@ -6838,12 +6896,12 @@ export class Renderer {
   }
 
   render() {
-    // Wellen laufen jetzt im Wasser-Shader (Vertex-Höhe); pro Frame nur Zeit/Sturm nachführen.
+    this._updateFpsCounter();
     if (this.waterMat) {
       if (this.waterMat.userData.uTime) this.waterMat.userData.uTime.value = this.time;
       if (this.waterMat.userData.uStorm) this.waterMat.userData.uStorm.value = this._waterStorm || 0;
     }
-    if (this.waterMatV2) this.waterMatV2.uniforms.uTime.value = this.time; // Wasser V2: Wellen-Zeit
+    if (this.waterMatV2 && this.waterV2Enabled) this.waterMatV2.uniforms.uTime.value = this.time; // Wasser V2: Wellen-Zeit
     if (this.perf.faunaStep > 0) {
       this._faunaUpdateT += this._lastDt;
       if (this._faunaUpdateT >= this.perf.faunaStep) {
@@ -6992,12 +7050,10 @@ function makeWaterFlowTexture(size = 128) {
 }
 
 function makeWaterMaterial() {
-  const flowTexture = makeWaterFlowTexture();
   const mat = new THREE.MeshBasicMaterial({
     color: 0x55c8f2,
-    map: flowTexture,
     transparent: true,
-    opacity: 0.44,
+    opacity: 0.38,
     vertexColors: true,
     depthWrite: false,
     side: THREE.DoubleSide,
@@ -7005,72 +7061,7 @@ function makeWaterMaterial() {
     polygonOffsetFactor: -1,
     polygonOffsetUnits: -2,
   });
-  mat.userData.flowTexture = flowTexture;
   mat.userData.baseColor = new THREE.Color(0x55c8f2);
-  // Wasseroberflächen-Shader: leichte Wellensimulation im Vertex-Shader (Vertex-Höhe schwingt) +
-  // Himmelsspiegelung und wandernde Glanzlichter im Fragment-Shader. Über aSea (Meer-Anteil je
-  // Vertex) skaliert: Binnengewässer bekommen kleine, ruhige Wellen, Meereswasser deutlich mehr.
-  // uTime/uStorm/uSky werden pro Frame nachgeführt.
-  mat.userData.uSky = { value: new THREE.Color(0x9ec8e8) };
-  mat.userData.uSkyAmt = { value: 0.8 };
-  mat.userData.uTime = { value: 0 };
-  mat.userData.uStorm = { value: 0 };
-  mat.userData.uWaveInland = { value: WATER_WAVE_INLAND_AMP }; // Wellen-Amplitude Binnengewässer (ruhig)
-  mat.userData.uWaveSea = { value: WATER_WAVE_SEA_AMP };       // Wellen-Amplitude Meer (lebhafter)
-  mat.onBeforeCompile = (shader) => {
-    shader.uniforms.uSky = mat.userData.uSky;
-    shader.uniforms.uSkyAmt = mat.userData.uSkyAmt;
-    shader.uniforms.uTime = mat.userData.uTime;
-    shader.uniforms.uStorm = mat.userData.uStorm;
-    shader.uniforms.uWaveInland = mat.userData.uWaveInland;
-    shader.uniforms.uWaveSea = mat.userData.uWaveSea;
-    shader.vertexShader =
-      'attribute float aSea;\nattribute float aAlpha;\nvarying vec3 vWaterWPos;\nvarying float vSea;\nvarying float vCrest;\nvarying float vWaterAlpha;\n'
-      + 'uniform float uTime;\nuniform float uStorm;\nuniform float uWaveInland;\nuniform float uWaveSea;\n'
-      + shader.vertexShader.replace(
-        '#include <begin_vertex>',
-        `#include <begin_vertex>
-        vSea = aSea;
-        vWaterAlpha = aAlpha;
-        float seaMix = smoothstep(0.0, 0.6, aSea);
-        // Amplitude je nach Meer-Anteil: Binnen wenig, Meer viel; Sturm verstärkt See stärker.
-        float waveAmp = mix(uWaveInland, uWaveSea, seaMix) * (1.0 + uStorm * (0.25 + seaMix * 0.35));
-        // Gleicher Wasser-Simulationspfad für Meer und Binnenwasser, aber mit anderen Wellenprofilen.
-        float inland = sin(transformed.x * 0.165 + transformed.z * 0.075 + uTime * 0.78)
-                     + 0.38 * sin(transformed.z * 0.125 - transformed.x * 0.048 + uTime * 1.10);
-        float seaWave = sin(transformed.x * 0.085 + transformed.z * 0.020 + uTime * 1.55)
-                      + 0.58 * sin(transformed.z * 0.070 - transformed.x * 0.032 + uTime * 1.05);
-        float wph = mix(inland, seaWave, seaMix);
-        float inlandRip = sin(transformed.x * 0.52 + transformed.z * 0.39 + uTime * 1.55) * 0.08;
-        float seaRip = sin(transformed.x * 0.34 + transformed.z * 0.28 + uTime * 2.7) * 0.22
-                     + sin(transformed.z * 0.45 - transformed.x * 0.26 + uTime * 3.2) * 0.16;
-        transformed.y += (wph + mix(inlandRip, seaRip, seaMix)) * waveAmp;
-        vCrest = wph;
-        vWaterWPos = (modelMatrix * vec4(transformed, 1.0)).xyz;`,
-      );
-    shader.fragmentShader =
-      'uniform vec3 uSky;\nuniform float uSkyAmt;\nuniform float uTime;\nvarying vec3 vWaterWPos;\nvarying float vSea;\nvarying float vCrest;\nvarying float vWaterAlpha;\n'
-      + shader.fragmentShader.replace(
-        '#include <dithering_fragment>',
-        `#include <dithering_fragment>
-        vec3 vDir = normalize(cameraPosition - vWaterWPos);
-        // Schärferer Fresnel → Himmelsspiegelung nur am sehr streifenden Saum, gedeckelt, damit
-        // tiefes Wasser seine dunkle Eigenfarbe behält.
-        float fres = pow(1.0 - clamp(vDir.y, 0.0, 1.0), 5.0);
-        float skyMix = min(0.42, fres * uSkyAmt);
-        gl_FragColor.rgb = mix(gl_FragColor.rgb, uSky, skyMix);
-        // Wellenkämme heller (Himmelsglanz) — auf See stärker als auf Binnenwasser.
-        float crest = clamp(vCrest * 0.5 + 0.5, 0.0, 1.0);
-        float glint = pow(crest, 3.0) * mix(0.05, 0.18, vSea);
-        // wandernde Funkel-Highlights pro Pixel (mehr auf See). Zwei nicht-harmonische Lagen +
-        // hoher Exponent → kleine, unregelmäßig verteilte Glitzerpunkte statt eines Punktrasters.
-        float s1 = sin(vWaterWPos.x * 0.90 + uTime * 2.2) * sin(vWaterWPos.z * 0.80 - uTime * 1.7);
-        float s2 = sin(vWaterWPos.x * 1.37 - vWaterWPos.z * 0.60 + uTime * 1.3) * sin(vWaterWPos.z * 1.21 + uTime * 2.9);
-        float spark = (pow(max(0.0, s1), 8.0) + pow(max(0.0, s2), 8.0) * 0.7) * mix(0.03, 0.12, vSea);
-        gl_FragColor.rgb += uSky * (glint + spark);
-        gl_FragColor.a = clamp(gl_FragColor.a + fres * 0.18 * uSkyAmt + spark * 0.28, 0.0, 0.76) * clamp(vWaterAlpha, 0.0, 1.0);`,
-      );
-  };
   return mat;
 }
 

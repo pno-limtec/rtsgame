@@ -14,11 +14,12 @@
 
   /* Ressourcenleiste oben: schmale, schwebende Pille statt Vollbalken */
   #topbar { position:fixed; top:8px; left:50%; transform:translateX(-50%); max-width:calc(100% - 24px);
-    display:flex; gap:13px; align-items:center; padding:6px 14px; background:var(--hud);
-    border:1px solid var(--line); border-radius:9px; font-size:13px; z-index:10; white-space:nowrap;
+    display:flex; gap:8px; align-items:center; padding:4px 10px; background:var(--hud);
+    border:1px solid var(--line); border-radius:8px; font-size:12px; z-index:10; white-space:nowrap;
     box-shadow:0 3px 14px #0008; }
-  #topbar .res { display:flex; gap:5px; align-items:center; }
+  #topbar .res { display:flex; gap:4px; align-items:center; }
   #topbar .res b { color:#fff; font-variant-numeric:tabular-nums; }
+  #topbar .rescap { font-size:9.5px; color:rgba(255,255,255,.62); margin-left:1px; }
   #topbar .weather { gap:6px; }
   #topbar .forecast { display:flex; align-items:center; gap:3px; opacity:.78; max-width:64px; overflow:hidden; }
   #topbar .wstep { font-size:12px; line-height:1; }
@@ -26,6 +27,9 @@
   #topbar .topaction { height:22px; padding:0 7px; background:#161d27; border:1px solid var(--line);
     color:#eef6ff; border-radius:4px; cursor:pointer; font-size:11px; }
   #topbar .topaction:hover, #topbar .topaction.active { border-color:var(--accent); color:#eafcff; }
+  #topbar .topselect { height:22px; max-width:148px; background:#111822; border:1px solid var(--line);
+    color:#fff; border-radius:4px; padding:0 6px; font-size:11px; }
+  #topbar .topaction:disabled { opacity:.45; cursor:not-allowed; }
   .svgicon { width:16px; height:16px; display:inline-block; flex:0 0 auto; vertical-align:-3px; color:currentColor; }
   .topicon, .ricon { color:#eaf6ff; }
   .tinyicon { width:13px; height:13px; color:#c8d6e6; }
@@ -37,9 +41,9 @@
   .roleicon { width:13px; height:13px; vertical-align:-2px; }
   #topbar .dot { width:9px;height:9px;border-radius:50%; }
   #topbar .sep { width:1px; align-self:stretch; background:var(--line); }
-  #topbar .res[data-res] { padding:3px 6px; border:1px solid color-mix(in srgb, var(--res-color) 52%, #18202a);
-    border-radius:5px; background:color-mix(in srgb, var(--res-color) 14%, #101722); }
-  #topbar .res[data-res] .ricon, #topbar .res[data-res] b { color:var(--res-color); }
+  #topbar .res[data-res] { padding:2px 5px; border:1px solid #202a36; border-radius:5px; background:#101722cc; }
+  #topbar .res[data-res] .ricon { color:var(--res-color); }
+  #topbar .res[data-res] b, #topbar .res[data-res] b.low { color:#fff !important; }
   .low { color:#ff6b6b !important; }
 
   #menubtn { position:fixed; left:8px; top:8px; z-index:15; display:flex; align-items:center; gap:6px;
@@ -65,6 +69,9 @@
   #gamemenu .gfx label { display:flex; align-items:center; justify-content:space-between; gap:14px; font-size:12px; color:#c9d5e2; }
   #gamemenu .gfx input { width:16px; height:16px; accent-color:var(--accent); }
   #menustatus { min-height:16px; margin-top:9px; font-size:11px; color:#8fa0b8; }
+  #fpscounter { position:fixed; right:8px; bottom:8px; z-index:80; display:none; min-width:52px; padding:4px 7px;
+    background:var(--hud); border:1px solid var(--line); border-radius:5px; color:#eaf6ff; font-size:11px;
+    font-variant-numeric:tabular-nums; text-align:right; pointer-events:none; box-shadow:0 3px 12px #0008; }
 
   #techtree { position:fixed; inset:0; z-index:70; display:none; align-items:center; justify-content:center;
     padding:28px; background:#02060acc; }
@@ -190,7 +197,9 @@
 
   /* Minimap + Auswahl: schwebende Panels unten links (kein durchgehender Leerbalken mehr) */
   #minimap { position:fixed; left:8px; bottom:8px; width:172px; height:128px; background:#08111a;
-    border:1px solid var(--line); border-radius:9px; z-index:10; box-shadow:0 3px 14px #0008; }
+    border:1px solid var(--line); border-radius:9px; z-index:10; box-shadow:0 3px 14px #0008;
+    cursor:grab; touch-action:none; user-select:none; }
+  #minimap.dragging { cursor:grabbing; }
   #selpanel { position:fixed; left:188px; bottom:8px; max-width:420px; background:var(--hud);
     border:1px solid var(--line); border-radius:9px; padding:8px 10px; font-size:12px; z-index:10;
     box-shadow:0 3px 14px #0008; }
@@ -210,7 +219,8 @@
 
   /* Lobby-Overlay */
   #lobby { position:fixed; inset:0; background:#05080cdd; z-index:50; display:flex; align-items:center; justify-content:center; }
-  #lobby .card { background:#0d1117; border:1px solid var(--line); border-radius:8px; padding:18px; width:min(560px, calc(100vw - 20px)); max-height:calc(100vh - 24px); overflow:auto; }
+  #lobby .card { background:#0d1117; border:1px solid var(--line); border-radius:8px; padding:18px; width:min(560px, calc(100vw - 20px));
+    height:min(650px, calc(100vh - 24px)); overflow:hidden; display:flex; flex-direction:column; }
   #lobby .brand { display:grid; justify-items:center; gap:3px; margin:0 0 8px; }
   #lobby .logo { width:min(330px, 82vw); height:auto; display:block; }
   #lobby h1 { margin:0; font-size:1px; color:transparent; }
@@ -231,7 +241,7 @@
     background:#0b121b; color:#eefbff; box-shadow:0 -1px 10px #36c5f022; }
   #lobby .lobbypanel[hidden] { display:none; }
   #lobby .lobbypanel { padding:12px; background:#0b121b; border:1px solid #263548; border-radius:0 0 8px 8px;
-    box-shadow:inset 0 1px 0 #36c5f016; }
+    box-shadow:inset 0 1px 0 #36c5f016; flex:1 1 auto; min-height:0; overflow:auto; }
   #lobby .row2 { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
   #lobby .segmented { display:grid; grid-template-columns:1fr 1fr; gap:4px; margin-top:4px; }
   #lobby .segmented button { margin:0; width:auto; padding:8px; background:#161d27; color:#dbe7f4; border:1px solid var(--line); }
@@ -242,15 +252,14 @@
   #gamelist .gmeta { color:#8fa0b8; font-size:11px; }
   #gamelist button { margin:0; width:auto; padding:6px 9px; font-size:12px; }
   #lobbystatus { min-height:16px; margin-top:8px; color:#8fa0b8; font-size:12px; }
-  #spectatorbar { position:fixed; right:8px; top:54px; z-index:12; display:none; flex-direction:column; align-items:stretch; gap:4px;
+  #spectatorbar { position:fixed; right:8px; top:8px; z-index:12; display:none; flex-direction:column; align-items:stretch; gap:4px;
     background:var(--hud); border:1px solid var(--line); border-radius:7px; padding:4px 5px; box-shadow:0 3px 14px #0008;
-    font-size:11px; color:#aeb9c7; width:min(420px, calc(100vw - 16px)); }
-  #spectatorbar .spec-tabs { display:grid; grid-template-columns:repeat(2, minmax(0,1fr)); gap:3px; }
+    font-size:11px; color:#aeb9c7; width:min(360px, calc(100vw - 16px)); }
+  #spectatorbar .spec-tabs { display:grid; grid-template-columns:1fr; gap:3px; }
   #spectatorbar .spec-tab { display:flex; align-items:center; justify-content:center; gap:4px; height:24px;
-    background:#111822; border:1px solid var(--line); color:#aeb9c7; border-radius:4px; cursor:pointer; font-size:10.5px; }
+    background:#111822; border:1px solid var(--line); color:#aeb9c7; border-radius:4px; cursor:default; font-size:10.5px; }
   #spectatorbar .spec-tab[aria-selected="true"] { border-color:var(--accent); background:#10212b; color:#eefbff; }
-  #spectatorbar .spec-panel { display:flex; align-items:center; gap:3px; min-width:0; }
-  #spectatorbar .spec-panel[hidden] { display:none; }
+  #spectatorbar .spec-panel { display:flex; align-items:center; flex-wrap:wrap; gap:3px; min-width:0; }
   #spectatorbar select { max-width:126px; background:#161d27; border:1px solid var(--line); color:#fff; border-radius:4px; padding:3px 5px; font-size:11px; }
   #spectatorbar button { background:#161d27; border:1px solid var(--line); color:#fff; border-radius:4px; padding:3px 6px;
     cursor:pointer; font-size:11px; min-width:0; }
@@ -261,7 +270,7 @@
   #spectatorbar .spec-segments button { padding:3px 4px; }
   #spectatorbar .spec-segments button[aria-pressed="true"] { border-color:var(--accent); background:#10212b; color:#eefbff; }
   #spectatorbar .svgicon { width:13px; height:13px; }
-  #spectatorevents { display:flex; flex-wrap:nowrap; gap:2px; }
+  #spectatorevents { display:flex; flex:1 1 100%; flex-wrap:wrap; gap:2px; }
   #spectatorevents[hidden] { display:none; }
   #spectatorevents button { padding:3px 5px; }
   #lobby .lobbyopt { display:flex; align-items:center; justify-content:flex-start; width:fit-content; gap:8px; margin:10px 0 4px; font-size:12px; color:#aeb9c7; }
@@ -269,6 +278,7 @@
   #lobby .lobbyopt span { line-height:1.25; }
   #lobby .lobbyselect { width:100%; justify-content:space-between; }
   #lobby .lobbyselect select { width:auto; min-width:190px; padding:5px 6px; font-size:12px; }
+  #lobby .optionnote { margin:6px 0 2px; color:#8fa0b8; font-size:11px; line-height:1.35; }
   #scoreboard { position:fixed; left:8px; bottom:142px; width:172px; z-index:9;
     background:var(--hud); border:1px solid var(--line); border-radius:7px; padding:5px 6px;
     box-shadow:0 3px 14px #0008; font-size:11px; color:#cdd6e0; }
@@ -292,6 +302,7 @@
   <div id="helppanel" hidden aria-live="polite"></div>
   <div id="buildbar"></div>
   <canvas id="minimap" width="172" height="128"></canvas>
+  <div id="fpscounter" aria-live="off">-- FPS</div>
   <div id="selpanel" class="empty"><div class="title">Keine Auswahl</div><div id="selgrid"></div></div>
   <div id="warn"></div>
   <div id="gamemenu" aria-hidden="true">
@@ -311,7 +322,8 @@
         <h3>Grafikeinstellungen</h3>
         <label><span>Schatten</span><input id="gfxshadows" type="checkbox" checked></label>
         <label><span>Dynamische Lichter</span><input id="gfxlights" type="checkbox" checked></label>
-        <label><span>Wasser V2 (Ozean-Shader)</span><input id="gfxwasserv2" type="checkbox"></label>
+        <label><span>Verbesserte Wassersimulation</span><input id="gfxwasserv2" type="checkbox" checked></label>
+        <label><span>FPS anzeigen</span><input id="gfxfps" type="checkbox"></label>
       </div>
       <div class="gfx">
         <h3>Ton</h3>
@@ -350,17 +362,10 @@
       <label>Spielername</label>
       <input id="pname" value="Kommandant" maxlength="16">
       <div class="lobbytabs" role="tablist" aria-label="Spielstart">
-        <button class="lobbytab" type="button" data-lobbytab="join" aria-selected="true">Spiel beitreten</button>
-        <button class="lobbytab" type="button" data-lobbytab="create" aria-selected="false">Spiel erstellen</button>
+        <button class="lobbytab" type="button" data-lobbytab="create" aria-selected="true">Spiel erstellen</button>
+        <button class="lobbytab" type="button" data-lobbytab="join" aria-selected="false">Spiel beitreten</button>
       </div>
-      <div id="joinpanel" class="lobbypanel" data-lobbypanel="join">
-        <div class="row2">
-          <label>Privater Beitrittscode<input id="joincode" maxlength="8" autocomplete="off"></label>
-          <button id="joincodebtn" type="button">Code beitreten</button>
-        </div>
-        <div id="gamelist" aria-live="polite"></div>
-      </div>
-      <div id="createpanel" class="lobbypanel" data-lobbypanel="create" hidden>
+      <div id="createpanel" class="lobbypanel" data-lobbypanel="create">
         <div class="row2">
           <label>Spieltyp
             <select id="visibilitystart">
@@ -398,7 +403,15 @@
             <option value="4">Nature fucks you hard</option>
           </select>
         </label>
+        <p class="optionnote">Bestimmt, wie oft und wie hart Wetter, Überschwemmungen, Beben und Hangrutsche zuschlagen. Hohe Stufen sind bewusst chaotisch.</p>
         <button id="creategamebtn" type="button">Spiel erstellen</button>
+      </div>
+      <div id="joinpanel" class="lobbypanel" data-lobbypanel="join" hidden>
+        <div class="row2">
+          <label>Privater Beitrittscode<input id="joincode" maxlength="8" autocomplete="off"></label>
+          <button id="joincodebtn" type="button">Code beitreten</button>
+        </div>
+        <div id="gamelist" aria-live="polite"></div>
       </div>
       <select id="seatsel" hidden></select>
       <div id="seatlist" hidden></div>
@@ -409,20 +422,15 @@
   </div>
   <div id="spectatorbar">
     <div class="spec-tabs" role="tablist" aria-label="Zuschauer">
-      <button class="spec-tab" type="button" data-spectab="control" aria-selected="true">Sicht/Sim</button>
-      <button class="spec-tab" type="button" data-spectab="events" aria-selected="false">Events</button>
+      <button class="spec-tab" type="button" aria-selected="true">Zuschauer</button>
     </div>
-    <div class="spec-panel" data-specpanel="control">
-      <select id="viewselsel"></select>
-      <button id="spectatortakeover" type="button" hidden>Übernehmen</button>
+    <div class="spec-panel">
       <button id="spectatorspeed" type="button" hidden>Tempo x1</button>
       <span id="spectatortime" class="spec-segments" hidden aria-label="Tageszeit">
         <button type="button" data-spectatortime="auto">Auto</button>
         <button type="button" data-spectatortime="day">Tag</button>
         <button type="button" data-spectatortime="night">Nacht</button>
       </span>
-    </div>
-    <div class="spec-panel" data-specpanel="events" hidden>
       <span id="spectatorevents" hidden>
         <button type="button" data-spectatorevent="rain" title="Regenschauer beim aktuell stärkeren Spieler auslösen">Regen</button>
         <button type="button" data-spectatorevent="drought" title="Extreme Dürre auslösen">Dürre</button>

@@ -687,7 +687,45 @@ function lowestNeighbor(t, i, seen) {
   return low;
 }
 
-function nextSlideNeighbor(t, i, seen, dir) {
+function makeSlideStyle(world, maxLen = 1) {
+  return {
+    turn: (world.rng() - 0.5) * 0.8,
+    side: world.rng() < 0.5 ? -1 : 1,
+    alternate: world.rng() < 0.42,
+    fan: 0.08 + world.rng() * 0.18,
+    wander: 0.006 + world.rng() * 0.020,
+    forkStep: maxLen > 4 ? 1 + ((world.rng() * Math.max(1, maxLen - 2)) | 0) : -1,
+  };
+}
+
+function directionBetweenCells(t, a, b) {
+  if (a < 0 || b < 0) return null;
+  const ax = a % t.w, ay = (a / t.w) | 0;
+  const bx = b % t.w, by = (b / t.w) | 0;
+  const dx = bx - ax, dy = by - ay;
+  const len = Math.hypot(dx, dy) || 1;
+  return { dx: dx / len, dy: dy / len };
+}
+
+function blendDirections(a, b, mix = 0.36) {
+  if (!a) return b;
+  if (!b) return a;
+  const dx = a.dx * (1 - mix) + b.dx * mix;
+  const dy = a.dy * (1 - mix) + b.dy * mix;
+  const len = Math.hypot(dx, dy) || 1;
+  return { dx: dx / len, dy: dy / len };
+}
+
+function sideSlideCell(t, i, dir, side, dist = 1) {
+  if (!dir || i < 0) return -1;
+  const x = i % t.w, y = (i / t.w) | 0;
+  const px = -dir.dy, py = dir.dx;
+  const tx = Math.round(x + px * side * dist);
+  const ty = Math.round(y + py * side * dist);
+  return inBounds(t, tx, ty) ? tIdx(t, tx, ty) : -1;
+}
+
+function nextSlideNeighbor(world, t, i, seen, dir, style) {
   const x = i % t.w, y = (i / t.w) | 0;
   let best = -1, bestScore = -Infinity;
   const curH = t.height[i];
@@ -701,7 +739,14 @@ function nextSlideNeighbor(t, i, seen, dir) {
     const drop = curH - t.height[j];
     if (drop < -0.010) continue; // Momentum ja, aber keine sichtbaren Hügel hochklettern.
     const forward = dir ? (dx * dir.dx + dy * dir.dy) / dist : 0;
-    const score = drop * 3.2 + Math.max(0, forward) * 0.024 - dist * 0.002;
+    const lateral = dir ? (-dx * dir.dy + dy * dir.dx) / dist : 0;
+    const preferredSide = style?.alternate && seen && (seen.length & 1) ? -style.side : style?.side || 0;
+    const score = drop * 3.2
+      + Math.max(0, forward) * 0.024
+      + lateral * ((style?.turn || 0) * 0.012 + preferredSide * 0.006)
+      - Math.max(0, -forward) * 0.006
+      - dist * 0.002
+      + (style ? (world.rng() - 0.5) * style.wander : 0);
     if (score > bestScore) { bestScore = score; best = j; }
   }
   return best;
@@ -716,8 +761,10 @@ function slideCell(world, high, low, threshold, mult, cap, maxLen = 1) {
   const hx = high % t.w, hy = (high / t.w) | 0;
   const lx = low % t.w, ly = (low / t.w) | 0;
   const dLen = Math.hypot(lx - hx, ly - hy) || 1;
-  const dir = low >= 0 ? { dx: (lx - hx) / dLen, dy: (ly - hy) / dLen } : null;
+  let dir = low >= 0 ? { dx: (lx - hx) / dLen, dy: (ly - hy) / dLen } : null;
   const steps = Math.max(1, maxLen | 0);
+  const style = makeSlideStyle(world, steps);
+  const debris = [];
   for (let step = 0; step < steps; step++) {
     if (curLow < 0) break;
     const localThreshold = step === 0 ? threshold : Math.max(0.004, threshold * Math.max(0.16, 0.46 - step * 0.025));
@@ -734,6 +781,31 @@ function slideCell(world, high, low, threshold, mult, cap, maxLen = 1) {
     movedMass += a;
     applyHeightDelta(t, curHigh, a, false);
     applyHeightDelta(t, curLow, a * (step === steps - 1 ? 0.90 : 0.64), true);
+    const segDir = directionBetweenCells(t, curHigh, curLow) || dir;
+    if (segDir && steps > 2) {
+      const side = (style.alternate && ((step + style.forkStep) & 1)) ? -style.side : style.side;
+      const spread = 1 + (world.rng() < style.fan ? 1 : 0);
+      const fanCell = sideSlideCell(t, curLow, segDir, side, spread);
+      if (fanCell >= 0 && !path.includes(fanCell) && !debris.includes(fanCell)) {
+        const fanMass = Math.min(cap * 0.55, a * (style.fan + (step >= steps - 3 ? 0.16 : 0.05)) * (0.65 + world.rng() * 0.65));
+        if (fanMass > 0.0004) {
+          applyHeightDelta(t, fanCell, fanMass, true);
+          if (t.waterActive) t.waterActive.add(fanCell);
+          debris.push(fanCell);
+        }
+      }
+      if (step === style.forkStep || (step > 1 && world.rng() < style.fan * 0.22)) {
+        const cutCell = sideSlideCell(t, curHigh, segDir, -side, 1);
+        if (cutCell >= 0 && !path.includes(cutCell) && !debris.includes(cutCell)) {
+          const cutMass = Math.min(cap * 0.35, a * (0.10 + style.fan * 0.25));
+          if (cutMass > 0.0004) {
+            applyHeightDelta(t, cutCell, cutMass, false);
+            if (t.waterActive) t.waterActive.add(cutCell);
+            debris.push(cutCell);
+          }
+        }
+      }
+    }
     if (t.water[curHigh] > 0) {
       const wash = Math.min(t.water[curHigh] * (0.44 - Math.min(0.18, step * 0.04)), WATER_MAX_DEPTH - t.water[curLow]);
       if (wash > 0) { t.water[curHigh] -= wash; t.water[curLow] += wash; }
@@ -741,21 +813,22 @@ function slideCell(world, high, low, threshold, mult, cap, maxLen = 1) {
     if (t.waterActive) { t.waterActive.add(curHigh); t.waterActive.add(curLow); }
     path.push(curLow);
     moved = true;
+    dir = blendDirections(dir, directionBetweenCells(t, curHigh, curLow));
     curHigh = curLow;
-    curLow = step < 1 ? lowestNeighbor(t, curHigh, path) : nextSlideNeighbor(t, curHigh, path, dir);
+    curLow = step < 1 ? lowestNeighbor(t, curHigh, path) : nextSlideNeighbor(world, t, curHigh, path, dir, style);
   }
   if (!moved) return false;
   const severity = Math.min(2.0, 0.65 + movedMass * 18);
   damageSlidePath(world, path, severity);
   let minX = t.w, minY = t.h, maxX = 0, maxY = 0;
-  for (const i of path) {
+  for (const i of path.concat(debris)) {
     const x = i % t.w, y = (i / t.w) | 0;
     minX = Math.min(minX, x); minY = Math.min(minY, y);
     maxX = Math.max(maxX, x); maxY = Math.max(maxY, y);
   }
   wakeWaterAround(t, minX, minY, Math.max(1, maxX - minX + 1), Math.max(2, maxY - minY + 2));
   triggerSlideWaterWave(world, path, severity);
-  pushSlideEvent(world, path);
+  pushSlideEvent(world, path, debris);
   return true;
 }
 
@@ -1048,7 +1121,7 @@ function maybeMoveBuildingFootprint(world, e) {
   }
 }
 
-function pushSlideEvent(world, path) {
+function pushSlideEvent(world, path, debris = null) {
   if (world._slideFxTick !== world.tick) {
     world._slideFxTick = world.tick;
     world._slideFxCount = 0;
@@ -1060,8 +1133,17 @@ function pushSlideEvent(world, path) {
     const [wx, wy] = tileToWorld(i % t.w, (i / t.w) | 0);
     coords.push(wx, wy);
   }
+  const branches = [];
+  if (debris && debris.length) {
+    for (const i of debris) {
+      const [wx, wy] = tileToWorld(i % t.w, (i / t.w) | 0);
+      branches.push(wx, wy);
+    }
+  }
   world._slideFxCount++;
-  world.events.push({ type: 'landslide', x: coords[0], y: coords[1], path: coords });
+  const ev = { type: 'landslide', x: coords[0], y: coords[1], path: coords };
+  if (branches.length >= 2) ev.branches = branches;
+  world.events.push(ev);
 }
 
 function pushRockRollEvent(world, path) {
@@ -1183,50 +1265,113 @@ function triggerQuakeSlideBurst(world, q, wanted) {
     const low = lowestNeighbor(t, i, null);
     if (low < 0) continue;
     const slope = t.height[i] - t.height[low];
-    if (slope > QUAKE_SLOPE * 0.58 * profile.quakeSlope) candidates.push([slope, i, low]);
+    if (slope > QUAKE_SLOPE * 0.58 * profile.quakeSlope) {
+      const radial = Math.hypot(dx, dy) / Math.max(1, q.r);
+      const score = slope * (0.90 + world.rng() * 0.20) + radial * 0.010 + world.rng() * 0.018;
+      candidates.push([score, slope, i, low]);
+    }
   }
   candidates.sort((a, b) => b[0] - a[0]);
   let done = 0;
-  for (const [, i, low] of candidates) {
+  const starts = [];
+  const minGap = Math.max(2, Math.min(5, Math.round(q.r / 5)));
+  for (const [, slope, i, low] of candidates) {
     if (done >= wanted) break;
-    const len = scaledCount(10 + Math.min(12, Math.floor((t.height[i] - t.height[low] - QUAKE_SLOPE * 0.58 * profile.quakeSlope) * 120)), profile.slideLength, 4);
-    if (slideCell(world, i, low, QUAKE_SLOPE * 0.50 * profile.quakeSlope, QUAKE_SLIDE * 1.45 * profile.quakeSlide, 0.065 * profile.quakeSlide, len)) done++;
+    const ix = i % t.w, iy = (i / t.w) | 0;
+    if (starts.some((j) => {
+      const jx = j % t.w, jy = (j / t.w) | 0;
+      const dx = ix - jx, dy = iy - jy;
+      return dx * dx + dy * dy < minGap * minGap;
+    })) continue;
+    const excess = Math.max(0, slope - QUAKE_SLOPE * 0.58 * profile.quakeSlope);
+    const len = scaledCount(8 + ((world.rng() * 5) | 0) + Math.min(13, Math.floor(excess * 120)), profile.slideLength, 4);
+    if (slideCell(world, i, low, QUAKE_SLOPE * 0.50 * profile.quakeSlope, QUAKE_SLIDE * 1.45 * profile.quakeSlide, 0.065 * profile.quakeSlide, len)) {
+      starts.push(i);
+      done++;
+    }
   }
 }
 
 function carveQuakeFissure(world, q) {
   const t = world.terrain;
-  const len = Math.max(6, Math.round(Math.max(t.w, t.h) * 0.10));
-  const angle = Math.atan2(q.ty + 0.5 - t.h / 2, q.tx + 0.5 - t.w / 2) + (world.rng() - 0.5) * 0.55;
+  const maxDim = Math.max(t.w, t.h);
+  const len = Math.max(6, Math.round(maxDim * (0.075 + world.rng() * 0.075)));
+  const angle = Math.atan2(q.ty + 0.5 - t.h / 2, q.tx + 0.5 - t.w / 2)
+    + (world.rng() - 0.5) * (0.45 + world.rng() * 0.75);
   const ax = Math.cos(angle), ay = Math.sin(angle);
   const sx = -ay, sy = ax;
   const phase = world.rng() * Math.PI * 2;
+  const phase2 = world.rng() * Math.PI * 2;
+  const wobbleAmp = 0.70 + world.rng() * 1.55;
+  const wobbleFreq = 0.34 + world.rng() * 0.38;
+  const roughAmp = 0.22 + world.rng() * 0.72;
   const coords = [];
+  const branches = [];
+  const mainSeen = new Set();
+  const branchSeen = new Set();
   let touchedWater = false;
   const maxR = Math.hypot(t.w / 2, t.h / 2);
+  const addCoord = (out, seen, x, y) => {
+    if (!inBounds(t, x, y)) return;
+    const i = tIdx(t, x, y);
+    if (seen.has(i)) return;
+    seen.add(i);
+    out.push(Math.round((x + 0.5) * TILE), Math.round((y + 0.5) * TILE));
+  };
+  const carveCell = (x, y, baseDepth, sideFalloff) => {
+    if (!inBounds(t, x, y)) return;
+    const i = tIdx(t, x, y);
+    const rn = Math.min(1, Math.hypot(x + 0.5 - t.w / 2, y + 0.5 - t.h / 2) / maxR);
+    const floor = Math.max(SEA_LEVEL + 0.025, 0.82 - rn * 0.58 + (world.rng() - 0.5) * 0.016);
+    const depth = Math.max(baseDepth, t.height[i] - floor) * Math.max(0.24, sideFalloff);
+    if (depth <= 0.002) return;
+    applyHeightDelta(t, i, depth, false);
+    if (t.water[i] > 0.01 || t.height[i] < SEA_LEVEL) touchedWater = true;
+    if (t.waterActive) t.waterActive.add(i);
+  };
   for (let s = 0; s <= len; s++) {
-    const wobble = Math.sin(s * 0.55 + phase) * 1.2 + (world.rng() - 0.5) * 0.55;
+    const wobble = Math.sin(s * wobbleFreq + phase) * wobbleAmp
+      + Math.sin(s * (wobbleFreq * 1.85) + phase2) * roughAmp
+      + (world.rng() - 0.5) * 0.62;
     const cx = Math.round(q.tx + ax * s + sx * wobble);
     const cy = Math.round(q.ty + ay * s + sy * wobble);
     if (!inBounds(t, cx, cy)) continue;
-    for (let side = -1; side <= 1; side++) {
-      const x = Math.round(cx + sx * side), y = Math.round(cy + sy * side);
-      if (!inBounds(t, x, y)) continue;
-      const i = tIdx(t, x, y);
-      const rn = Math.min(1, Math.hypot(x + 0.5 - t.w / 2, y + 0.5 - t.h / 2) / maxR);
-      const floor = Math.max(SEA_LEVEL + 0.025, 0.82 - rn * 0.58 + Math.abs(side) * 0.025);
-      const depth = Math.max(side === 0 ? 0.105 : 0.045, t.height[i] - floor);
-      applyHeightDelta(t, i, depth, false);
-      if (t.water[i] > 0.01 || t.height[i] < SEA_LEVEL) touchedWater = true;
-      if (t.waterActive) t.waterActive.add(i);
+    const width = 1
+      + (world.rng() < 0.36 ? 1 : 0)
+      + (s > len * 0.22 && s < len * 0.82 && world.rng() < 0.16 ? 1 : 0);
+    const asym = (world.rng() - 0.5) * 0.55;
+    for (let side = -width; side <= width; side++) {
+      const lateral = Math.abs(side + asym);
+      const falloff = Math.max(0.28, 1 - lateral * 0.27) * (0.86 + world.rng() * 0.28);
+      const x = Math.round(cx + sx * side + ax * (world.rng() - 0.5) * 0.18);
+      const y = Math.round(cy + sy * side + ay * (world.rng() - 0.5) * 0.18);
+      carveCell(x, y, side === 0 ? 0.090 + world.rng() * 0.065 : 0.026 + falloff * 0.030, falloff);
     }
-    const i = tIdx(t, cx, cy);
-    coords.push(Math.round((cx + 0.5) * TILE), Math.round((cy + 0.5) * TILE));
+    addCoord(coords, mainSeen, cx, cy);
+    if (s > 2 && s < len - 2 && world.rng() < 0.075) {
+      const sign = world.rng() < 0.5 ? -1 : 1;
+      const ba = angle + sign * (0.58 + world.rng() * 0.82);
+      const bx = Math.cos(ba), by = Math.sin(ba);
+      const px = -by, py = bx;
+      const branchLen = 2 + ((world.rng() * 5) | 0);
+      for (let b = 1; b <= branchLen; b++) {
+        const bcX = Math.round(cx + bx * b + (world.rng() - 0.5) * 0.40);
+        const bcY = Math.round(cy + by * b + (world.rng() - 0.5) * 0.40);
+        const branchFalloff = Math.max(0.34, 1 - b / (branchLen + 1));
+        for (let side = -1; side <= 1; side++) {
+          const x = Math.round(bcX + px * side);
+          const y = Math.round(bcY + py * side);
+          carveCell(x, y, 0.020 + branchFalloff * 0.035, branchFalloff * (side === 0 ? 0.9 : 0.55));
+        }
+        addCoord(branches, branchSeen, bcX, bcY);
+      }
+    }
   }
-  for (let n = 0; n < coords.length; n += 2) wakeWaterAround(t, Math.floor(coords[n] / TILE), Math.floor(coords[n + 1] / TILE), 1, 2);
+  const allCoords = coords.concat(branches);
+  for (let n = 0; n < allCoords.length; n += 2) wakeWaterAround(t, Math.floor(allCoords[n] / TILE), Math.floor(allCoords[n + 1] / TILE), 1, 2);
   if (touchedWater) {
-    for (let n = 0; n < coords.length; n += 2) {
-      const tx = Math.floor(coords[n] / TILE), ty = Math.floor(coords[n + 1] / TILE);
+    for (let n = 0; n < allCoords.length; n += 2) {
+      const tx = Math.floor(allCoords[n] / TILE), ty = Math.floor(allCoords[n + 1] / TILE);
       const i = tIdx(t, tx, ty);
       if (inBounds(t, tx, ty) && t.height[i] < SEA_LEVEL) {
         t.water[i] = Math.min(WATER_MAX_DEPTH, Math.max(t.water[i], Math.min(0.12, SEA_LEVEL - t.height[i])));
@@ -1234,5 +1379,9 @@ function carveQuakeFissure(world, q) {
       }
     }
   }
-  if (coords.length >= 4) world.events.push({ type: 'landslide', x: coords[0], y: coords[1], path: coords });
+  if (coords.length >= 4) {
+    const ev = { type: 'landslide', x: coords[0], y: coords[1], path: coords };
+    if (branches.length >= 2) ev.branches = branches;
+    world.events.push(ev);
+  }
 }
