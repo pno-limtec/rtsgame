@@ -360,6 +360,9 @@ function simulateCA(t, dtW, world) {
 
   if (waterActive.size === 0) return;
 
+  // Angelehnt an die Stable-Fluids-Pipeline aus fluid-three: Zufluss/Advektion zuerst,
+  // dann ein lokaler Druck-/Oberflächenausgleich. Hier bewusst als deterministische
+  // Skalar-Grid-Simulation statt als WebGL-FBO, damit Server, Tests und Clients gleich laufen.
   // Deterministische, stabile Abarbeitung über Doppelpuffer (Delta).
   // Hydraulisches Flachwassermodell: Oberfläche = Boden + Wassertiefe. Wasser fließt
   // masseerhaltend zu allen tieferen 8-Nachbarn; Diagonalen zählen länger. Überschuss
@@ -727,7 +730,8 @@ function erodePooledWater(t, active, dtW, next) {
 // Schnee bleibt trocken: am Ende jedes Wasser-Schritts kaskadiert sämtliches Wasser, das auf
 // verschneiten Gipfelzellen liegt, zum tiefsten Nachbarn hinab. Die Schneezellen werden dabei
 // von hoch nach tief abgearbeitet, sodass Schmelzwasser in EINEM Schritt bis an den Schneerand
-// (und von dort als normaler Fluss weiter ins Tal) läuft. So liegt nie Wasser auf dem Schnee.
+// (und von dort als normaler Fluss weiter ins Tal) läuft. Das ist die Terrain-Variante der
+// fluid-three-Advektion: Masse wird talwärts getragen, ohne Schnee als Wasserfläche zu zeichnen.
 function drainSnowCaps(t, next) {
   if (!t.snow || !t.snowIdx || !t.snowIdx.length) return;
   if (!t._snowDrainOrder) {

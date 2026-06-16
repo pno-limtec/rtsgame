@@ -17,10 +17,20 @@ import {
   RAIN_SLIDE_SLOPE, RAIN_SLIDE_CHANCE, RAIN_SLIDE_AMT,
   WAVE_DPS, STORM_AIR_DPS, SNOW_LINE, WATER_MAX_DEPTH, SEA_LEVEL,
   CLOUD_SEED_RADIUS, CLOUD_SEED_DURATION, CLOUD_SEED_RAIN_DEPTH,
-  AVAL_SNOW, AVAL_SLOPE, AVAL_CHANCE, AVAL_DMG, AVAL_LEN, AVAL_ERODE, AVAL_DEPOSIT,
+  AVAL_SNOW, AVAL_SLOPE, AVAL_CHANCE, AVAL_LEN, AVAL_ERODE, AVAL_DEPOSIT,
 } from '../constants.js';
 import { tIdx, inBounds, worldToTile, tileToWorld, applyHeightDelta, wakeWaterAround } from '../terrain.js';
 import { applyDamage } from '../world.js';
+
+const NATURAL_SLIDE_TICKS = 300;          // gelegentliche trockene Hangrutsche (~30 s)
+const NATURAL_SLIDE_TRIES = 42;
+const NATURAL_SLIDE_CHANCE = 0.010;
+const NATURAL_SLIDE_SLOPE = 0.092;
+const SLIDE_ENTITY_DRAG = 0.58;           // Anteil eines Tiles, den der bewegte Hang mitnimmt
+const SLIDE_UNIT_DMG = 44;
+const SLIDE_BUILDING_DMG = 155;
+const SLIDE_SHEAR_DMG = 420;
+const SLIDE_INFRA_DMG = 980;
 
 export function initEnv(world) {
   world.env = {
@@ -97,6 +107,7 @@ export function stepEnvironment(world) {
   if ((env.weather === 'rain' || env.weather === 'storm') && (world.tick % 10) === 0) {
     checkRainSlides(world, env.weather === 'storm' ? 1.8 : 1);
   }
+  if ((world.tick % NATURAL_SLIDE_TICKS) === 0) checkNaturalSlopeSlides(world);
 
   // --- Blitzeinschläge bei Gewitter: treffen bevorzugt HOCH liegende Objekte ---
   if (env.weather === 'storm') {
@@ -252,25 +263,41 @@ function triggerAvalanche(world, start) {
     }
     if (s < AVAL_LEN * 0.58) applyHeightDelta(t, cur, Math.min(AVAL_ERODE * mass * 0.35, 0.018), false);
   }
-  // Schaden an allem im Pfad + Schmelzwasser am Auslauf; Wasser-CA wecken.
+  // Schmelzwasser/Schutt im Auslauf; der eigentliche Mitreiß-/Scherschaden kommt danach als
+  // kohärenter Massestrom (siehe applySlideForces).
   const coords = [];
   for (let p = 0; p < path.length; p++) {
     const i = path[p];
     const px = (i % t.w), py = (i / t.w) | 0;
     coords.push(Math.round((px + 0.5) * TILE), Math.round((py + 0.5) * TILE));
-    for (const e of world.entities.values()) {
-      if (e.dead || e.domain === 'air') continue;
-      const [etx, ety] = worldToTile(e.x, e.y);
-      if (etx === px && ety === py) applyDamage(world, e, AVAL_DMG * (e.etype === 'building' ? 0.7 : 1), null);
-    }
     if (p >= path.length - 5) {                    // Auslaufzone: Schnee/Schutt lagert an
       applyHeightDelta(t, i, Math.min(AVAL_DEPOSIT * mass, 0.035), true);
       t.water[i] = Math.min(WATER_MAX_DEPTH, t.water[i] + mass * 0.15);
       if (t.waterActive) t.waterActive.add(i);
     }
   }
+  applySlideForces(world, path, { severity: Math.min(2.6, 1 + mass * 0.9), avalanche: true });
   wakeWaterAround(t, start % t.w, (start / t.w) | 0, 1, AVAL_LEN);
   world.events.push({ type: 'avalanche', x: coords[0], y: coords[1], path: coords });
+}
+
+function checkNaturalSlopeSlides(world) {
+  const t = world.terrain;
+  let slid = 0;
+  for (let k = 0; k < NATURAL_SLIDE_TRIES; k++) {
+    const i = (world.rng() * t.w * t.h) | 0;
+    if (t.startSafe?.[i] || t.height[i] <= SEA_LEVEL + 0.08 || t.height[i] >= SNOW_LINE) continue;
+    if ((t.water?.[i] || 0) > 0.03) continue; // nasse Hänge prüft checkRainSlides dichter
+    const low = lowestNeighbor(t, i, null);
+    if (low < 0) continue;
+    const slope = t.height[i] - t.height[low];
+    if (slope <= NATURAL_SLIDE_SLOPE) continue;
+    const chance = NATURAL_SLIDE_CHANCE * Math.min(4.0, 1 + (slope - NATURAL_SLIDE_SLOPE) * 34);
+    if (world.rng() > chance) continue;
+    const len = 2 + Math.min(5, Math.floor((slope - NATURAL_SLIDE_SLOPE) * 70));
+    if (slideCell(world, i, low, NATURAL_SLIDE_SLOPE * 0.86, RAIN_SLIDE_AMT * 0.62, 0.030, len)) slid++;
+    if (slid >= 2) break;
+  }
 }
 
 export function checkRainSlides(world, boost = 1) {
@@ -351,6 +378,7 @@ function slideCell(world, high, low, threshold, mult, cap, maxLen = 1) {
   const t = world.terrain;
   const path = [high];
   let moved = false;
+  let movedMass = 0;
   let curHigh = high, curLow = low;
   const steps = Math.max(1, maxLen | 0);
   for (let step = 0; step < steps; step++) {
@@ -361,6 +389,7 @@ function slideCell(world, high, low, threshold, mult, cap, maxLen = 1) {
     const falloff = Math.max(0.35, 1 - step * 0.13);
     const a = Math.min(cap * falloff, (slope - localThreshold) * mult * falloff);
     if (a <= 0) break;
+    movedMass += a;
     applyHeightDelta(t, curHigh, a, false);
     applyHeightDelta(t, curLow, a * (step === steps - 1 ? 0.90 : 0.64), true);
     if (t.water[curHigh] > 0) {
@@ -374,7 +403,7 @@ function slideCell(world, high, low, threshold, mult, cap, maxLen = 1) {
     curLow = lowestNeighbor(t, curHigh, path);
   }
   if (!moved) return false;
-  damageSlidePath(world, path);
+  damageSlidePath(world, path, Math.min(2.0, 0.65 + movedMass * 18));
   let minX = t.w, minY = t.h, maxX = 0, maxY = 0;
   for (const i of path) {
     const x = i % t.w, y = (i / t.w) | 0;
@@ -386,22 +415,132 @@ function slideCell(world, high, low, threshold, mult, cap, maxLen = 1) {
   return true;
 }
 
-function damageSlidePath(world, path) {
+function damageSlidePath(world, path, severity = 1) {
+  applySlideForces(world, path, { severity });
+}
+
+function applySlideForces(world, path, opts = {}) {
   const t = world.terrain;
+  if (!path || path.length < 2) return;
+  const severity = Math.max(0.35, opts.severity || 1);
+  const cells = new Set(path);
+  const shear = new Set();
+  for (const i of path) {
+    const x = i % t.w, y = (i / t.w) | 0;
+    for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+      if (!dx && !dy) continue;
+      const nx = x + dx, ny = y + dy;
+      if (!inBounds(t, nx, ny)) continue;
+      const j = tIdx(t, nx, ny);
+      if (!cells.has(j)) shear.add(j);
+    }
+  }
+  tearLinearTerrain(t, cells, shear);
+  const dir = slideDirection(t, path);
   const impacted = new Set();
   for (const e of world.entities.values()) {
     if (e.dead || e.domain === 'air') continue;
-    const [etx, ety] = worldToTile(e.x, e.y);
-    for (const i of path) {
-      const x = i % t.w, y = (i / t.w) | 0;
-      if ((etx === x && ety === y)
-        || (e.etype === 'building' && etx >= x - 1 && etx <= x + 1 && ety >= y - 1 && ety <= y + 1)) {
-        if (!impacted.has(e.id)) {
-          impacted.add(e.id);
-          applyDamage(world, e, QUAKE_BUILDING_DMG * DT * (e.etype === 'building' ? 1 : 0.6), null);
-        }
-        break;
+    const hit = footprintSlideHit(t, e, cells, shear);
+    if (!hit) continue;
+    if (impacted.has(e.id)) continue;
+    impacted.add(e.id);
+    if (isLinearInfrastructure(e)) {
+      applyDamage(world, e, SLIDE_INFRA_DMG * severity * (hit.direct ? 1 : 0.62), null, opts.avalanche ? 'avalanche' : 'landslide');
+      continue;
+    }
+    if (isTerrainAnchoredBuilding(e)) {
+      const dmg = (hit.direct ? SLIDE_BUILDING_DMG : SLIDE_SHEAR_DMG) * severity * (opts.avalanche ? 1.25 : 1);
+      applyDamage(world, e, dmg, null, opts.avalanche ? 'avalanche' : 'landslide');
+      continue;
+    }
+    const drag = TILE * SLIDE_ENTITY_DRAG * Math.min(1.7, severity) * (hit.direct ? 1 : 0.45);
+    e.x = Math.max(TILE * 0.5, Math.min((t.w - 0.5) * TILE, e.x + dir.dx * drag));
+    e.y = Math.max(TILE * 0.5, Math.min((t.h - 0.5) * TILE, e.y + dir.dy * drag));
+    if (e.etype === 'building') {
+      maybeMoveBuildingFootprint(world, e);
+      const dmg = (hit.direct ? SLIDE_BUILDING_DMG : SLIDE_SHEAR_DMG) * severity * (opts.avalanche ? 1.25 : 1);
+      applyDamage(world, e, dmg, null, opts.avalanche ? 'avalanche' : 'landslide');
+    } else {
+      applyDamage(world, e, SLIDE_UNIT_DMG * severity * (opts.avalanche ? 1.8 : 1), null, opts.avalanche ? 'avalanche' : 'landslide');
+    }
+  }
+}
+
+function tearLinearTerrain(t, cells, shear) {
+  let roadChanged = false;
+  for (const i of cells) {
+    if (t.road?.[i]) { t.road[i] = 0; roadChanged = true; }
+    if (t.roadBuilt?.[i]) { t.roadBuilt[i] = 0; roadChanged = true; }
+    if (t.bridge?.[i]) t.bridge[i] = 0;
+    if (t.pontoon?.[i]) t.pontoon[i] = 0;
+  }
+  for (const i of shear) {
+    if (t.roadBuilt?.[i] && t.roadBuilt[i] > 0) { t.roadBuilt[i] = 0; roadChanged = true; }
+    if (t.pontoon?.[i]) t.pontoon[i] = 0;
+  }
+  if (roadChanged) t.roadDirty = true;
+}
+
+function slideDirection(t, path) {
+  const a = path[0], b = path[path.length - 1];
+  const ax = a % t.w, ay = (a / t.w) | 0;
+  const bx = b % t.w, by = (b / t.w) | 0;
+  const dx = bx - ax, dy = by - ay;
+  const len = Math.hypot(dx, dy) || 1;
+  return { dx: dx / len, dy: dy / len };
+}
+
+function footprintSlideHit(t, e, cells, shear) {
+  if (e.etype !== 'building') {
+    const [tx, ty] = worldToTile(e.x, e.y);
+    if (!inBounds(t, tx, ty)) return null;
+    const i = tIdx(t, tx, ty);
+    return cells.has(i) ? { direct: true } : shear.has(i) ? { direct: false } : null;
+  }
+  let edge = false;
+  const size = e.size || 1;
+  for (let yy = 0; yy < size; yy++) for (let xx = 0; xx < size; xx++) {
+    const x = e.tx + xx, y = e.ty + yy;
+    if (!inBounds(t, x, y)) continue;
+    const i = tIdx(t, x, y);
+    if (cells.has(i)) return { direct: true };
+    if (shear.has(i)) edge = true;
+  }
+  return edge ? { direct: false } : null;
+}
+
+function isLinearInfrastructure(e) {
+  const d = e.def || {};
+  return !!(d.pipe || d.roadBuilt || d.bridges || d.tunnels || e.kind === 'pipe' || e.kind === 'road' || e.kind === 'bridge');
+}
+
+function isTerrainAnchoredBuilding(e) {
+  if (e.etype !== 'building') return false;
+  const d = e.def || {};
+  return !!(e._fortified || d.terraform || d.waterBlocks || d.role === 'fortification' || d.role === 'hydro' || d.role === 'terrain');
+}
+
+function maybeMoveBuildingFootprint(world, e) {
+  const t = world.terrain;
+  if (isLinearInfrastructure(e) || isTerrainAnchoredBuilding(e)) return;
+  const size = e.size || 1;
+  const tx = Math.max(0, Math.min(t.w - size, Math.round(e.x / TILE - size / 2)));
+  const ty = Math.max(0, Math.min(t.h - size, Math.round(e.y / TILE - size / 2)));
+  if (tx === e.tx && ty === e.ty) return;
+  if (e._solid) {
+    for (let yy = 0; yy < size; yy++) for (let xx = 0; xx < size; xx++) {
+      const ox = e.tx + xx, oy = e.ty + yy;
+      if (inBounds(t, ox, oy)) {
+        const i = tIdx(t, ox, oy);
+        if (t.block?.[i] > 0) t.block[i]--;
       }
+    }
+  }
+  e.tx = tx; e.ty = ty;
+  if (e._solid) {
+    for (let yy = 0; yy < size; yy++) for (let xx = 0; xx < size; xx++) {
+      const nx = tx + xx, ny = ty + yy;
+      if (inBounds(t, nx, ny) && t.block) t.block[tIdx(t, nx, ny)]++;
     }
   }
 }
