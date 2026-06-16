@@ -31,6 +31,16 @@ const BUILD_ORDER = [
   { kind: 'shipyard',    reserve: true, want: (s) => s.coastal && s.shipyards < 1 && s.factories >= 1 && s.vehicleArmy >= 3 },
   { kind: 'airbase',     reserve: true, want: (s) => s.airbases < 1 && s.factories >= 1 && s.vehicleArmy >= 5 && (!s.coastal || s.shipyards >= 1 || s.faction === 'HLX') && s.credits > 1800 },
   { kind: 'mg_turret',   want: (s) => s.turrets < 1 && s.barracks >= 1 },
+  // Proaktive Basis-Flugabwehr als Geschwister des mg_turret (gleiches frühes Bau-Fenster, solange noch
+  // Erz fließt). Die reguläre flak_turret-Bedingung weiter unten verlangt enemyAir/army≥8, was in
+  // KI-vs-KI-Partien fast nie eintritt → flak_turret blieb eine tote Bauoption (Coverage-Ziel C, gemessen
+  // coverage.js). Der Gegner KANN Luft bauen → eine billige AA-Stellung ist sinnvolle Doktrin, kein Über-
+  // bau (gedeckelt flakTurrets<1, erst ab einer kleinen Armee → kein Verdrängen des Fahrzeugkerns).
+  { kind: 'flak_turret', want: (s) => s.flakTurrets < 1 && s.barracks >= 1 && s.army.length >= 5 },
+  // Solarpark früh & günstig (350 Erz, wie mg_turret → auch für die oft erz-knappe KI bezahlbar): liefert
+  // Tagstrom, entlastet das treibstoffhungrige Ölkraftwerk und kam in der regulären Liste (#49,
+  // credits>1000) real fast nie vor (Coverage-Ziel C). Wirtschafts-positiv → kein Risiko für den Siegpfad.
+  { kind: 'solar_plant', want: (s) => s.solars < 1 && s.powerPlants >= 1 && s.barracks >= 1 },
   { kind: 'trench',      want: (s) => s.trenches < 1 && s.barracks >= 1 && s.credits > 280 },
   { kind: 'wall',        want: (s) => s.walls < 3 && s.barracks >= 1 && s.credits > 360 },
   { kind: 'refinery',    want: (s) => s.refineries < 2 },
@@ -118,6 +128,11 @@ export function stepAi(world, player, applyCommand) {
   const builtRoute = !builtCoverage && !builtInfra && !builtBridge && manageAccessRoutes(world, player, s, applyCommand);
   if (!builtCoverage && !builtInfra && !builtBridge && !builtRoute) manageBuild(world, player, s, applyCommand);
   if (!manageCoverageProduction(world, player, s, applyCommand) && !world.aiCoverageTest) manageProduction(world, player, s, applyCommand);
+  // Verteidigungs-Filler läuft NACH der Armeeproduktion (die ihren Erzanspruch zuerst geltend macht) und
+  // baut nur aus dem Rest, der noch die Kosten eines Kampffahrzeugs übrig lässt → kein Verdrängen des
+  // Siegpfads. Bewusst NICHT an „reguläre Liste war untätig" gekoppelt: die Build-Order will fast immer
+  // noch irgendein Wirtschaftsgebäude → die Kopplung ließ den Filler praktisch nie laufen.
+  manageDefensiveCoverage(world, player, s, applyCommand);
   manageRecovery(world, player, s, applyCommand);
   manageSecondaryObjective(world, player, s, applyCommand);
   manageArmy(world, player, s, applyCommand);
@@ -926,7 +941,14 @@ function manageProduction(world, player, s, applyCommand) {
     if (sy.queue.length >= 1 || navalUnits >= NAVY_TARGET) continue;
     if (s.vehicleArmy < 3 && pressure < 2) continue;
     const r = world.rng();
-    const kind = navalUnits === 0 ? 'patrol_boat' : (r < 0.38 ? 'patrol_boat' : r < 0.68 ? 'destroyer' : r < 0.84 ? 'submarine' : 'underwater_drone');
+    // Zerstörer als GARANTIERTES zweites Schiff: ohne die Garantie blieb die Marine in kurzen Partien
+    // meist bei 1–2 Spähbooten stehen (rng würfelte den teureren Zerstörer/U-Boot selten) → destroyer/
+    // submarine kamen NIE vor (Coverage-Ziel C, gemessen coverage.js: nur patrol_boat). r wird weiter
+    // gelesen → RNG-Stream/brittle-Tests unverändert; balance-neutral (Zerstörer ist der reguläre
+    // Marine-Kern nach dem Spähboot).
+    const kind = navalUnits === 0 ? 'patrol_boat'
+      : navalUnits === 1 ? 'destroyer'
+      : (r < 0.38 ? 'patrol_boat' : r < 0.68 ? 'destroyer' : r < 0.84 ? 'submarine' : 'underwater_drone');
     if (afford(kind)) applyCommand(world, { type: 'produce', building: sy.id, kind }, player.id);
   }
 
@@ -951,6 +973,51 @@ function manageProduction(world, player, s, applyCommand) {
       : (seeders < 1 && airUnits >= 1 && world.rng() < 0.16) ? 'cloud_seeder'
         : (world.rng() < bomberShare ? 'bomber' : 'gunship');
     if (afford(kind)) applyCommand(world, { type: 'produce', building: air.id, kind }, player.id);
+  }
+}
+
+// Abdeckungs-/Festigungs-Reserve (läuft NUR, wenn die reguläre Build-Order in dieser Runde nichts
+// gebaut hat → Wirtschaft steht, kein dringenderes Gebäude offen). Errichtet EIN noch fehlendes
+// statisches Verteidigungs-/Wirtschaftsgebäude aus dem BUILD_ORDER-Schwanz (turret/flak_turret/
+// sam_site/solar_plant/depot/sonar), das die reguläre Liste in kurzen Partien fast nie erreicht
+// (frühere Wirtschafts-Einträge triggern immer wieder den 1-Gebäude-pro-Runde-Slot). Holt diese
+// Typen zuverlässig ins Spiel (Coverage-Ziel C; eindeutige Verteidigungssilhouetten Ziel F) OHNE den
+// Siegpfad zu gefährden: streng erz-überschuss-gated + tragfähige Armee + nie unter Endspieldruck +
+// eigener Bau-Throttle. KEIN world.rng() → RNG-Stream und brittle terrain-/wave-Smoke-Tests unberührt.
+// flak_turret/sam_site/sonar zuerst: ihre regulären BUILD_ORDER-Bedingungen verlangen enemyAir/
+// enemySubs, was in KI-vs-KI-Partien (kaum jemand baut Luft/U-Boote) praktisch NIE eintritt → diese
+// Typen sind in der regulären Liste DEADLOCKED und kamen real nie vor. Der proaktive Filler übernimmt
+// sie (billige Luftabwehr/Sensorik ist realistische Doktrin — der Gegner KANN Luft bauen). solar/depot/
+// turret kann die reguläre Liste selbst erreichen → niedrigere Priorität.
+const COVERAGE_FILL_BUILDINGS = ['flak_turret', 'sam_site', 'sonar', 'solar_plant', 'depot', 'turret'];
+function manageDefensiveCoverage(world, player, s, applyCommand) {
+  if (!s.hq) return;
+  const pressure = world.aiDirector?.pressure || 0;
+  if (pressure >= 2) return;                            // ab Endspieldruck fließt Erz in die Armee, nicht in Filler
+  if (s.vehicleArmy < 3) return;                        // erst ein tragfähiger Fahrzeugkern, dann Festigung
+  const underConstruction = s.buildings.filter(b => b.buildProgress < 1 && !INFRA_KINDS.has(b.kind));
+  if (underConstruction.length >= 2) return;
+  const have = new Set(s.buildings.map(b => b.kind));
+  for (const kind of COVERAGE_FILL_BUILDINGS) {
+    if (have.has(kind)) continue;
+    const def = world.data.buildings[kind];
+    if (!def) continue;
+    if (kind === 'sonar' && !(s.coastal && s.shipyards >= 1)) continue;  // Sonar nur am Wasser sinnvoll
+    const cost = effectiveCost(world, player.id, def);
+    if (!canAfford(player, cost)) continue;
+    // Armee-Puffer wahren: nach dem Bau müssen noch die Kosten EINES Kampffahrzeugs übrig bleiben, damit
+    // der Filler den Fahrzeugnachschub nicht abwürgt (jeder Typ wird ohnehin nur EINMAL gebaut → die
+    // gesamte Lebenszeit-Umleitung ist auf wenige Gebäude begrenzt).
+    const tankOre = effectiveCost(world, player.id, world.data.units.tank).ore || 0;
+    if ((player.resources.ore - (cost.ore || 0)) < tankOre) continue;
+    let spot;
+    if (def.requiresWater) spot = pickCoastalSpot(world, player, s, def.size || 1, def);
+    else if (def.role === 'fortification') spot = pickDefensiveSpot(world, player, s, def);
+    else spot = pickBuildSpot(world, s.hq, def.size || 1, def);
+    if (!spot) continue;
+    if (prepareBuildRoute(world, player, s, spot, def, applyCommand)) return;
+    applyCommand(world, { type: 'build', building: kind, tx: spot[0], ty: spot[1] }, player.id);
+    return;
   }
 }
 
