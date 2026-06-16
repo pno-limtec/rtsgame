@@ -479,7 +479,9 @@ export class Renderer {
     const pos = geo.attributes.position;
     const colors = new Float32Array(pos.count * 3);
     const cLand = new THREE.Color(0x4a5d34), cHill = new THREE.Color(0x6b5d3e),
-      cCliff = new THREE.Color(0x556069), cWater = new THREE.Color(0x1d74b4), cBridge = new THREE.Color(0x4a4036),
+      // Seeboden gedämpftes Dunkelteal statt grellem Blau: das durchscheinende Wassermesh liefert
+      // die Blaufärbung; ein heller blauer Grund wirkte durchs Wasser wie Himmel (bodenlos).
+      cCliff = new THREE.Color(0x556069), cWater = new THREE.Color(0x163f52), cBridge = new THREE.Color(0x4a4036),
       cBeach = new THREE.Color(0xb8a36f);
     for (let i = 0; i < pos.count; i++) {
       const gx = i % w, gy = (i / w) | 0;
@@ -492,7 +494,10 @@ export class Renderer {
       const beach = t !== 3 && t !== 4 && e >= waterLevel - 0.01 && e <= waterLevel + 0.085 && this._isNearSeaCell(gx, gy, 3, type);
       const c = beach ? cBeach : t === 3 ? cWater : t === 2 ? cCliff : t === 1 ? cHill : t === 4 ? cBridge : cLand;
       const v = beach ? 0.92 + hash01(gx, gy, 19) * 0.16 : 0.85 + e * 0.3;
-      colors[i * 3] = c.r * v; colors[i * 3 + 1] = c.g * v; colors[i * 3 + 2] = c.b * v;
+      // Seeboden mit der Tiefe deutlich abdunkeln: das helle Wasserblau (cWater) schien sonst durch
+      // das durchscheinende Wasser und ließ tiefe Becken/Meer „himmelblau" und bodenlos wirken.
+      const deepDark = t === 3 ? 1 - Math.min(0.80, Math.max(0, waterLevel - e) * 2.4) : 1;
+      colors[i * 3] = c.r * v * deepDark; colors[i * 3 + 1] = c.g * v * deepDark; colors[i * 3 + 2] = c.b * v * deepDark;
     }
     geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
     geo.computeVertexNormals();
