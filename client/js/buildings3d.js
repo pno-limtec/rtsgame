@@ -188,10 +188,27 @@ export function makeBuildingMesh(kind, size, mats) {
       break;
     }
     case 'pontoon': {
-      // Pontonbrücke: flaches Floß-Segment knapp über der Wasseroberfläche (improvisiert, niedrig).
-      g.add(box(s * 0.92, 0.18, s * 0.92, dark, 0, 0.12, 0));               // Deck
-      g.add(box(s * 0.96, 0.22, s * 0.16, metal, 0, 0.05, -s * 0.4));       // Schwimmkörper vorn
-      g.add(box(s * 0.96, 0.22, s * 0.16, metal, 0, 0.05, s * 0.4));        // Schwimmkörper hinten
+      // Pontonbrücke: improvisierter, SCHWIMMENDER Übergang. Markante zylindrische Schwimmkörper
+      // (Tuben) liegen auf der Wasserlinie, darüber eine lose Bohlen-Beplankung mit Fugen und ein
+      // niedriges Seil-Geländer. Bewusst flach/niedrig gehalten — die Silhouette soll sofort
+      // „schwimmend/behelfsmäßig" lesen, klar anders als die hohe, massive Festbrücke (case 'bridge').
+      const drumY = 0.07;
+      for (const x of [-s * 0.32, 0, s * 0.32]) {                          // 3 Flotations-Tuben längs (Z)
+        const tube = cyl(0.17, 0.17, s * 1.02, metal, x, drumY, 0, 12);
+        tube.rotation.x = Math.PI / 2; g.add(tube);
+      }
+      g.add(box(s * 0.92, 0.05, s * 0.9, dark, 0, 0.17, 0));               // Querträger-Rahmen
+      for (let i = 0; i < 6; i++) {                                        // lose Querbohlen mit Fugen
+        const pz = -s * 0.38 + i * (s * 0.76 / 5);
+        g.add(box(s * 0.9, 0.05, s * 0.1, roof, 0, 0.215, pz));
+      }
+      for (const x of [-s * 0.44, s * 0.44]) {                             // niedriges Seil-Geländer
+        g.add(box(0.035, 0.035, s * 0.86, dark, x, 0.34, 0));             // durchhängendes Seil
+        for (const pz of [-s * 0.36, 0, s * 0.36])
+          g.add(cyl(0.025, 0.03, 0.24, metal, x, 0.28, pz, 6));           // Geländer-Pfosten
+      }
+      g.add(box(s * 0.52, 0.04, 0.06, hazard, 0, 0.245, -s * 0.18));       // Warn-/Teamfarbe-Streifen
+      g.add(box(s * 0.52, 0.04, 0.06, hazard, 0, 0.245, s * 0.18));
       break;
     }
     case 'tunnel': {
