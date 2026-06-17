@@ -885,6 +885,13 @@ function manageProduction(world, player, s, applyCommand) {
   // Spar-Reserve: genug Erz zurückhalten, um das nächste Schlüsselgebäude tatsächlich zu
   // erreichen. Fabrik/Werft haben Vorrang; Luftbasis kommt erst nach einer Fahrzeugbasis.
   let reserve = 0;
+  // Marine-Kern-Erzreserve: wird unten (sobald shipyards/navalUnits bekannt sind) gesetzt und hält
+  // die Kosten des NÄCHSTEN Kernboots zurück, damit die Fahrzeug-/Infanterieschleifen (laufen VOR der
+  // Marineschleife) das Erz nicht leersaugen → destroyer/submarine/underwater_drone erscheinen real
+  // (Coverage-Ziel C; gemessen: trotz Marine-Kern-Garantie blieb die Flotte beim patrol_boat stehen,
+  // weil das Bodenheer JEDEN Tick das Erz unter die Bootskosten drückte). Closure-Variable → afford*
+  // lesen den Wert zur Aufrufzeit.
+  let navalReserve = 0;
   if (pressure < 2) {
     if (s.factories < 1) reserve = Math.max(reserve, effectiveCost(world, player.id, world.data.buildings.factory).ore || 0);
     if (s.coastal && s.shipyards < 1 && s.factories >= 1 && s.vehicleArmy >= 2) reserve = Math.max(reserve, effectiveCost(world, player.id, world.data.buildings.shipyard).ore || 0);
@@ -911,7 +918,7 @@ function manageProduction(world, player, s, applyCommand) {
   const affordInfantry = (kind) => {
     const cost = effectiveCost(world, player.id, world.data.units[kind]);
     if (!canAfford(player, cost)) return false;
-    return (player.resources.ore - (cost.ore || 0)) >= reserve + vehReserve;
+    return (player.resources.ore - (cost.ore || 0)) >= reserve + vehReserve + navalReserve;
   };
 
   // Bautrupp sicherstellen: ohne Bagger wird KEIN Gebäude mehr fertig → höchste Priorität.
@@ -952,6 +959,27 @@ function manageProduction(world, player, s, applyCommand) {
   const NAVY_TARGET = (player.faction === 'FLG' ? 9 : 6) + pressure;
   const AIR_TARGET = Math.min(player.faction === 'HLX' ? 4 : 2, 1 + Math.floor(pressure / 4));
 
+  // Marine-Kern-Reserve aktivieren: steht eine fertige Werft, aber der 4-Boot-Kern (patrol_boat→
+  // destroyer→submarine→underwater_drone) ist noch nicht gefeldet, halte die Kosten des NÄCHSTEN
+  // Kernboots zurück. Die Fahrzeug-/Infanterieschleifen (afford*/affordVehicle/affordInfantry) sparen
+  // dieses Erz aus, sodass die danach laufende Marineschleife (plain afford, KEINE navalReserve → kein
+  // Selbst-Deadlock) das Boot real bezahlen kann. Nur bis pressure<2, damit Endspieldruck den Bodenpfad
+  // nicht für Boote aushungert. Kein world.rng() → RNG-Stream/brittle-Tests unverändert.
+  const navalCoreKind = navalUnits === 0 ? 'patrol_boat'
+    : navalUnits === 1 ? 'destroyer'
+      : navalUnits === 2 ? 'submarine'
+        : navalUnits === 3 ? 'underwater_drone' : null;
+  if (pressure < 2 && shipyards.length >= 1 && navalCoreKind && navalUnits < 4) {
+    navalReserve = effectiveCost(world, player.id, world.data.units[navalCoreKind]).ore || 0;
+  }
+  // Fahrzeug-Affordabilität spart die Marine-Kern-Reserve zusätzlich aus (afford() selbst nicht, da es
+  // die Marineschleife/Builder bedient).
+  const affordVehicle = (kind) => {
+    const cost = effectiveCost(world, player.id, world.data.units[kind]);
+    if (!canAfford(player, cost)) return false;
+    return (player.resources.ore - (cost.ore || 0)) >= reserve + navalReserve;
+  };
+
   // Erz-Reserve für Kampffahrzeuge: Infanterie (billig, 100 Erz) darf die Kasse NICHT leersaugen,
   // sonst sammelt die KI nie die 550–800 Erz für ein Fahrzeug an und greift ewig nur mit Fußvolk an.
   // Solange eine Fabrik steht und die Fahrzeugarmee unter Soll ist, wird Erz für das nächste
@@ -978,7 +1006,7 @@ function manageProduction(world, player, s, applyCommand) {
     // erzwingt Belagerungswaffen, sobald sie bezahlbar sind — Coverage-Ziel C + bricht Turtling.
     // Der world.rng()-Aufruf bleibt erhalten → RNG-Stream/Tests unverändert.
     const siege = siegeDeficit(s);
-    if (siege && afford(siege)) {
+    if (siege && affordVehicle(siege)) {
       kind = siege;
     } else if (siege && s.vehicleArmy >= 5) {
       // Belagerungs-/Panzer-Defizit, aber gerade unbezahlbar (gemessen via diag_arty: Armeen wuchsen
@@ -990,7 +1018,7 @@ function manageProduction(world, player, s, applyCommand) {
       // das Ansparen ist decisiveness-neutral. world.rng() oben bleibt → RNG-Stream unverändert.
       continue;
     }
-    if (afford(kind)) applyCommand(world, { type: 'produce', building: fac.id, kind }, player.id);
+    if (affordVehicle(kind)) applyCommand(world, { type: 'produce', building: fac.id, kind }, player.id);
   }
 
   // Marine: Auf Küstenkarten eigener Siegzweig; wird vor Luft gefüllt.
