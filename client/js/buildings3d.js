@@ -509,14 +509,43 @@ export function makeBuildingMesh(kind, size, mats) {
       break;
     }
     case 'wall': {
-      g.add(box(s * 0.96, 1.25, s * 0.5, dark, 0, 0.62, 0));
-      for (let i = 0; i < 3; i++) g.add(box(s * 0.2, 0.3, s * 0.52, dark, -s * 0.33 + i * s * 0.33, 1.4, 0)); // Zinnen
+      // Befestigungsmauer: gebatterter (unten breiter) Betonsockel, Wandkörper in Teamfarbe,
+      // umlaufender Laufgang, Warnstreifen und abwechselnde Zinnen (Merlonen/Scharten) +
+      // diagonale Strebepfeiler hinten — eindeutige Fortifikations-Silhouette.
+      g.add(box(s * 0.98, 0.5, s * 0.62, dark, 0, 0.25, 0));                  // breiter Fuß (Batter)
+      g.add(box(s * 0.9, 0.82, s * 0.46, body, 0, 0.9, 0));                   // Wandkörper
+      g.add(box(s * 0.96, 0.13, s * 0.5, dark, 0, 1.38, 0));                  // Laufgang-Lippe
+      g.add(box(s * 0.9, 0.09, 0.04, hazard, 0, 0.95, s * 0.24 + 0.01));      // Warnstreifen vorne
+      g.add(box(s * 0.9, 0.09, 0.04, hazard, 0, 0.95, -s * 0.24 - 0.01));     // Warnstreifen hinten
+      for (let i = 0; i < 4; i++) {
+        g.add(box(s * 0.17, 0.44, s * 0.5, dark, -s * 0.345 + i * s * 0.23, 1.66, 0)); // Merlonen (Lücken = Scharten)
+      }
+      for (const sx of [-s * 0.3, s * 0.3]) {
+        const but = box(0.24, 1.05, 0.46, dark, sx, 0.62, -s * 0.34);
+        but.rotation.x = -0.3; g.add(but);                                    // Strebepfeiler
+      }
       break;
     }
     case 'trench': {
-      g.add(box(s * 0.96, 0.25, s * 0.96, dark, 0, -0.05, 0));               // Grabenrand
-      g.add(box(s * 0.96, 0.35, 0.18, roof, 0, 0.15, s * 0.4));              // Sandsäcke
-      g.add(box(s * 0.96, 0.35, 0.18, roof, 0, 0.15, -s * 0.4));
+      // Eingegrabene Feuerstellung: abgesenkter dunkler Grabenboden, umlaufende Erdböschung,
+      // gestaffelte Sandsackbrüstung (Einzelsäcke in zwei Lagen), Hazard-Markierung am Feuertritt
+      // und Holz-Stützpfosten in den Ecken — liest sich klar als Schützengraben, nicht als Block.
+      g.add(box(s * 0.94, 0.12, s * 0.94, dark, 0, -0.16, 0));                // abgesenkter Grabenboden
+      g.add(box(s * 0.98, 0.46, 0.16, dark, 0, 0.0, s * 0.43));               // Erdböschung vorn
+      g.add(box(s * 0.98, 0.46, 0.16, dark, 0, 0.0, -s * 0.43));              // Erdböschung hinten
+      g.add(box(0.16, 0.46, s * 0.72, dark, s * 0.43, 0.0, 0));               // Erdböschung rechts
+      g.add(box(0.16, 0.46, s * 0.72, dark, -s * 0.43, 0.0, 0));              // Erdböschung links
+      for (let i = 0; i < 5; i++) {
+        const sxp = -s * 0.36 + i * s * 0.18;
+        for (const sz of [s * 0.44, -s * 0.44]) {
+          g.add(box(s * 0.17, 0.2, 0.24, roof, sxp, 0.3, sz, (i % 2) * 0.1)); // untere Sandsacklage
+          if (i % 2 === 0) g.add(box(s * 0.15, 0.18, 0.2, roof, sxp + s * 0.09, 0.5, sz)); // versetzte 2. Lage
+        }
+      }
+      g.add(box(0.28, 0.2, 0.26, hazard, 0, 0.5, s * 0.44));                  // markierter Feuertritt
+      for (const [sx, sz] of [[-1, 1], [1, 1], [-1, -1], [1, -1]]) {
+        g.add(cyl(0.05, 0.06, 0.74, metal, sx * s * 0.4, 0.18, sz * s * 0.4, 6)); // Stützpfosten
+      }
       break;
     }
     default:
