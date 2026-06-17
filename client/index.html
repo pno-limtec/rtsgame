@@ -189,6 +189,8 @@
     background:#0d141d; border:1px solid #2a3340; border-radius:4px; color:#eaf6ff; }
   .bbtn .bicon .svgicon { width:15px; height:15px; }
   .bbtn .bthumb { width:74px; height:64px; }
+  .bbtn .bthumb .modelpreview { transform:translateY(-6px); }
+  .bbtn .bthumb .modelpreview[data-preview-kind="power_plant"] { transform:none; }
   .bbtn .bmeta { min-width:0; display:block; }
   .bbtn .blabel { display:block; color:#eef4fa; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .bbtn .cost { display:block; color:#9aa7bd; font-size:10.5px; white-space:normal; overflow:visible; text-overflow:clip; margin-top:3px; }
@@ -241,18 +243,26 @@
     background:#0b121b; color:#eefbff; box-shadow:0 -6px 18px #36c5f018; }
   #lobby .lobbypanel[hidden] { display:none; }
   #lobby .lobbypanel { padding:12px; background:#0b121b; border:1px solid #263548; border-radius:0 0 8px 8px;
-    box-shadow:inset 0 1px 0 #36c5f016; flex:1 1 auto; min-height:0; overflow:auto; }
+    box-shadow:inset 0 1px 0 #36c5f016; flex:1 1 auto; min-height:0; overflow:auto; display:flex; flex-direction:column; }
   #lobby .row2 { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
   #lobby .segmented { display:grid; grid-template-columns:1fr 1fr; gap:4px; margin-top:4px; padding:3px;
     background:#070d15; border:1px solid var(--line); border-radius:6px; }
   #lobby .segmented button { margin:0; width:auto; padding:7px 8px; background:#121a25; color:#dbe7f4; border:1px solid transparent;
     border-radius:4px; font-size:12px; font-weight:600; }
   #lobby .segmented button[aria-pressed="true"] { border-color:#36c5f066; background:#173142; color:#eefbff; }
-  #gamelist { margin-top:10px; display:grid; gap:5px; max-height:220px; overflow:auto; }
-  #gamelist .gamerow { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:8px; align-items:center;
-    padding:7px 8px; background:#111822; border:1px solid var(--line); border-radius:5px; font-size:12px; }
+  #lobby .joindivider { display:flex; align-items:center; gap:10px; margin:13px 0 8px; color:#7f8ea5; font-size:12px; }
+  #lobby .joindivider::before, #lobby .joindivider::after { content:""; height:1px; background:#263548; flex:1 1 auto; }
+  #gamelist { margin-top:6px; display:grid; gap:5px; max-height:220px; overflow:auto; }
+  #gamelist .gamerow { display:grid; grid-template-columns:minmax(0,1fr); gap:4px; align-items:center;
+    padding:8px 9px; background:#111822; border:1px solid var(--line); border-radius:5px; font-size:12px; }
+  #gamelist button.gamerow { margin:0; width:100%; color:#dbe7f4; text-align:left; cursor:pointer; }
+  #gamelist button.gamerow[aria-pressed="true"] { border-color:#36c5f088; background:#173142; color:#eefbff; }
+  #gamelist .gamerow.empty { color:#8fa0b8; }
   #gamelist .gmeta { color:#8fa0b8; font-size:11px; }
-  #gamelist button { margin:0; width:auto; padding:6px 9px; font-size:12px; }
+  #lobby .lobbyactions { margin-top:auto; display:grid; grid-template-columns:1fr 1fr; gap:8px; flex:0 0 auto; }
+  #lobby .lobbyactions button { margin:0; min-width:0; }
+  #lobby button.secondary { background:#161d27; color:#dbe7f4; border:1px solid var(--line); }
+  #lobby button.secondary:hover { border-color:var(--accent); color:#eefbff; }
   #lobbystatus { min-height:16px; margin-top:8px; color:#8fa0b8; font-size:12px; }
   #spectatorbar { position:fixed; right:8px; top:8px; z-index:12; display:none; flex-direction:column; align-items:stretch; gap:4px;
     background:var(--hud); border:1px solid var(--line); border-radius:7px; padding:4px 5px; box-shadow:0 3px 14px #0008;
@@ -314,6 +324,7 @@
         <button class="close" type="button" data-close-menu title="Menü schließen">×</button>
       </div>
       <div class="menuactions">
+        <button id="menumain" type="button">Zurück ins Hauptmenü</button>
         <button id="menunew" type="button">Neues Spiel</button>
         <button id="menunewsame" type="button">Neues Spiel (gleiche Karte)</button>
         <button id="menusave" type="button">Spielstand sichern</button>
@@ -406,14 +417,20 @@
           </select>
         </label>
         <p class="optionnote">Bestimmt, wie oft und wie hart Wetter, Überschwemmungen, Beben und Hangrutsche zuschlagen. Hohe Stufen sind bewusst chaotisch.</p>
-        <button id="creategamebtn" type="button">Spiel erstellen</button>
+        <div class="lobbyactions">
+          <button id="creategamebtn" type="button">Spiel erstellen</button>
+          <button id="createwatchbtn" class="secondary" type="button">Als Zuschauer erstellen</button>
+        </div>
       </div>
       <div id="joinpanel" class="lobbypanel" data-lobbypanel="join" hidden>
-        <div class="row2">
-          <label>Privater Beitrittscode<input id="joincode" maxlength="8" autocomplete="off"></label>
-          <button id="joincodebtn" type="button">Code beitreten</button>
-        </div>
+        <label>Beitrittscode<input id="joincode" maxlength="8" autocomplete="off"></label>
+        <div class="joindivider">- oder -</div>
+        <label>Öffentliches Spiel</label>
         <div id="gamelist" aria-live="polite"></div>
+        <div class="lobbyactions">
+          <button id="joingamebtn" type="button">Spiel beitreten</button>
+          <button id="joinspectatorbtn" class="secondary" type="button">Als Zuschauer beitreten</button>
+        </div>
       </div>
       <select id="seatsel" hidden></select>
       <div id="seatlist" hidden></div>

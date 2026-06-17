@@ -108,6 +108,10 @@ export class Net {
       case 'joinDenied':
         this.emit('joinDenied', m);
         break;
+      case 'left':
+        this.resetLobbyState();
+        this.emit('left', m);
+        break;
       case 'saveGame':
         this.emit('saveGame', m);
         break;
@@ -229,6 +233,7 @@ export class Net {
       startMode: opts.startMode,
       timeMode: opts.timeMode,
       insanity: opts.insanity,
+      spectator: !!opts.spectator,
     });
   }
   joinGame(game, name, opts = {}) {
@@ -240,6 +245,10 @@ export class Net {
     this.name = name || this.name || 'Zuschauer';
     const viewSeat = seat ?? this.players[0]?.id ?? 0;
     this._pendingWatchSeat = viewSeat;
+    if (opts.roomId || opts.code) {
+      this.send({ t: 'watch', name: this.name, roomId: opts.roomId, code: opts.code, viewSeat, insanity: opts.insanity });
+      return;
+    }
     if (opts.insanity != null) this.send({ t: 'matchOptions', insanity: opts.insanity });
     if (this.seat != null) {
       this.send({ t: 'release' });
@@ -258,6 +267,23 @@ export class Net {
   releaseSeat() {
     if (this.seat == null || this.spectator) return;
     this.send({ t: 'release' });
+  }
+  leaveToLobby() {
+    if (this.room || this.seat != null || this.spectator) this.send({ t: 'leave' });
+    else {
+      this.resetLobbyState();
+      this.emit('left', { ok: true });
+    }
+  }
+  resetLobbyState() {
+    this.seat = null;
+    this.viewSeat = null;
+    this.spectator = false;
+    this.room = null;
+    this._pendingWatchSeat = null;
+    this.init = null;
+    this.players = [];
+    this.resetStreamState();
   }
   setViewSeat(seat) {
     if (!this.players.some(p => p.id === seat)) return;

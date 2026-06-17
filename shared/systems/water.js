@@ -53,10 +53,10 @@ const PRESSURE_REF_SQRT = Math.sqrt(PRESSURE_REF);
 function pressureFactor(depth) {
   return Math.min(PRESSURE_MAX, 1 + PRESSURE_GAIN * Math.max(0, Math.sqrt(Math.max(0, depth)) - PRESSURE_REF_SQRT));
 }
-const DIR8 = [
-  [-1, 0, 1], [1, 0, 1], [0, -1, 1], [0, 1, 1],
-  [-1, -1, Math.SQRT2], [1, -1, Math.SQRT2], [-1, 1, Math.SQRT2], [1, 1, Math.SQRT2],
-];
+const DIR_X = [-1, 1, 0, 0, -1, 1, -1, 1];
+const DIR_Y = [0, 0, -1, 1, -1, -1, 1, 1];
+const DIR_DIST = [1, 1, 1, 1, Math.SQRT2, Math.SQRT2, Math.SQRT2, Math.SQRT2];
+
 const POOL_COMPONENT_DEPTH = WET_DEPTH * 0.22;
 const POOL_FLAT_DEPTH = WET_DEPTH;
 const POOL_LEVEL_EPS = 0.0025;
@@ -101,7 +101,8 @@ function rainSinkCell(t, i) {
     const x = cur % t.w, y = (cur / t.w) | 0;
     const s0 = flowGround(t, cur) + (t.water[cur] || 0);
     let best = cur, bestSurface = s0;
-    for (const [dx, dy, dist] of DIR8) {
+    for (let dir = 0; dir < 8; dir++) {
+      const dx = DIR_X[dir], dy = DIR_Y[dir], dist = DIR_DIST[dir];
       const nx = x + dx, ny = y + dy;
       if (nx < 0 || ny < 0 || nx >= t.w || ny >= t.h) continue;
       const j = ny * t.w + nx;
@@ -126,38 +127,47 @@ function shouldSimulateWater(t, i) {
 }
 
 function hasSurfaceGradient(t, i, eps = FLOW_EPS) {
+  const waterBlock = t.waterBlock;
+  if (waterBlock[i] > 0) return false;
   const x = i % t.w, y = (i / t.w) | 0;
   const s0 = flowGround(t, i) + t.water[i];
-  for (const [dx, dy, dist] of DIR8) {
+  for (let dir = 0; dir < 8; dir++) {
+    const dx = DIR_X[dir], dy = DIR_Y[dir], dist = DIR_DIST[dir];
     const nx = x + dx, ny = y + dy;
     if (nx < 0 || ny < 0 || nx >= t.w || ny >= t.h) continue;
     const j = ny * t.w + nx;
-    if (t.waterBlock[i] > 0 || t.waterBlock[j] > 0) continue;
+    if (waterBlock[j] > 0) continue;
     if (Math.abs(s0 - (flowGround(t, j) + t.water[j])) / dist > eps) return true;
   }
   return false;
 }
 
 function hasOutflow(t, i, eps = FLOW_EPS) {
+  const waterBlock = t.waterBlock;
+  if (waterBlock[i] > 0) return false;
   const x = i % t.w, y = (i / t.w) | 0;
   const s0 = flowGround(t, i) + t.water[i];
-  for (const [dx, dy, dist] of DIR8) {
+  for (let dir = 0; dir < 8; dir++) {
+    const dx = DIR_X[dir], dy = DIR_Y[dir], dist = DIR_DIST[dir];
     const nx = x + dx, ny = y + dy;
     if (nx < 0 || ny < 0 || nx >= t.w || ny >= t.h) continue;
     const j = ny * t.w + nx;
-    if (t.waterBlock[i] > 0 || t.waterBlock[j] > 0) continue;
+    if (waterBlock[j] > 0) continue;
     if ((s0 - (flowGround(t, j) + t.water[j])) / dist > eps) return true;
   }
   return false;
 }
 
 function hasDownhillGroundNeighbor(t, i, gi, eps = UPHILL_RUNOFF_EPS) {
+  const waterBlock = t.waterBlock;
+  if (waterBlock[i] > 0) return false;
   const x = i % t.w, y = (i / t.w) | 0;
-  for (const [dx, dy, dist] of DIR8) {
+  for (let dir = 0; dir < 8; dir++) {
+    const dx = DIR_X[dir], dy = DIR_Y[dir], dist = DIR_DIST[dir];
     const nx = x + dx, ny = y + dy;
     if (nx < 0 || ny < 0 || nx >= t.w || ny >= t.h) continue;
     const j = ny * t.w + nx;
-    if (t.waterBlock[i] > 0 || t.waterBlock[j] > 0) continue;
+    if (waterBlock[j] > 0) continue;
     if ((gi - flowGround(t, j)) / dist > eps) return true;
   }
   return false;
@@ -198,19 +208,22 @@ function stormSeaCurrentAt(t, world, i, depth) {
 function currentAt(t, i, depth, world = null) {
   const stormSea = stormSeaCurrentAt(t, world, i, depth);
   if (stormSea) return stormSea;
+  const waterBlock = t.waterBlock;
+  if (waterBlock[i] > 0) return { dx: 0, dy: 0, grad: 0 };
   const x = i % t.w, y = (i / t.w) | 0;
   const s0 = flowGround(t, i) + depth;
-  let best = null, bestGrad = 0;
-  for (const [dx, dy, dist] of DIR8) {
+  let bestDx = 0, bestDy = 0, bestGrad = 0;
+  for (let dir = 0; dir < 8; dir++) {
+    const dx = DIR_X[dir], dy = DIR_Y[dir], dist = DIR_DIST[dir];
     const nx = x + dx, ny = y + dy;
     if (nx < 0 || ny < 0 || nx >= t.w || ny >= t.h) continue;
     const j = ny * t.w + nx;
-    if (t.waterBlock[i] > 0 || t.waterBlock[j] > 0) continue;
+    if (waterBlock[j] > 0) continue;
     const grad = (s0 - (flowGround(t, j) + t.water[j])) / dist;
-    if (grad > bestGrad) { bestGrad = grad; best = [dx / dist, dy / dist]; }
+    if (grad > bestGrad) { bestGrad = grad; bestDx = dx / dist; bestDy = dy / dist; }
   }
-  if (!best || bestGrad <= FLOW_EPS) return { dx: 0, dy: 0, grad: 0 };
-  return { dx: best[0], dy: best[1], grad: bestGrad };
+  if (bestGrad <= FLOW_EPS) return { dx: 0, dy: 0, grad: 0 };
+  return { dx: bestDx, dy: bestDy, grad: bestGrad };
 }
 
 function waterDeathMeta(t, i, depth) {
@@ -447,6 +460,8 @@ function simulateCA(t, dtW, world) {
   const active = Int32Array.from(waterActive).sort();
   const delta = new Map();        // idx -> Tiefenänderung
   const bump = (i, d) => delta.set(i, (delta.get(i) || 0) + d);
+  const lowerIdx = new Int32Array(8);
+  const lowerWeight = new Float64Array(8);
 
   for (let k = 0; k < active.length; k++) {
     const i = active[k];
@@ -458,14 +473,16 @@ function simulateCA(t, dtW, world) {
     const si = gi + water[i]; // eigene Oberfläche über gerilltem Boden
     const hasDownhillGround = hasDownhillGroundNeighbor(t, i, gi);
     // Tiefer liegende, nicht gesperrte Nachbarn sammeln.
-    let lower = null, headSum = 0, maxGroundDrop = 0, touchesBarrier = waterBlock[i] > 0, blockedUphill = false;
+    const blockedI = waterBlock[i] > 0;
+    let lowerCount = 0, headSum = 0, maxGroundDrop = 0, touchesBarrier = blockedI, blockedUphill = false;
     let surfaceSum = si, surfaceCount = 1;
     const x = i % w, y = (i / w) | 0;
-    for (const [dx, dy, dist] of DIR8) {
+    for (let dir = 0; dir < 8; dir++) {
+      const dx = DIR_X[dir], dy = DIR_Y[dir], dist = DIR_DIST[dir];
       const nx = x + dx, ny = y + dy;
       if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
       const j = ny * w + nx;
-      if (waterBlock[i] > 0 || waterBlock[j] > 0) { touchesBarrier = true; continue; } // Damm/Deich sperrt diese Kante
+      if (blockedI || waterBlock[j] > 0) { touchesBarrier = true; continue; } // Damm/Deich sperrt diese Kante
       const gj = flowGround(t, j);
       const sj = gj + water[j];
       const head = (si - sj) / dist;
@@ -479,14 +496,16 @@ function simulateCA(t, dtW, world) {
           ? 1 + Math.min(1.8, groundDrop * DOWNHILL_FLOW_BIAS)
           : Math.max(0.35, 1 + groundDrop * UPHILL_FLOW_BIAS);
         const weight = (head / dist) * gravityBias;
-        (lower || (lower = [])).push([j, weight]);
+        lowerIdx[lowerCount] = j;
+        lowerWeight[lowerCount] = weight;
+        lowerCount++;
         headSum += weight;
         maxGroundDrop = Math.max(maxGroundDrop, groundDrop);
         surfaceSum += sj;
         surfaceCount++;
       }
     }
-    if (lower) {
+    if (lowerCount > 0) {
       // Flaches Wasser fließt träger; hohe Gefälle/mehr Tiefe laufen spürbar schneller.
       const mobility = Math.min(1, Math.max(FLOW_MIN_MOBILITY, avail / Math.max(FLOW_FULL_MOBILITY_DEPTH, 0.026)));
       // Wasserdruck: tiefe Säule (avail) → höherer Druck → schnellerer ABFLUSS bergab. Nur bei
@@ -503,8 +522,9 @@ function simulateCA(t, dtW, world) {
         : 1;
       const out = Math.min(avail, flowCap, headSum * 0.72 * WATER_FLOW * mobility * pressure * basinDamping * barrierDamping * directedBoost);
       if (out > SETTLE_EPS) {
-        for (const [j, weight] of lower) {
-          const q = out * (weight / headSum);
+        for (let n = 0; n < lowerCount; n++) {
+          const j = lowerIdx[n];
+          const q = out * (lowerWeight[n] / headSum);
           bump(i, -q);
           bump(j, q);
         }
@@ -557,7 +577,8 @@ function simulateCA(t, dtW, world) {
       const si = height[i] + water[i];
       const x = i % w, y = (i / w) | 0;
       let inflow = false;
-      for (const [dx, dy] of DIR8) {
+      for (let dir = 0; dir < 8; dir++) {
+        const dx = DIR_X[dir], dy = DIR_Y[dir];
         const nx = x + dx, ny = y + dy;
         if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
         const j = ny * w + nx;
@@ -610,7 +631,8 @@ function settleWaterComponents(t, next) {
       outlet = outlet || isEdgeCell(t, cur) || isMainRiverCell(t, cur);
       touchesBlock = touchesBlock || (waterBlock?.[cur] || 0) > 0;
       const x = cur % w, y = (cur / w) | 0;
-      for (const [dx, dy] of DIR8) {
+      for (let dir = 0; dir < 8; dir++) {
+        const dx = DIR_X[dir], dy = DIR_Y[dir];
         const nx = x + dx, ny = y + dy;
         if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
         const j = ny * w + nx;
@@ -647,7 +669,8 @@ function componentHasDrainPathToSea(t, cells, level) {
   while (head < queue.length && queue.length < DRAIN_SEARCH_LIMIT) {
     const cur = queue[head++];
     const x = cur % w, y = (cur / w) | 0;
-    for (const [dx, dy] of DIR8) {
+    for (let dir = 0; dir < 8; dir++) {
+      const dx = DIR_X[dir], dy = DIR_Y[dir];
       const nx = x + dx, ny = y + dy;
       if (nx < 0 || ny < 0 || nx >= w || ny >= h) return true;
       const j = ny * w + nx;
@@ -721,6 +744,7 @@ function relaxWaterSurface(t, seeds, touched) {
   const bump = (i, d) => delta.set(i, (delta.get(i) || 0) + d);
   for (const i of active) {
     if (!shouldSimulateWater(t, i)) continue;
+    if (waterBlock[i] > 0) continue;
     const protectedDepth = (isOpenSeaCell(t, i) || (t.lakeMask && t.lakeMask[i])) ? baseWater[i] : 0;
     const avail = Math.max(0, water[i] - protectedDepth);
     if (avail <= SETTLE_EPS) continue;
@@ -729,11 +753,12 @@ function relaxWaterSurface(t, seeds, touched) {
     const hasDownhillGround = hasDownhillGroundNeighbor(t, i, gi);
     const x = i % w, y = (i / w) | 0;
     let spent = 0;
-    for (const [dx, dy, dist] of DIR8) {
+    for (let dir = 0; dir < 8; dir++) {
+      const dx = DIR_X[dir], dy = DIR_Y[dir], dist = DIR_DIST[dir];
       const nx = x + dx, ny = y + dy;
       if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
       const j = ny * w + nx;
-      if (waterBlock[i] > 0 || waterBlock[j] > 0) continue;
+      if (waterBlock[j] > 0) continue;
       const gj = flowGround(t, j);
       if (!canFlowAcrossGround(t, i, j, gi, gj, water[i], hasDownhillGround)) continue;
       const sj = gj + water[j];

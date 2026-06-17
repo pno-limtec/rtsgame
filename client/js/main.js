@@ -27,12 +27,18 @@ async function boot() {
       if (cmd.type === 'move') {
         const voiceUnits = moved.map(e => {
           const def = data.units[e.kind] || {};
-          return { kind: e.kind, category: def.category, domain: def.domain };
+          return { kind: e.kind, category: def.category, domain: def.domain, heavy: !!def.heavy };
         });
         audio.moveVoice(voiceUnits);
         // Motorengeräusch nur, wenn tatsächlich Fahrzeuge losfahren — Infanterie macht Schritte.
         const vehicles = moved.filter(e => !INFANTRY.has(e.kind));
-        if (vehicles.length) audio.motor(vehicles.every(e => WORK_VEHICLES.has(e.kind)) ? 0.10 : 0.38);
+        if (vehicles.length) audio.motor(
+          vehicles.map(e => {
+            const def = data.units[e.kind] || {};
+            return { kind: e.kind, category: def.category, domain: def.domain, heavy: !!def.heavy };
+          }),
+          vehicles.every(e => WORK_VEHICLES.has(e.kind)) ? 0.10 : 0.38,
+        );
         else if (moved.length) audio.steps(0.8);
       }
     }
@@ -48,8 +54,8 @@ async function boot() {
   ui.setupLobby((name, seat, opts = {}) => {
     applyFogOption(!!opts.fow);
     if (opts.create) net.createGame(name, opts);
-    else if (opts.roomId || opts.code) net.joinGame(opts.roomId || null, name, opts);
     else if (opts.spectator) net.watch(seat, name, opts);
+    else if (opts.roomId || opts.code) net.joinGame(opts.roomId || null, name, opts);
     else net.join(name, seat, opts);
   });
   ui.setupMenu(renderer, audio);

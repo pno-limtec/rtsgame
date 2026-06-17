@@ -676,6 +676,24 @@ ok(match.player(0).controller === 'ai', 'Sitz fällt nach Disconnect-Timeout an 
   stepMovement(mw);
   ok(Math.hypot(delayed.x - dx0, delayed.y - dy0) < 1e-6,
     'Einheit mit verzögerter A*-Suche wartet, statt banal geradeaus in Hindernisse zu fahren');
+
+  const hw = createWorld({ data, seed: 90, map: { w: 32, h: 32 }, players: [{ id: 0, faction: 'KBN', controller: 'human' }] });
+  const ht = hw.terrain;
+  hw.entities.clear();
+  for (let i = 0; i < ht.type.length; i++) {
+    ht.type[i] = TT.LAND; ht.height[i] = 0.5; ht.water[i] = 0; ht.baseWater[i] = 0; ht.block[i] = 0; ht.cover[i] = 0;
+    if (ht.mud) ht.mud[i] = 0;
+  }
+  const group = [];
+  for (let n = 0; n < 8; n++) group.push(spawnUnit(hw, 0, 'truck', 4, 4 + n * 2));
+  hw._pbTick = hw.tick; hw._pathBudget = 0;
+  applyCommand(hw, { type: 'move', units: group.map(u => u.id), x: 48, y: 12 }, 0);
+  const before = group.map(u => ({ x: u.x, y: u.y }));
+  ok(group.every(u => u.moveTarget && !u._waitingForPath),
+    'Menschlicher Mehrfach-Move laesst auch bei leerem Pfadbudget alle Einheiten sofort loslaufen');
+  stepMovement(hw);
+  ok(group.every((u, i) => Math.hypot(u.x - before[i].x, u.y - before[i].y) > 0.001),
+    'Alle Einheiten eines menschlichen Mehrfach-Move bewegen sich im naechsten Tick Richtung Zielpunkt');
 }
 
 // 8) Dynamisches Wasser (Phase 8): Becken-Füllung, Fluss, Damm-Barriere, Fluten, Trockenlegen.

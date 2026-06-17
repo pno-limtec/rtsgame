@@ -58,6 +58,7 @@ const FLOOD_CHANNEL_DEPTH = 0.012;  // dünne Abflussrinnen bekommen schon früh
 const WATER_DARK_DEPTH_START = 0.085;
 const WATER_DARK_DEPTH_RANGE = 0.34;
 const WATER_EDGE_TUCK_Y = -0.012;  // Uferkante leicht ins Gelände eingraben, statt darüber zu schweben
+const WATER_EDGE_TUCK_COVER = 0.72; // Randband, in dem Wasser sanft unter die Böschung gezogen wird
 const WATER_NIGHT_COLOR_MIN = 0.26;
 const WATER_NIGHT_OPACITY_MIN = 0.30;   // Grund-Deckkraft (nachts); Wasser bleibt transparent genug, damit der Grund erkennbar ist
 const WATER_STANDING_FLOW_MAX = 0.13;
@@ -1869,9 +1870,9 @@ export class Renderer {
       const x = a.x + (b.x - a.x) * t;
       const z = a.z + (b.z - a.z) * t;
       // Die Uferkante exakt auf das Gelände am Übergangspunkt setzen (leicht eingegraben statt
-      // schwebend), gedeckelt durch den Wasserpegel. So sitzt der Rand auf dem Boden auf und
-      // schwebt nicht als Lippe darüber; an Gefällen folgt er der Hangoberfläche nach unten.
-      const edgeGround = this.heightAt(x, z);
+      // schwebend), gedeckelt durch den Wasserpegel. Die glatte Terrainprobe vermeidet sichtbare
+      // Treppensprünge, wenn der Schnittpunkt knapp zwischen zwei Höhenzellen liegt.
+      const edgeGround = this._terrainHeightSmoothAt(x, z);
       return {
         x,
         z,
@@ -1900,7 +1901,13 @@ export class Renderer {
     };
     const pushWaterVertex = (p) => {
       const vx = positions.length / 3;
-      positions.push(p.x, p.y, p.z);
+      let py = p.y;
+      if (p.v < WATER_EDGE_TUCK_COVER) {
+        const tuck = Math.min(py, this._terrainHeightSmoothAt(p.x, p.z) + WATER_EDGE_TUCK_Y);
+        const t = 1 - smoothstep(WATER_EDGE_THRESHOLD, WATER_EDGE_TUCK_COVER, p.v);
+        py += (tuck - py) * t;
+      }
+      positions.push(p.x, py, p.z);
       const fl = Math.hypot(p.fx, p.fz);
       const dirX = fl > 0.012 ? p.fx / fl : 0.82;
       const dirZ = fl > 0.012 ? p.fz / fl : 0.36;
@@ -3240,6 +3247,20 @@ export class Renderer {
     const gx = Math.max(0, Math.min(this.mapW - 1, Math.round(wx / TILE)));
     const gy = Math.max(0, Math.min(this.mapH - 1, Math.round(wz / TILE)));
     return this.height[gy * this.mapW + gx] * HEIGHT_SCALE;
+  }
+
+  _terrainHeightSmoothAt(wx, wz) {
+    if (!this.height || !this.mapW || !this.mapH) return this.heightAt(wx, wz);
+    const gx = Math.max(0, Math.min(this.mapW - 1, wx / TILE));
+    const gy = Math.max(0, Math.min(this.mapH - 1, wz / TILE));
+    const x0 = Math.floor(gx), y0 = Math.floor(gy);
+    const x1 = Math.min(this.mapW - 1, x0 + 1), y1 = Math.min(this.mapH - 1, y0 + 1);
+    const tx = gx - x0, ty = gy - y0;
+    const i00 = y0 * this.mapW + x0, i10 = y0 * this.mapW + x1;
+    const i01 = y1 * this.mapW + x0, i11 = y1 * this.mapW + x1;
+    const a = this.height[i00] * (1 - tx) + this.height[i10] * tx;
+    const b = this.height[i01] * (1 - tx) + this.height[i11] * tx;
+    return (a * (1 - ty) + b * ty) * HEIGHT_SCALE;
   }
 
   // Rohstoffvorkommen an einem Weltpunkt (für die Anzeige beim Anklicken eines Öl-/Erzfeldes):

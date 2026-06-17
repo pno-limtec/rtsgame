@@ -202,11 +202,12 @@ export function applyCommand(world, cmd, playerId) {
     case 'move': {
       const units = commandUnits(world, cmd.units, playerId);
       const goals = moveGoalsForUnits(world, units, cmd.x, cmd.y);
+      const immediateGroupMove = player.controller === 'human' && units.length > 1;
       for (const u of units) {
         u.order = { type: cmd.attackMove ? 'attackmove' : 'move' };
         u.target = null;
         const goal = goals.get(u.id) || { x: cmd.x, y: cmd.y };
-        setMoveGoal(world, u, goal.x, goal.y);
+        setMoveGoal(world, u, goal.x, goal.y, immediateGroupMove ? { waitForPath: false } : undefined);
       }
       break;
     }

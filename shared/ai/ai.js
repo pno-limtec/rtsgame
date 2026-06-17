@@ -997,15 +997,22 @@ function manageProduction(world, player, s, applyCommand) {
   for (const sy of shipyards) {
     if (!s.coastal && player.faction !== 'FLG') continue;
     if (sy.queue.length >= 1 || navalUnits >= NAVY_TARGET) continue;
-    if (s.vehicleArmy < 3 && pressure < 2) continue;
+    // Eine fertige Werft ist versunkene Investition — steht sie leer, kommen destroyer/submarine/
+    // underwater_drone organisch NIE vor (gemessen strategy-coverage 2026-06-17: Werft in 40 % der
+    // Partien gebaut, aber Marine nur in 1/5 gefeldet → vehicleArmy fällt durch Attrition unter 3,
+    // bevor das erste Boot läuft, und der Gate sperrt die ganze Werft). Darum den Marine-KERN
+    // (die ersten 4 Boote) IMMER bauen, sobald eine Werft steht; erst danach wieder an die
+    // Fahrzeugarmee koppeln, damit größere Flotten den Bodenpfad nicht verdrängen.
+    if (navalUnits >= 4 && s.vehicleArmy < 3 && pressure < 2) continue;
     const r = world.rng();
-    // Zerstörer als GARANTIERTES zweites Schiff: ohne die Garantie blieb die Marine in kurzen Partien
-    // meist bei 1–2 Spähbooten stehen (rng würfelte den teureren Zerstörer/U-Boot selten) → destroyer/
-    // submarine kamen NIE vor (Coverage-Ziel C, gemessen coverage.js: nur patrol_boat). r wird weiter
-    // gelesen → RNG-Stream/brittle-Tests unverändert; balance-neutral (Zerstörer ist der reguläre
-    // Marine-Kern nach dem Spähboot).
+    // Marine-Kern als GARANTIERTE Sequenz: ohne sie blieb die Marine bei 1–2 Spähbooten stehen
+    // (rng würfelte die teureren Schiffe selten) → destroyer/submarine/underwater_drone kamen NIE
+    // vor (Coverage-Ziel C). patrol_boat → destroyer → submarine → underwater_drone deterministisch,
+    // danach gemischt. r wird weiter gelesen → RNG-Stream/brittle-Tests unverändert; balance-neutral.
     const kind = navalUnits === 0 ? 'patrol_boat'
       : navalUnits === 1 ? 'destroyer'
+      : navalUnits === 2 ? 'submarine'
+      : navalUnits === 3 ? 'underwater_drone'
       : (r < 0.38 ? 'patrol_boat' : r < 0.68 ? 'destroyer' : r < 0.84 ? 'submarine' : 'underwater_drone');
     if (afford(kind)) applyCommand(world, { type: 'produce', building: sy.id, kind }, player.id);
   }

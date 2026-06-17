@@ -12,7 +12,7 @@ import { TICK_RATE } from '../shared/constants.js';
 const __dir = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dir, '..');
 const PORT = process.env.PORT || 8080;
-const MIME = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.json': 'application/json', '.glb': 'model/gltf-binary', '.gltf': 'model/gltf+json', '.png': 'image/png', '.jpg': 'image/jpeg' };
+const MIME = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.json': 'application/json', '.glb': 'model/gltf-binary', '.gltf': 'model/gltf+json', '.png': 'image/png', '.jpg': 'image/jpeg', '.mp3': 'audio/mpeg' };
 
 const data = loadData();
 const DEFAULT_SLOTS = normalizeSlots(process.env.SLOTS || '2');
@@ -156,7 +156,8 @@ wss.on('connection', (ws) => {
           timeMode: msg.timeMode,
           insanity: msg.insanity,
         });
-        joinRoom(ws, room, msg.name || 'Spieler', 0);
+        if (msg.spectator) watchRoom(ws, room, msg.name || 'Zuschauer', msg.viewSeat);
+        else joinRoom(ws, room, msg.name || 'Spieler', 0);
         broadcastGameList();
         break;
       }
@@ -168,6 +169,15 @@ wss.on('connection', (ws) => {
         }
         if (msg.insanity != null) room.match.setMatchOptions({ insanity: msg.insanity });
         joinRoom(ws, room, msg.name || 'Spieler', msg.seat);
+        break;
+      }
+      case 'watch': {
+        const room = findWatchRoom(msg);
+        if (!room) {
+          ws.send(JSON.stringify({ type: 'joinDenied', message: msg.code ? 'Beitrittscode nicht gefunden' : 'Spiel nicht gefunden' }));
+          break;
+        }
+        watchRoom(ws, room, msg.name || 'Zuschauer', msg.viewSeat);
         break;
       }
       case 'takeover': {
@@ -190,6 +200,12 @@ wss.on('connection', (ws) => {
         ws.send(JSON.stringify({ type: 'spectator', seat: seat ?? oldSeat, ok: seat != null }));
         broadcastLobby(room);
         broadcastGameList();
+        break;
+      }
+      case 'leave': {
+        leaveRoom(ws);
+        ws.send(JSON.stringify({ type: 'left', ok: true }));
+        sendGameList(ws);
         break;
       }
       case 'reconnect': {
@@ -327,6 +343,31 @@ function findJoinRoom(msg = {}) {
   return rooms.get(publicRooms[0].id) || null;
 }
 
+function findWatchRoom(msg = {}) {
+  if (msg.roomId && rooms.has(msg.roomId)) {
+    const room = rooms.get(msg.roomId);
+    if (room.visibility === 'private' && String(msg.code || '').trim().toUpperCase() !== room.code) return null;
+    return room;
+  }
+  if (msg.code) {
+    const code = String(msg.code || '').trim().toUpperCase();
+    return [...rooms.values()].find(r => r.code === code) || null;
+  }
+  return null;
+}
+
+function leaveRoom(ws) {
+  const room = ws.room;
+  if (!room) { ws.seat = null; return false; }
+  if (ws.seat != null) room.match.releaseHuman(ws.seat);
+  room.clients.delete(ws);
+  ws.room = null;
+  ws.seat = null;
+  broadcastLobby(room);
+  broadcastGameList();
+  return true;
+}
+
 function joinRoom(ws, room, name, preferredSeat = null) {
   if (ws.room && ws.room !== room) {
     if (ws.seat != null) ws.room.match.releaseHuman(ws.seat);
@@ -347,6 +388,19 @@ function joinRoom(ws, room, name, preferredSeat = null) {
   ws.send(JSON.stringify(room.match.init()));
   ws.send(JSON.stringify({ type: 'joined', seat, ok: true }));
   broadcastLobby(room);
+  broadcastGameList();
+  return true;
+}
+
+function watchRoom(ws, room, name, viewSeat = null) {
+  if (ws.room) leaveRoom(ws);
+  ws.room = room;
+  ws.seat = null;
+  room.clients.add(ws);
+  const seat = Number.isFinite(viewSeat) ? viewSeat : 0;
+  ws.send(JSON.stringify({ type: 'roomInfo', room: roomView(room, room.visibility === 'private') }));
+  ws.send(JSON.stringify(room.match.init()));
+  ws.send(JSON.stringify({ type: 'spectator', seat, ok: true, name }));
   broadcastGameList();
   return true;
 }

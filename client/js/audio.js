@@ -1,56 +1,12 @@
 // Audio-Engine: WebAudio für prozedurale Fallback-SFX plus kuratierte Pixabay-Musik/Samples.
 // Lazy-Init beim ersten Nutzer-Gesture (Browser-Autoplay-Richtlinie).
-import { MUSIC_PLAYLISTS, SFX_SAMPLES } from './audioManifest.js';
+import { MUSIC_PLAYLISTS, SFX_SAMPLES, COMMAND_VOICE_SAMPLES } from './audioManifest.js';
 
 const MUSIC_GAIN = { calm: 0.13, combat: 0.26 }; // ruhiger im Aufbau, deutlich wilder im Gefecht
 const MUSIC_CROSSFADE = 5.5;
 const COMBAT_HOLD = 12;
 const MOVE_VOICE_COOLDOWN = 3.2;
 const MOTOR_COOLDOWN = 1.6;
-const MOVE_VOICE_LINES = {
-  mixed: [
-    'Alle los, bitte mit Haltung und ohne Drama.',
-    'Bewegung. Das sieht fast nach Plan aus.',
-    'Auf gehts, synchrones Chaos.',
-    'Los, der Boden wartet nicht ewig.',
-  ],
-  infantry: [
-    'Zu Fuss? Na gut, heute ist Beintag.',
-    'Wir laufen schon mal los. Schick Kaffee hinterher.',
-    'Verstanden. Wir nehmen die scenic Route.',
-    'Marschieren ist auch nur Fahren ohne Fahrzeug.',
-  ],
-  builder: [
-    'Bagger rollt. Wer hat den Boden bestellt?',
-    'Unterwegs. Ich bringe Schaufel und schlechte Laune mit.',
-    'Bagger in Bewegung. Landschaft, bitte kurz wegsehen.',
-    'Alles klar. Ich parke da gleich ein Loch.',
-  ],
-  truck: [
-    'LKW unterwegs. Ladung tut so, als waere sie gesichert.',
-    'Route gesetzt. Schlagloecher werden ignoriert.',
-    'Brumm brumm, Logistik mit Charakter.',
-    'Ich fahre los. Papierkram kommt spaeter.',
-  ],
-  vehicle: [
-    'Motor an. Wir machen Reifenspuren mit Absicht.',
-    'Fahrzeug unterwegs. Bitte Ziel nicht wieder verschieben.',
-    'Verstanden. Wir rollen da mal professionell hin.',
-    'Kette oder Reifen, Hauptsache vorwaerts.',
-  ],
-  air: [
-    'Luftweg bestaetigt. Stau ist heute unter uns.',
-    'Wir heben ab und tun wichtig.',
-    'Kurs gesetzt. Wolken bitte Platz machen.',
-    'Fliegen los. Bodenprobleme sind jetzt optional.',
-  ],
-  water: [
-    'Kurs gesetzt. Wellen bitte rechts ranfahren.',
-    'Schiff unterwegs. Wir tun nautisch.',
-    'Aye. Wasser ist schon mal vorhanden.',
-    'Wir legen los. Bitte keine trockenen Abkuerzungen.',
-  ],
-};
 
 // Persistente Ton-Einstellungen (überleben Reload). '1' = an, '0' = aus; fehlend = Standard (an).
 function loadAudioPref(key, def = true) {
@@ -85,6 +41,7 @@ export class Audio {
     this.voiceAudioUrl = null;
     this.voicePlaying = false;
     this.openAiVoiceDisabledUntil = 0;
+    this.loopSamples = new Map();
   }
 
   // Beim ersten Klick/Tastendruck aufrufen (entsperrt den AudioContext).
@@ -126,6 +83,8 @@ export class Audio {
     if (this.sfxMuted && typeof window !== 'undefined') {
       window.speechSynthesis?.cancel?.();
       this._stopVoiceAudio();
+      for (const loop of this.loopSamples.values()) loop.el.pause();
+      this.loopSamples.clear();
     }
   }
 
@@ -254,11 +213,16 @@ export class Audio {
 
   musicBeat() { return this.beat || 0; }
 
+  _sampleSrc(entry) {
+    return typeof entry === 'string' ? entry : entry?.src || '';
+  }
+
   _sample(cat, vol = 1, rate = 1) {
     if (!this.ready || this.sfxMuted || vol <= 0.02) return false;
     const list = SFX_SAMPLES[cat];
     if (!list || !list.length) return false;
-    const src = list[(Math.random() * list.length) | 0];
+    const src = this._sampleSrc(list[(Math.random() * list.length) | 0]);
+    if (!src) return false;
     let base = this.sampleCache.get(src);
     if (!base) {
       base = document.createElement('audio');
@@ -281,15 +245,17 @@ export class Audio {
     switch (weapon) {
       case 'tank_cannon': case 'turret_cannon': case 'naval_gun': case 'artillery':
         // Harter Abschuss: scharfer Crack → kräftiger Sub-Boom mit Tonhöhenabfall → kurzer Mündungs-Schweif.
-        this._sample('artillery', Math.min(0.24, v * 0.5), 0.9 + Math.random() * 0.12);
+        this._sample('artillery', Math.min(0.28, v * 0.6), 0.9 + Math.random() * 0.12);
         this._burst(v * 0.55, 3200, 0.035, 1.0, 'highpass');
         this._thump(v * 1.25, 280, 46, 0.3);
         this._sweepNoise(v * 0.7, 1500, 220, 0.2, 0.6); break;
       case 'sam_missile': case 'aa_missile': case 'at_launcher': case 'torpedo': case 'micro_missile':
         // Raketenstart: aufzischender Sweep + Schub-Impuls.
+        this._sample('missileFire', Math.min(0.24, v * 0.56), 0.95 + Math.random() * 0.1);
         this._sweepNoise(v * 0.6, 420, 2600, 0.34, 0.5, 'bandpass');
         this._thump(v * 0.4, 380, 110, 0.16); break;
       case 'rocket_salvo':
+        this._sample('missileFire', Math.min(0.28, v * 0.62), 0.92 + Math.random() * 0.1);
         this._sweepNoise(v * 0.8, 520, 2900, 0.38, 0.5, 'bandpass');
         this._thump(v * 0.5, 300, 70, 0.22); break;
       case 'bomb':
@@ -298,11 +264,14 @@ export class Audio {
         this._sweepNoise(v * 0.7, 1200, 120, 0.4, 0.6); break;
       case 'flak_gun': case 'turret_flak': case 'turret_mg': case 'autocannon': case 'chain_gun':
         // Maschinenwaffe: knackiger Transient + kurzer Körper.
-        this._sample('gunfire', Math.min(0.18, v * 0.4), 0.95 + Math.random() * 0.1);
+        this._sample('gunfire', Math.min(0.22, v * 0.48), 0.95 + Math.random() * 0.1);
         this._burst(v * 0.75, 2400, 0.045, 1.6, 'bandpass');
         this._thump(v * 0.4, 260, 110, 0.05); break;
+      case 'cloud_seed':
+        this._sample('laser', Math.min(0.22, v * 0.52), 0.9 + Math.random() * 0.16);
+        this._sweepNoise(v * 0.5, 1800, 500, 0.26, 0.7, 'bandpass'); break;
       default: // rifle
-        this._sample('shoot', Math.min(0.14, v * 0.5), 0.9 + Math.random() * 0.2);
+        this._sample('shoot', Math.min(0.22, v * 0.55), 0.9 + Math.random() * 0.2);
         this._burst(v * 0.95, 3300, 0.035, 1.4, 'highpass');
         this._thump(v * 0.5, 340, 90, 0.06);
     }
@@ -314,7 +283,7 @@ export class Audio {
     this.markCombat();
     const v = Math.min(0.95, 0.46 * vol * (0.7 + scale * 0.22));
     // Schichten: initialer Crack (Hochpass), tiefer Sub-Boom mit Tonhöhenabfall, heller→dunkler Rauschschweif.
-    this._sample('explosion', Math.min(0.38, v * 0.55), 0.82 + Math.random() * 0.14);
+    this._sample(scale > 1.15 ? 'missileBlast' : 'explosion', Math.min(0.38, v * 0.55), 0.82 + Math.random() * 0.14);
     this._burst(v * 0.5, 3200, 0.05, 1.1, 'highpass');
     this._thump(v * 1.2, 200 + 50 / scale, 26, 0.4 + scale * 0.14);
     this._sweepNoise(v * 0.85, 1700, 120, 0.38 + scale * 0.12, 0.6);
@@ -324,9 +293,10 @@ export class Audio {
   thunder(vol = 1) {
     if (!this.ready || this.sfxMuted) return;
     if (!this._budget('thunder', 2)) return;
-    this._burst(0.5 * vol, 2500, 0.08, 0.8, 'highpass');
-    this._burst(0.6 * vol, 140, 1.6, 0.4);
-    this._thump(0.5 * vol, 90, 28, 1.2);
+    this._sample('thunder', Math.min(0.34, 0.22 * vol), 0.96 + Math.random() * 0.08);
+    this._burst(0.25 * vol, 2500, 0.08, 0.8, 'highpass');
+    this._burst(0.28 * vol, 140, 1.6, 0.4);
+    this._thump(0.24 * vol, 90, 28, 1.2);
   }
 
   // Infanterie-Marschbefehl: zwei kurze, weiche Schritt-Taps (kein Maschinensound für Menschen).
@@ -386,9 +356,11 @@ export class Audio {
     const now = Date.now() / 1000;
     if (now - this.lastMoveVoiceAt < MOVE_VOICE_COOLDOWN) return;
     const group = this._moveVoiceGroup(units);
-    const lines = MOVE_VOICE_LINES[group] || MOVE_VOICE_LINES.mixed;
-    const text = lines[(Math.random() * lines.length) | 0];
+    const lines = COMMAND_VOICE_SAMPLES[group] || COMMAND_VOICE_SAMPLES.mixed;
+    const line = lines[(Math.random() * lines.length) | 0];
+    const text = line?.text || String(line || '');
     this.lastMoveVoiceAt = now;
+    if (line?.src && this._playVoiceSample(line.src)) return;
     if (Date.now() >= this.openAiVoiceDisabledUntil) {
       this._openAiMoveVoice(text, group).then(ok => { if (!ok) this._browserMoveVoice(text); });
       return;
@@ -412,6 +384,31 @@ export class Audio {
     return true;
   }
 
+  _playVoiceSample(src) {
+    if (this.sfxMuted || typeof window === 'undefined' || this.voicePlaying || !window.Audio) return false;
+    try {
+      const audio = new window.Audio(src);
+      audio.preload = 'auto';
+      audio.volume = 1.0;
+      audio.playbackRate = 0.98 + Math.random() * 0.04;
+      this._stopVoiceAudio();
+      this.voiceAudio = audio;
+      this.voiceAudioUrl = null;
+      this.voicePlaying = true;
+      const cleanup = () => {
+        if (this.voiceAudio === audio) this._stopVoiceAudio();
+      };
+      audio.addEventListener('ended', cleanup, { once: true });
+      audio.addEventListener('error', cleanup, { once: true });
+      const play = audio.play();
+      if (play?.catch) play.catch(cleanup);
+      return true;
+    } catch {
+      this._stopVoiceAudio();
+      return false;
+    }
+  }
+
   async _openAiMoveVoice(text, group) {
     if (!window.fetch || this.voicePlaying) return false;
     try {
@@ -428,7 +425,7 @@ export class Audio {
       const blob = await res.blob();
       if (!blob.size) return false;
       const url = URL.createObjectURL(blob);
-      const audio = new Audio(url);
+      const audio = new window.Audio(url);
       audio.volume = 1.0;
       this._stopVoiceAudio();
       this.voiceAudio = audio;
@@ -486,12 +483,22 @@ export class Audio {
     return this.speechVoice;
   }
 
-  motor(vol = 1) {
+  motor(unitsOrVol = 1, volArg = null) {
     if (!this.ready || this.sfxMuted) return;
     if (!this._budget('motor', 1)) return;
     const now = this.ctx.currentTime;
     if (now - this.lastMotorAt < MOTOR_COOLDOWN) return;
     this.lastMotorAt = now;
+    const units = Array.isArray(unitsOrVol) ? unitsOrVol : [];
+    const vol = Array.isArray(unitsOrVol) ? (volArg ?? 1) : unitsOrVol;
+    const air = units.find(u => u.domain === 'air');
+    const tracked = units.find(u => u.heavy || u.kind === 'tank' || u.kind === 'artillery' || u.kind === 'rocket_launcher');
+    if (air) {
+      const cat = air.kind === 'gunship' ? 'helicopter' : 'plane';
+      this._sample(cat, Math.min(0.14, 0.11 * vol), 0.96 + Math.random() * 0.08);
+    } else if (tracked) {
+      this._sample('vehicleTrack', Math.min(0.09, 0.08 * vol), 0.94 + Math.random() * 0.08);
+    }
     const v = Math.min(0.024, 0.016 * vol);
     this._burst(v, 135, 0.055, 0.28);
     this._thump(v * 0.42, 88, 58, 0.075);
@@ -505,9 +512,38 @@ export class Audio {
     this._thump(v * 0.55, 125, 78, 0.10);
   }
 
+  _loopSample(key, cat, vol) {
+    const existing = this.loopSamples.get(key);
+    if (!cat || this.sfxMuted || vol <= 0.01) {
+      if (existing) {
+        existing.el.pause();
+        existing.el.removeAttribute?.('src');
+        existing.el.load?.();
+        this.loopSamples.delete(key);
+      }
+      return;
+    }
+    const list = SFX_SAMPLES[cat] || [];
+    const src = this._sampleSrc(list[0]);
+    if (!src || typeof window === 'undefined' || !window.Audio) return;
+    if (existing?.src === src) {
+      existing.el.volume = Math.max(0, Math.min(1, vol));
+      return;
+    }
+    if (existing) existing.el.pause();
+    const el = new window.Audio(src);
+    el.loop = true;
+    el.preload = 'auto';
+    el.volume = Math.max(0, Math.min(1, vol));
+    this.loopSamples.set(key, { src, el });
+    el.play().catch(() => {});
+  }
+
   // Dauerregen als gefilterte Rauschschleife; Lautstärke folgt der Wetterlage.
   setWeather(w) {
     if (!this.ready) return;
+    const weatherCat = w === 'storm' ? 'rainThunder' : w === 'rain' ? 'rain' : null;
+    this._loopSample('weather', weatherCat, w === 'storm' ? 0.09 : w === 'rain' ? 0.06 : 0);
     if (!this._rain) {
       const src = this.ctx.createBufferSource();
       src.buffer = this.noise; src.loop = true;
@@ -518,7 +554,7 @@ export class Audio {
       src.start();
       this._rain = g;
     }
-    const target = this.sfxMuted ? 0 : w === 'storm' ? 0.10 : w === 'rain' ? 0.055 : 0;
+    const target = this.sfxMuted || weatherCat ? 0 : w === 'storm' ? 0.10 : w === 'rain' ? 0.055 : 0;
     const t = this.ctx.currentTime;
     this._rain.gain.cancelScheduledValues(t);
     this._rain.gain.linearRampToValueAtTime(target, t + 1.5);
@@ -526,7 +562,7 @@ export class Audio {
 
   build(vol = 1) {
     if (!this.ready || this.sfxMuted) return;
-    this._sample('construction', 0.18 * vol, 0.95 + Math.random() * 0.08);
+    this._sample('construction', 0.08 * vol, 0.95 + Math.random() * 0.08);
     this._tone(0.25 * vol, 330, 0.12); this._tone(0.25 * vol, 495, 0.16, 'triangle', 0.1);
   }
   ready_(vol = 1) {

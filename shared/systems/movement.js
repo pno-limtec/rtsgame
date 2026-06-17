@@ -32,7 +32,7 @@ function canTraverseMuddyWet(t, e, i) {
   return mudOk || wadeOk;
 }
 
-export function setMoveGoal(world, ent, wx, wy) {
+export function setMoveGoal(world, ent, wx, wy, opts = {}) {
   ent.moveTarget = { x: wx, y: wy };
   ent.repathCd = 0;
   ent._waitingForPath = false;
@@ -42,7 +42,7 @@ export function setMoveGoal(world, ent, wx, wy) {
   if (world._pbTick !== world.tick) { world._pbTick = world.tick; world._pathBudget = PATHS_PER_TICK; }
   if (world._pathBudget <= 0) {
     ent.path = []; ent.pathGoal = null;
-    ent._waitingForPath = true;
+    ent._waitingForPath = opts.waitForPath !== false;
     ent.repathCd = 0.2 + (ent.id % 9) * 0.1;   // Suche nachholen, zeitversetzt
     return;
   }

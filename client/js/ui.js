@@ -348,12 +348,29 @@ export class UI {
     const list = document.getElementById('seatlist');
     const status = document.getElementById('lobbystatus');
     const gameList = document.getElementById('gamelist');
+    const joinCodeInput = document.getElementById('joincode');
+    const createSpectatorBtn = document.getElementById('createwatchbtn');
+    const joinGameBtn = document.getElementById('joingamebtn');
+    const joinSpectatorBtn = document.getElementById('joinspectatorbtn');
+    let selectedJoinRoom = null;
     const setStatus = (text) => { if (status) status.textContent = text || ''; };
     const lobbyOptions = () => ({
       fow: !!document.getElementById('fowstart')?.checked,
       timeMode: document.getElementById('daynightstart')?.checked === false ? 'day' : 'auto',
       insanity: normalizeInsanity(document.getElementById('insanitystart')?.value, this.net.controls?.insanity),
     });
+    const createOptions = () => ({
+      ...lobbyOptions(),
+      create: true,
+      visibility: document.getElementById('visibilitystart')?.value || 'public',
+      slots: parseInt(document.getElementById('slotstart')?.value || '2', 10),
+      startMode: document.querySelector('[data-startmode][aria-pressed="true"]')?.dataset.startmode || 'instant',
+    });
+    const joinCode = () => String(joinCodeInput?.value || '').trim().toUpperCase();
+    const updateJoinAction = () => {
+      if (joinGameBtn) joinGameBtn.disabled = !joinCode() && !selectedJoinRoom;
+      if (joinSpectatorBtn) joinSpectatorBtn.disabled = !joinCode() && !selectedJoinRoom;
+    };
     const setTab = (tab) => {
       for (const btn of document.querySelectorAll('[data-lobbytab]')) {
         const active = btn.dataset.lobbytab === tab;
@@ -372,26 +389,32 @@ export class UI {
     const renderGames = (games = this.net.games || []) => {
       if (!gameList) return;
       if (!games.length) {
-        gameList.innerHTML = '<div class="gamerow"><span>Keine öffentlichen Spiele gefunden</span><button type="button" data-refresh-games>Aktualisieren</button></div>';
+        selectedJoinRoom = null;
+        gameList.innerHTML = '<div class="gamerow empty"><span>Keine öffentlichen Spiele gefunden</span></div>';
       } else {
-        gameList.innerHTML = games.slice(0, 50).map(g => {
+        const visibleGames = games.slice(0, 50);
+        if (!visibleGames.some(g => g.id === selectedJoinRoom)) selectedJoinRoom = visibleGames[0]?.id || null;
+        gameList.innerHTML = visibleGames.map(g => {
           const free = Math.max(0, Number(g.free) || 0);
           const players = Math.max(0, Number(g.players) || 0);
           const label = g.running ? 'läuft' : 'wartet';
-          return `<div class="gamerow" data-roomid="${escAttr(g.id)}">
-            <span><b>${players} Spieler</b><span class="gmeta"> · ${free} freie KI-Slots · ${label}</span></span>
-            <button type="button" data-join-room="${escAttr(g.id)}">Beitreten</button>
-          </div>`;
+          const selected = g.id === selectedJoinRoom ? 'true' : 'false';
+          return `<button class="gamerow" type="button" data-join-room="${escAttr(g.id)}" aria-pressed="${selected}">
+            <span><b>${players} Spieler</b></span>
+            <span class="gmeta">${free} freie KI-Slots · ${label}</span>
+          </button>`;
         }).join('');
       }
-      gameList.querySelector('[data-refresh-games]')?.addEventListener('click', () => this.net.requestGameList());
       for (const btn of gameList.querySelectorAll('[data-join-room]')) {
         btn.onclick = () => {
-          const name = document.getElementById('pname').value || 'Spieler';
-          onJoin(name, null, { roomId: btn.dataset.joinRoom, ...lobbyOptions() });
-          setStatus('Spiel wird betreten...');
+          selectedJoinRoom = btn.dataset.joinRoom || null;
+          for (const other of gameList.querySelectorAll('[data-join-room]')) {
+            other.setAttribute('aria-pressed', other === btn ? 'true' : 'false');
+          }
+          updateJoinAction();
         };
       }
+      updateJoinAction();
     };
     const render = () => {
       sel.innerHTML = ''; list.innerHTML = '';
@@ -424,26 +447,59 @@ export class UI {
       const seat = parseInt(sel.value, 10);
       onJoin('Zuschauer', Number.isFinite(seat) ? seat : 0, { ...lobbyOptions(), spectator: true });
     };
-    document.getElementById('joincodebtn')?.addEventListener('click', () => {
-      const code = String(document.getElementById('joincode')?.value || '').trim().toUpperCase();
-      if (!code) { setStatus('Code eingeben'); return; }
+    joinCodeInput?.addEventListener('input', () => {
+      joinCodeInput.value = joinCode();
+      updateJoinAction();
+    });
+    joinCodeInput?.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Enter') joinGameBtn?.click();
+    });
+    joinGameBtn?.addEventListener('click', () => {
       const name = document.getElementById('pname').value || 'Spieler';
-      onJoin(name, null, { code, ...lobbyOptions() });
-      setStatus('Privates Spiel wird gesucht...');
+      const code = joinCode();
+      if (code) {
+        onJoin(name, null, { code, ...lobbyOptions() });
+        setStatus('Privates Spiel wird gesucht...');
+      } else if (selectedJoinRoom) {
+        onJoin(name, null, { roomId: selectedJoinRoom, ...lobbyOptions() });
+        setStatus('Öffentliches Spiel wird betreten...');
+      } else {
+        setStatus('Code eingeben oder öffentliches Spiel auswählen');
+      }
+    });
+    joinSpectatorBtn?.addEventListener('click', () => {
+      const code = joinCode();
+      const opts = { ...lobbyOptions(), spectator: true };
+      if (code) {
+        onJoin('Zuschauer', null, { ...opts, code });
+        setStatus('Privates Spiel wird als Zuschauer gesucht...');
+      } else if (selectedJoinRoom) {
+        onJoin('Zuschauer', null, { ...opts, roomId: selectedJoinRoom });
+        setStatus('Öffentliches Spiel wird als Zuschauer betreten...');
+      } else {
+        setStatus('Code eingeben oder öffentliches Spiel auswählen');
+      }
     });
     document.getElementById('creategamebtn')?.addEventListener('click', () => {
       const name = document.getElementById('pname').value || 'Spieler';
-      const startMode = document.querySelector('[data-startmode][aria-pressed="true"]')?.dataset.startmode || 'instant';
-      onJoin(name, null, {
-        ...lobbyOptions(),
-        create: true,
-        visibility: document.getElementById('visibilitystart')?.value || 'public',
-        slots: parseInt(document.getElementById('slotstart')?.value || '2', 10),
-        startMode,
-      });
+      onJoin(name, null, createOptions());
       setStatus('Spiel wird erstellt...');
     });
+    createSpectatorBtn?.addEventListener('click', () => {
+      onJoin('Zuschauer', null, { ...createOptions(), spectator: true });
+      setStatus('Spiel wird für Zuschauer erstellt...');
+    });
     this.net.on('joined', (m) => { if (m.ok) lobby.style.display = 'none'; });
+    this.net.on('left', () => {
+      this.input.selected.clear();
+      this.input.onSelectionChange && this.input.onSelectionChange();
+      this.renderBuildbar();
+      this.renderSpectatorbar();
+      const top = document.getElementById('topbar');
+      if (top) top.innerHTML = '';
+      lobby.style.display = 'flex';
+      setTab('create');
+    });
     setTab('create');
   }
 
@@ -478,6 +534,13 @@ export class UI {
     addEventListener('keydown', (ev) => { if (ev.key === 'Escape' && menu.classList.contains('open')) setOpen(false); });
     this.setupTechTree();
 
+    document.getElementById('menumain')?.addEventListener('click', () => {
+      this.input.selected.clear();
+      this.input.onSelectionChange && this.input.onSelectionChange();
+      this.net.leaveToLobby();
+      setStatus('Zurück ins Hauptmenü...');
+      setOpen(false);
+    });
     document.getElementById('menunew')?.addEventListener('click', () => {
       this.input.selected.clear();
       this.net.newGame(false, { insanity: this.net.controls?.insanity });
@@ -793,8 +856,13 @@ export class UI {
 
   // --- Ressourcenleiste (mit Uhr & Wetter) ---
   renderTop() {
-    const me = this.net.players.find(p => p.id === (this.net.spectator ? this.net.viewSeat : this.net.seat));
     const bar = document.getElementById('topbar');
+    if (!bar) return;
+    if (!this.net.room && !this.net.spectator && this.net.seat == null && !this.net.players.length) {
+      bar.innerHTML = '';
+      return;
+    }
+    const me = this.net.players.find(p => p.id === (this.net.spectator ? this.net.viewSeat : this.net.seat));
     if (this.net.spectator || this.net.seat == null) this._releasePending = false;
     const env = this.net.env;
     // Uhrzeit & Wetter-Symbol aus dem Umwelt-Status (t: 0 = Mitternacht).
