@@ -370,14 +370,27 @@ export function makeBuildingMesh(kind, size, mats) {
       break;
     }
     case 'depot': {
-      g.add(box(s * 0.9, 0.18, s * 0.9, dark, 0, 0.09, 0));                  // Platte
-      g.add(box(0.9, 0.9, 0.9, body, -s * 0.2, 0.6, -s * 0.2));              // Kisten
-      g.add(box(0.7, 0.7, 0.7, metal, s * 0.22, 0.5, -s * 0.14));
-      const crate = box(0.8, 0.5, 0.6, hazard, -s * 0.05, 0.4, s * 0.22, 0.4);
-      g.add(crate); addAnim(g, 'pulse', crate, { speed: 1.35, amp: 0.04 });
-      g.add(box(0.6, 0.6, 0.6, body, s * 0.26, 0.45, s * 0.22, 0.2));
-      g.add(box(s * 0.34, 1.0, s * 0.28, body, -s * 0.28, 0.68, s * 0.28));  // Bürocontainer
-      windows(g, win, s * 0.26, 0.3, -s * 0.28, 0.8, s * 0.28 + s * 0.14 + 0.02);
+      // Nachschubdepot = ÜBERDACHTE Versorgungshalle (klar abgegrenzt von den OFFENEN Rohstoffhöfen:
+      // ore_depot = Felsen, material_depot = Schütthaufen, oil_depot = Tanks). Tonnendach + Ladebucht
+      // mit Rolltor + gestapelte Paletten geben eine eindeutige Logistik-Silhouette (Ziel F).
+      g.add(box(s * 0.95, 0.16, s * 0.95, dark, 0, 0.08, 0));                 // Betonplatte
+      g.add(box(s * 0.8, 1.05, s * 0.66, body, 0, 0.62, -s * 0.08));         // Lagerhalle
+      for (let i = 0; i < 4; i++) {                                          // geripptes Tonnendach
+        const rib = cyl(s * 0.2, s * 0.2, s * 0.78, roof, -s * 0.3 + i * s * 0.2, 1.18, -s * 0.08, 3);
+        rib.rotation.z = Math.PI / 2; rib.rotation.x = Math.PI; rib.scale.set(1, 0.62, 1);
+        g.add(rib);
+      }
+      // Ladebucht vorn: Vordach auf zwei Stützen + Rolltor mit Warnstreifen
+      g.add(box(s * 0.84, 0.1, s * 0.26, metal, 0, 1.16, s * 0.32));         // Vordach
+      for (const sx of [-s * 0.36, s * 0.36]) g.add(cyl(0.06, 0.07, 1.1, metal, sx, 0.62, s * 0.42, 6));
+      g.add(box(s * 0.4, 0.92, 0.08, dark, 0, 0.58, s * 0.25 + 0.02));       // Rolltor
+      g.add(box(s * 0.44, 0.12, 0.1, hazard, 0, 1.06, s * 0.25 + 0.03));     // gelber Bucht-Warnbalken
+      // gestapelte Versorgungspaletten neben der Bucht (eine pulsiert = Umschlag)
+      g.add(box(0.78, 0.5, 0.62, roof, -s * 0.3, 0.41, s * 0.32, 0.18));
+      const pallet = box(0.74, 0.46, 0.58, hazard, s * 0.3, 0.39, s * 0.32, -0.22);
+      g.add(pallet); addAnim(g, 'pulse', pallet, { speed: 1.35, amp: 0.05 });
+      g.add(box(0.6, 0.4, 0.5, metal, s * 0.32, 0.78, s * 0.3, -0.22));      // zweite Lage
+      windows(g, win, s * 0.5, 0.34, 0, 0.86, -s * 0.08 - s * 0.33 - 0.02, Math.PI); // Rückfenster
       break;
     }
     case 'mg_turret': {
