@@ -1404,6 +1404,11 @@ export function slopeOk(t, fromI, toI, maxSlope, roadLimit, terraformLimit) {
   if (maxSlope === Infinity) return true;
   // Eine Brücke/ein Viadukt überspannt jede Steigung — Brückenzellen sind steigungsfrei befahrbar.
   if (t.bridge && (t.bridge[fromI] > 0 || t.bridge[toI] > 0)) return true;
+  // Ein Tunnel bohrt sich durch Klippe/Berg — innerhalb der Röhre ist keine Steigung zu überwinden.
+  // Ohne diese Ausnahme sperrt das Steigungslimit am Tunnelmund (große Höhendifferenz zur Klippe)
+  // die Fahrzeugroute, sodass gebaute Tunnel zwar passierbar (isPassable) sind, aber nie durchfahren
+  // werden (Ziel D: Tunnel werden gebaut, aber 0× gequert). Tunnelzellen sind daher steigungsfrei.
+  if (t.tunnel && (t.tunnel[fromI] > 0 || t.tunnel[toI] > 0)) return true;
   const dh = Math.abs(t.height[toI] - t.height[fromI]);
   if (dh <= maxSlope) return true;
   if (terraformLimit != null
