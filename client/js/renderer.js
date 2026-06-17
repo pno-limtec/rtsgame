@@ -478,6 +478,9 @@ export class Renderer {
     this._terraformJobPreview = [];
     this._terraformDragPreview = [];
     this._terraformPreviewSig = '';
+    if (this.lineGhost) { this.lineGhost.count = 0; this.lineGhost.instanceMatrix.needsUpdate = true; }
+    if (this.roadLineGhost) this.roadLineGhost.visible = false;
+    this._roadLineSig = '';
     this._terraLiveHeights?.clear?.();
     this._terraPreviewDeltas?.clear?.();
     this._terraVisualIdx?.clear?.();
@@ -485,7 +488,7 @@ export class Renderer {
     this._fowEnemyMist.clear();
     for (const obj of [
       this.terrainMesh, this.fowMesh, this.waterMesh, this.waterMeshV2, this.waterHorizonV2, this.skirtMesh, this.floodMesh,
-      this.wetGroundMesh, this.trackMesh, this.mudMesh, this.roadMesh, this.bridgeMesh, this.pipeMesh, this.oilMesh, this.rockInst, this.grassInst,
+      this.wetGroundMesh, this.trackMesh, this.mudMesh, this.roadMesh, this.roadBuildMesh, this.bridgeMesh, this.pipeMesh, this.oilMesh, this.rockInst, this.grassInst,
       ...(this.oreMeshes || []),
       ...Object.values(this.treeInst || {}),
       ...(this.wildlife || []).map(a => a.group),
@@ -494,7 +497,7 @@ export class Renderer {
     ]) remove(obj);
     this.terrainMesh = this.fowMesh = this.waterMesh = this.waterMeshV2 = this.waterHorizonV2 = this.skirtMesh = this.floodMesh = null;
     this.wetGroundMesh = null;
-    this.trackMesh = this.mudMesh = this.roadMesh = this.bridgeMesh = this.pipeMesh = this.oilMesh = null;
+    this.trackMesh = this.mudMesh = this.roadMesh = this.roadBuildMesh = this.bridgeMesh = this.pipeMesh = this.oilMesh = null;
     this.rockInst = this.grassInst = null;
     this.treeInst = null;
     this._treeAnim = null;
@@ -519,6 +522,7 @@ export class Renderer {
     this._bridgeCellSet = new Set();
     this._bridgeDeckYByIdx = new Map();
     this._bridgeSig = '';
+    this._roadBuildSig = '';
     this._pipeSig = '';
     this._waterSurfaceVisual = null;
     this._waterDeltaSig = null;
@@ -789,6 +793,18 @@ export class Renderer {
     this.roadMesh.renderOrder = 2;
     this.roadMesh.receiveShadow = true;
     this.scene.add(this.roadMesh);
+    this.roadBuildMat = new THREE.MeshBasicMaterial({
+      color: 0x248bff,
+      transparent: true,
+      opacity: 0.66,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+    });
+    this.roadBuildMesh = new THREE.Mesh(this._makeEmptyOverlayGeometry(), this.roadBuildMat);
+    this.roadBuildMesh.renderOrder = 5;
+    this.roadBuildMesh.visible = false;
+    this.scene.add(this.roadBuildMesh);
+    this._roadBuildSig = '';
 
     // Tunnel: durchgehende, dunkle Röhre entlang der Tunneltiles (ein Mesh, leicht über dem
     // Bergrücken erhaben). Die zwei Mündungsportale rendern als normale Gebäude an den Enden.
@@ -2921,6 +2937,17 @@ export class Renderer {
     this._replaceMeshGeometry(this.roadMesh, this._makeRibbonGeometry(cells, { width: TILE * 1.5, offset: 0.085 }));
   }
 
+  // Straßen im Bau: alle unfertigen Road-Zellen als ein blaues Band statt einzelner Bau-Modelle.
+  updateRoadConstructionOverlay(cells) {
+    if (!this.roadBuildMesh || !this.height) return;
+    const list = Array.from(cells || []).sort((a, b) => a - b);
+    const sig = this._cellListSig(list);
+    if (sig === this._roadBuildSig) return;
+    this._roadBuildSig = sig;
+    this.roadBuildMesh.visible = list.length > 0;
+    this._replaceMeshGeometry(this.roadBuildMesh, this._makeRibbonGeometry(list, { width: TILE * 1.5, offset: 0.16 }));
+  }
+
   // Tunnel aus dem Snapshot: alle Tunneltiles → eine durchgehende, erhabene dunkle Röhre.
   updateTunnels(tunnels) {
     if (!this.tunnelMesh || !this.height) return;
@@ -3510,6 +3537,7 @@ export class Renderer {
     // durchgehende Leitung mit Kurven/T-Stücken/Kreuzungen aufgebaut werden.
     this._pipeAnchors = [];
     const bridgeCells = new Set(this._baseBridgeCells || []);
+    const roadBuildCells = new Set();
     // Im Nebel: fremde Pipelines/Brücken nur sichtbar, wenn im eigenen Sichtfeld (eigene immer).
     const infraVisible = (e) => !this.fowEnabled || e.owner === seat || this._inOwnSight(e.x, e.y);
     for (const e of entities) {
@@ -3526,9 +3554,18 @@ export class Renderer {
           if (gx >= 0 && gy >= 0 && gx < this.mapW && gy < this.mapH) bridgeCells.add(gy * this.mapW + gx);
         }
       }
+      if (e.kind === 'road' && (e.buildProgress ?? 1) < 1 && infraVisible(e)) {
+        const tx = Math.round(e.x / TILE - 0.5), ty = Math.round(e.y / TILE - 0.5);
+        const size = Math.max(1, e.size || 1);
+        for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) {
+          const gx = tx + x, gy = ty + y;
+          if (gx >= 0 && gy >= 0 && gx < this.mapW && gy < this.mapH) roadBuildCells.add(gy * this.mapW + gx);
+        }
+      }
     }
     this.updatePipelineOverlay();
     this.updateBridgeOverlay(null, bridgeCells);
+    this.updateRoadConstructionOverlay(roadBuildCells);
     const seen = new Set();
     const tunnelGhostSeen = new Set();
     const mistBuckets = new Map();
@@ -3792,7 +3829,7 @@ export class Renderer {
       // Lineare Infrastruktur im Bau bleibt ein flaches blaues Wireframe auf dem Boden.
       const groundWireBuild = e.etype === 'building' && g.userData.groundBuildWire && e.buildProgress < 1;
       if (g.userData.build && e.etype === 'building') {
-        g.userData.build.visible = e.buildProgress < 1;
+        g.userData.build.visible = e.kind !== 'road' && e.buildProgress < 1;
         if (g.userData.groundBuildWire && g.userData.build.material) {
           g.userData.build.material.opacity = 0.62 + 0.24 * Math.sin(this.time * 5 + e.id) ** 2;
         }
@@ -3808,7 +3845,10 @@ export class Renderer {
       }
       if (e.etype === 'building' && g.userData.body) {
         const p = Math.max(0.03, Math.min(1, e.buildProgress ?? 1));
-        if (groundWireBuild) {
+        if (e.kind === 'road') {
+          g.userData.body.visible = false;
+          if (g.userData.build) g.userData.build.visible = false;
+        } else if (groundWireBuild) {
           g.userData.body.visible = false;
         } else if (e.kind === 'bridge') {
           g.userData.body.visible = false;
@@ -4896,8 +4936,16 @@ export class Renderer {
       }
       g.userData.chevrons = chevrons;
     }
-    body.castShadow = true; body.receiveShadow = true;
-    g.userData.castsShadow = true;
+    const roadOverlayOnly = e.etype === 'building' && e.kind === 'road';
+    body.visible = !roadOverlayOnly;
+    body.castShadow = !roadOverlayOnly;
+    body.receiveShadow = !roadOverlayOnly;
+    if (roadOverlayOnly) body.traverse?.((o) => {
+      if (!o.isMesh) return;
+      o.castShadow = false;
+      o.receiveShadow = false;
+    });
+    g.userData.castsShadow = !roadOverlayOnly;
     if (e.abandoned) { body.rotation.z += 0.16; body.rotation.x += 0.04; }
     g.add(body);
     g.userData.body = body;
@@ -5812,8 +5860,48 @@ export class Renderer {
     }
   }
 
+  _lineCellsToIndices(cells) {
+    const out = [];
+    if (!this.mapW || !this.mapH) return out;
+    for (const [tx, ty] of cells || []) {
+      if (tx < 0 || ty < 0 || tx >= this.mapW || ty >= this.mapH) continue;
+      out.push(ty * this.mapW + tx);
+    }
+    return out;
+  }
+
+  _ensureRoadLineGhost() {
+    if (this.roadLineGhost) return this.roadLineGhost;
+    const mat = new THREE.MeshBasicMaterial({
+      color: 0x248bff,
+      transparent: true,
+      opacity: 0.7,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+    });
+    this.roadLineGhost = new THREE.Mesh(this._makeEmptyOverlayGeometry(), mat);
+    this.roadLineGhost.renderOrder = 6;
+    this.roadLineGhost.visible = false;
+    this.scene.add(this.roadLineGhost);
+    this._roadLineSig = '';
+    return this.roadLineGhost;
+  }
+
   // Bau-Linienvorschau (Wall/Graben/Straße/Leitung/Damm per Start→Endpunkt ziehen).
-  showBuildLine(cells) {
+  showBuildLine(cells, kind = null) {
+    if (kind === 'road') {
+      if (this.lineGhost) { this.lineGhost.count = 0; this.lineGhost.instanceMatrix.needsUpdate = true; }
+      const mesh = this._ensureRoadLineGhost();
+      const indices = this._lineCellsToIndices(cells);
+      const sig = this._cellListSig(indices);
+      if (sig !== this._roadLineSig) {
+        this._roadLineSig = sig;
+        this._replaceMeshGeometry(mesh, this._makeRibbonGeometry(indices, { width: TILE * 1.5, offset: 0.18 }));
+      }
+      mesh.visible = indices.length > 0;
+      return;
+    }
+    if (this.roadLineGhost) this.roadLineGhost.visible = false;
     if (!this.lineGhost) {
       const geo = new THREE.PlaneGeometry(TILE * 0.88, TILE * 0.88);
       geo.rotateX(-Math.PI / 2);
@@ -5844,6 +5932,7 @@ export class Renderer {
   }
   hideBuildLine() {
     if (this.lineGhost) { this.lineGhost.count = 0; this.lineGhost.instanceMatrix.needsUpdate = true; }
+    if (this.roadLineGhost) this.roadLineGhost.visible = false;
   }
 
   showTerraformPreview(cells, dir) {

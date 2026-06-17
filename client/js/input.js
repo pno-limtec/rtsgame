@@ -307,7 +307,7 @@ export class Input {
       this.renderer.showTerraformPreview?.(this.lineCells(), this.terraformDir());
     } else {
       this.renderer.hideTerraformPreview?.();
-      this.renderer.showBuildLine(this.lineCells());
+      this.renderer.showBuildLine(this.lineCells(), this.buildMode);
     }
   }
 
