@@ -158,6 +158,18 @@ export const SFX_SAMPLES = {
       src: 'https://cdn.pixabay.com/download/audio/2024/03/20/audio_b579992089.mp3?filename=u_3rdmeaw7un-tank-track-ratteling-197409.mp3',
     },
   ],
+  workVehicleStart: [
+    {
+      title: 'Diesel Truck Passing',
+      page: 'https://pixabay.com/de/sound-effects/stadt-diesel-truck-passing-369306/',
+      src: 'https://cdn.pixabay.com/audio/2025/07/03/audio_c6741c423a.mp3',
+    },
+    {
+      title: 'truck-idle',
+      page: 'https://pixabay.com/de/sound-effects/technologie-truck-idle-90932/',
+      src: 'https://cdn.pixabay.com/audio/2022/03/15/audio_dcce72ba65.mp3',
+    },
+  ],
   helicopter: [
     {
       title: 'Helicopter',
@@ -198,11 +210,18 @@ export const SFX_SAMPLES = {
       src: 'https://cdn.pixabay.com/download/audio/2024/03/19/audio_abbbbb0634.mp3?filename=swifteditsmedia_online-rain-and-thunder-197091.mp3',
     },
   ],
+  landslide: [
+    {
+      title: 'Whoosh 1',
+      page: 'https://pixabay.com/de/sound-effects/film-spezialeffekte-whoosh-1-522923/',
+      src: 'https://cdn.pixabay.com/audio/2026/04/21/audio_fb353da0c3.mp3',
+    },
+  ],
   construction: [
     {
-      title: 'Impact',
-      page: 'https://pixabay.com/de/sound-effects/film-spezialeffekte-081895-impact-wav-43951/',
-      src: 'https://cdn.pixabay.com/download/audio/2022/03/10/audio_d89feebeec.mp3?filename=freesound_community-081895_impact_wav-43951.mp3',
+      title: 'Construction_Site_Cat_1',
+      page: 'https://pixabay.com/de/sound-effects/technologie-construction-site-cat-1-25502/',
+      src: 'https://cdn.pixabay.com/audio/2022/03/09/audio_098c98eb02.mp3',
     },
   ],
 };

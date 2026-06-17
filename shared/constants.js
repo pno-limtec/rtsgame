@@ -75,9 +75,9 @@ export const QUAKE_RADIUS = 14;                // Tiles um das Epizentrum
 export const QUAKE_SLOPE = 0.036;              // Hangneigung (Höhendiff. je Nachbarzelle), ab der Material abrutscht
 export const QUAKE_SLIDE = 0.5;                // Anteil der Überneigung, der je Rutsch-Durchgang abrutscht
 export const QUAKE_BUILDING_DMG = 60;          // Gebäudeschaden je Sekunde im Bebenradius auf Hangzellen
-export const RAIN_SLIDE_SLOPE = 0.038;         // nasse Hänge werden ab dieser Neigung instabil (häufiger als zuvor)
-export const RAIN_SLIDE_CHANCE = 0.22;         // Stichprobenchance je Regenprüfung und Kandidat
-export const RAIN_SLIDE_AMT = 0.55;            // Anteil der Überneigung, der bei Regen abrutscht (sichtbarer)
+export const RAIN_SLIDE_SLOPE = 0.046;         // nasse Hänge werden ab dieser Neigung instabil
+export const RAIN_SLIDE_CHANCE = 0.075;        // Stichprobenchance je Regenprüfung und Kandidat
+export const RAIN_SLIDE_AMT = 0.38;            // Anteil der Überneigung, der bei Regen abrutscht
 
 // --- Karte: Zentralberg, Schnee, Randmeer (Phase 15) ---
 export const SNOW_LINE = 1.34;                 // Höhe, ab der dauerhaft Schnee liegt — die echte Gipfelkappe (~4 % der Karte; MAX_HEIGHT≈1.92)
@@ -93,9 +93,9 @@ export const EDGE_SEA = 0.085;                 // Anteil der Kartenbreite, der z
 export const ROAD_RECALC_TICKS = 50;           // Straßennetz alle 5 s neu verbinden
 export const ROAD_MAX_DIST = 20;               // max. Tile-Distanz für automatische Straßen zwischen Gebäuden
 export const PONTOON_SPEED = 0.4;              // Pontonbrücken sind nur langsam befahrbar (wackelig/improvisiert)
-export const ROAD_SPEED = 1.5;                 // Tempobonus auf Straßen (Infanterie zu Fuß)
-export const ROAD_SPEED_VEHICLE = 6;           // Fahrzeuge fahren auf Straßen 6× so schnell wie im Gelände
-export const ROAD_SPEED_HEAVY = 6;             // (Alt-Name, = Fahrzeug-Bonus)
+export const ROAD_SPEED = 1.65;                // Tempobonus auf Straßen (Infanterie zu Fuß)
+export const ROAD_SPEED_VEHICLE = 7.5;         // Fahrzeuge fahren auf Straßen deutlich schneller als im Gelände
+export const ROAD_SPEED_HEAVY = 7.5;           // (Alt-Name, = Fahrzeug-Bonus)
 export const MUD_SPEED_HEAVY = 0.3;            // schwere Fahrzeuge abseits der Straße bei Regen (Matsch)
 export const HEAVY_WATER_DPS = 14;             // Schaden/s für schwere Fahrzeuge in nassen Zellen
 export const TURN_RATE_VEHICLE = 3.4;          // rad/s Drehrate Fahrzeuge (erst drehen, dann fahren)
@@ -155,7 +155,7 @@ export const BUILDING_FLOOD_DPS = 8;           // Gebäudeschaden/s bei dauerhaf
 // --- Bagger & Terraforming-Aufträge (Phase 15) ---
 export const CONSTRUCT_RANGE = 3.0;            // Weltmeter (+Gebäudegröße), ab der ein Bagger baut
 export const TERRA_JOB_DELTA = 0.12;           // Höhenänderung eines Aufschütt-/Abgrab-Auftrags (gesamt)
-export const TERRA_JOB_RATE = 0.045;           // Höhenänderung pro Sekunde Arbeit
+export const TERRA_JOB_RATE = 0.18;            // Höhenänderung pro Sekunde Arbeit
 export const TERRA_RAISE_COST = 8;             // Erde (materials) je Aufschütt-Auftrag
 export const TERRA_LOWER_YIELD = 6;            // Erde aus einem Abgrab-Auftrag
 

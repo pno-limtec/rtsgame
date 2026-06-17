@@ -7,6 +7,8 @@ const MUSIC_CROSSFADE = 5.5;
 const COMBAT_HOLD = 12;
 const MOVE_VOICE_COOLDOWN = 3.2;
 const MOTOR_COOLDOWN = 1.6;
+const CONSTRUCTION_COOLDOWN = 4.5;
+const WORK_DIESEL_KINDS = new Set(['builder', 'truck']);
 
 // Persistente Ton-Einstellungen (überleben Reload). '1' = an, '0' = aus; fehlend = Standard (an).
 function loadAudioPref(key, def = true) {
@@ -42,6 +44,7 @@ export class Audio {
     this.voicePlaying = false;
     this.openAiVoiceDisabledUntil = 0;
     this.loopSamples = new Map();
+    this.lastConstructionAt = -999;
   }
 
   // Beim ersten Klick/Tastendruck aufrufen (entsperrt den AudioContext).
@@ -315,6 +318,12 @@ export class Audio {
     this._thump(0.15 * vol, 110, 50, 0.15);
   }
 
+  landslide(vol = 1) {
+    if (!this.ready || this.sfxMuted) return;
+    if (!this._budget('landslide', 2)) return;
+    this._sample('landslide', Math.min(0.32, 0.20 * vol), 0.94 + Math.random() * 0.08);
+  }
+
   // Erdbeben: langes, sehr tiefes Grollen.
   rumble() {
     if (!this.ready || this.sfxMuted) return;
@@ -493,23 +502,31 @@ export class Audio {
     const vol = Array.isArray(unitsOrVol) ? (volArg ?? 1) : unitsOrVol;
     const air = units.find(u => u.domain === 'air');
     const tracked = units.find(u => u.heavy || u.kind === 'tank' || u.kind === 'artillery' || u.kind === 'rocket_launcher');
+    const workDiesel = units.find(u => WORK_DIESEL_KINDS.has(u.kind));
     if (air) {
       const cat = air.kind === 'gunship' ? 'helicopter' : 'plane';
       this._sample(cat, Math.min(0.14, 0.11 * vol), 0.96 + Math.random() * 0.08);
     } else if (tracked) {
       this._sample('vehicleTrack', Math.min(0.09, 0.08 * vol), 0.94 + Math.random() * 0.08);
+    } else if (workDiesel) {
+      this._sample('workVehicleStart', Math.min(0.2, 0.16 * Math.max(0.8, vol)), 0.95 + Math.random() * 0.08);
+      return;
     }
     const v = Math.min(0.024, 0.016 * vol);
     this._burst(v, 135, 0.055, 0.28);
     this._thump(v * 0.42, 88, 58, 0.075);
   }
 
-  excavate(vol = 1) {
+  _constructionSample(vol = 1) {
     if (!this.ready || this.sfxMuted) return;
-    if (!this._budget('excavator', 1)) return;
-    const v = Math.min(0.07, 0.055 * vol);
-    this._burst(v, 280, 0.08, 0.55);
-    this._thump(v * 0.55, 125, 78, 0.10);
+    const now = this.ctx.currentTime;
+    if (now - this.lastConstructionAt < CONSTRUCTION_COOLDOWN) return;
+    this.lastConstructionAt = now;
+    this._sample('construction', Math.min(0.16, 0.1 * vol), 0.96 + Math.random() * 0.06);
+  }
+
+  excavate(vol = 1) {
+    this._constructionSample(vol);
   }
 
   _loopSample(key, cat, vol) {
@@ -561,9 +578,7 @@ export class Audio {
   }
 
   build(vol = 1) {
-    if (!this.ready || this.sfxMuted) return;
-    this._sample('construction', 0.08 * vol, 0.95 + Math.random() * 0.08);
-    this._tone(0.25 * vol, 330, 0.12); this._tone(0.25 * vol, 495, 0.16, 'triangle', 0.1);
+    this._constructionSample(vol);
   }
   ready_(vol = 1) {
     if (!this.ready || this.sfxMuted) return;

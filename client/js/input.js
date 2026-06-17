@@ -17,6 +17,7 @@ export class Input {
   constructor(net, renderer, data = null) {
     this.net = net; this.renderer = renderer; this.data = data;
     this.selected = new Set();
+    this.selectedTerraJob = null;
     this.groups = {};            // Kontrollgruppen 1-9
     this.buildMode = null;       // aktiver Bau-Kind oder null
     this.drag = null;            // {x0,y0,x1,y1}
@@ -160,7 +161,7 @@ export class Input {
     const d = this.drag;
     const minx = Math.min(d.x0, d.x1), maxx = Math.max(d.x0, d.x1);
     const miny = Math.min(d.y0, d.y1), maxy = Math.max(d.y0, d.y1);
-    if (!d.additive) this.selected.clear();
+    if (!d.additive) { this.selected.clear(); this.selectedTerraJob = null; }
     const box = (maxx - minx) > 6 || (maxy - miny) > 6;
     let picked = [];
     const candidates = this.selectableEntities();
@@ -184,12 +185,32 @@ export class Input {
       // Leeres Feld angeklickt: Öl-/Erzvorkommen darunter zur Anzeige merken (sonst löschen).
       if (best == null) {
         const g = this.renderer.groundPoint(d.x1, d.y1);
-        this.fieldInfo = g ? this.renderer.resourceAt(g.x, g.z) : null;
+        const job = g ? this.pickTerraJobAt(g.x, g.z) : null;
+        if (job) {
+          this.selected.clear();
+          this.selectedTerraJob = job[0];
+          this.fieldInfo = null;
+        } else {
+          this.fieldInfo = g ? this.renderer.resourceAt(g.x, g.z) : null;
+        }
       } else this.fieldInfo = null;
     }
     for (const id of picked) this.selected.add(id);
-    if (picked.length) this.fieldInfo = null;
+    if (picked.length) { this.selectedTerraJob = null; this.fieldInfo = null; }
     this.onSelectionChange && this.onSelectionChange();
+  }
+
+  pickTerraJobAt(wx, wz) {
+    if (!this.canControl()) return null;
+    const tx = Math.floor(wx / TILE), ty = Math.floor(wz / TILE);
+    let best = null, bestD = 5;
+    for (const j of this.net.jobs || []) {
+      if (j[1] !== this.net.seat) continue;
+      if (j[5] < 0 || j[6] < 0) continue;
+      const d = (j[2] - tx) ** 2 + (j[3] - ty) ** 2;
+      if (d < bestD) { bestD = d; best = j; }
+    }
+    return best;
   }
 
   // Doppelklick: die angeklickte Einheit bestimmen und ALLE aktuell sichtbaren Einheiten desselben
@@ -217,8 +238,15 @@ export class Input {
 
   issueCommand(cx, cy, shift, special = false) {
     if (!this.canControl()) return;
-    if (!this.selected.size) return;
     const byId = new Map(this.allEntities().map(e => [e.id, e]));
+    const selectedJob = this.selectedTerraJob == null ? null
+      : (this.net.jobs || []).find(j => j[0] === this.selectedTerraJob && j[1] === this.net.seat);
+    if (selectedJob) {
+      const g = this.renderer.groundPoint(cx, cy);
+      if (g) this.net.cmd({ type: 'setPile', job: selectedJob[0], tx: Math.floor(g.x / TILE), ty: Math.floor(g.z / TILE) });
+      return;
+    }
+    if (!this.selected.size) return;
     const selectedSites = [...this.selected].map(id => byId.get(id)).filter(e => e && e.etype === 'building' && e.owner === this.net.seat && e.pile);
     if (selectedSites.length) {
       const g = this.renderer.groundPoint(cx, cy);
@@ -238,7 +266,7 @@ export class Input {
         if (dd <= this.pickRadiusSq(e, 28) && dd < bestD) { bestD = dd; target = e; }
       }
       else if (e.etype === 'unit' && TRANSPORT_KINDS.has(e.kind) && dd <= this.pickRadiusSq(e, 28) && dd < bestF) { bestF = dd; friendlyTransport = e; }
-      else if (e.etype === 'building' && (e.buildProgress < 1 || PILE_KINDS.has(e.kind)) && dd <= this.pickRadiusSq(e, 30) && dd < bestA) { bestA = dd; assistTarget = e; }
+      else if (e.etype === 'building' && (e.buildProgress < 1 || PILE_KINDS.has(e.kind) || (e.kind === 'pipe' && e.hp < e.maxHp)) && dd <= this.pickRadiusSq(e, 30) && dd < bestA) { bestA = dd; assistTarget = e; }
     }
     const sel = [...this.selected].filter(id => {
       const e = byId.get(id);
@@ -362,6 +390,19 @@ export class Input {
     this.renderer.showBuildRange(centers.map(c => ({ x: c.x, z: c.z, r: c.r * TILE })));
   }
 
+  bridgeGapCell(tx, ty) {
+    for (const e of this.allEntities()) {
+      if (e.etype !== 'building' || e.dead || (e.buildProgress ?? 1) < 1) continue;
+      const def = this.data?.buildings?.[e.kind];
+      if (def?.role !== 'fortification' || !def?.blocks) continue;
+      const size = Math.max(1, e.size || def.size || 1);
+      const ex = e.tx ?? Math.round(e.x / TILE - size / 2);
+      const ey = e.ty ?? Math.round(e.y / TILE - size / 2);
+      if (tx >= ex && tx < ex + size && ty >= ey && ty < ey + size) return true;
+    }
+    return false;
+  }
+
   buildBlockedByWater(kind, tx, ty, size = 1) {
     const def = this.data?.buildings?.[kind];
     const r = this.renderer;
@@ -374,7 +415,7 @@ export class Input {
       const wet = r.terrainType?.[i] === 3 || depth > CLIENT_WET_DEPTH;
       const realWater = depth >= CLIENT_NAVIGABLE_DEPTH;
       const waterOptional = def?.waterOptional;     // Pipeline/Straße: Land ODER Wasser
-      if (def?.bridges) { if (!wet) return true; continue; } // Brücke nur übers Wasser (jede Tiefe)
+      if (def?.bridges) { if (!wet && !this.bridgeGapCell(nx, ny)) return true; continue; } // Brücke nur übers Wasser/Gräben
       if (def?.buildOnWater && !realWater) return true;
       if (def?.mustStandInWater && !realWater) return true;
       // Pumpwerk nur in Süßwasser: Bett über Meeresspiegel (Fluss/See), kein Meer.
@@ -570,6 +611,6 @@ export class Input {
   handleGroup(n, assign) {
     if (!this.canControl()) return;
     if (assign) { this.groups[n] = [...this.selected]; }
-    else if (this.groups[n]) { this.selected = new Set(this.groups[n]); this.onSelectionChange && this.onSelectionChange(); }
+    else if (this.groups[n]) { this.selected = new Set(this.groups[n]); this.selectedTerraJob = null; this.onSelectionChange && this.onSelectionChange(); }
   }
 }

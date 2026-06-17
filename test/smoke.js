@@ -3,11 +3,13 @@
 import { loadData } from '../shared/data-node.js';
 import { Match } from '../server/match.js';
 import { createWorld, ownerEntities, spawnBuilding, spawnUnit, applyFortification, removeFortification, applyDamage, canPlaceBuilding, isDetectable, nearestEnemy, buildSpatial, effectiveCost, buildSpeedMult } from '../shared/world.js';
-import { coverAt, isBlocked, isNavigableWater, isPassable, isWet, worldToTile, TT, tIdx, hasWaterNear, stampFortification, unstampFortification, inBounds } from '../shared/terrain.js';
+import { coverAt, isBlocked, isNavigableWater, isPassable, isWet, worldToTile, tileToWorld, TT, tIdx, hasWaterNear, stampFortification, unstampFortification, inBounds } from '../shared/terrain.js';
 import { stepWater } from '../shared/systems/water.js';
 import { step, applyCommand } from '../shared/sim.js';
 import { placeTunnel, activateTunnelIfReady, validateTunnel } from '../shared/systems/tunnel.js';
+import { stepConstruction } from '../shared/systems/construction.js';
 import { stepEconomy } from '../shared/systems/economy.js';
+import { stepProduction } from '../shared/systems/production.js';
 import { serializeSnapshot } from '../server/snapshot.js';
 import { stepMovement, setMoveGoal } from '../shared/systems/movement.js';
 import { findPath } from '../shared/pathfinding.js';
@@ -15,14 +17,60 @@ import { stepAi, initAi } from '../shared/ai/ai.js';
 import { awardXp, stepRegen } from '../shared/systems/veterancy.js';
 import { stepGarrison } from '../shared/systems/garrison.js';
 import { stepSonar } from '../shared/systems/sonar.js';
-import { BUILDER_WADE_DEPTH, BUILDER_WADE_TIME, SEA_LEVEL, WET_DEPTH, FLOOD_DEPTH, NAVIGABLE_DEPTH, SUB_DETECT_RANGE, GARRISON_DAMAGE_MULT, MUD_IMPASSABLE, SLOPE_BUILDER, SLOPE_TERRAFORM_BUILDER, TICK_RATE } from '../shared/constants.js';
+import { stepCombat } from '../shared/systems/combat.js';
+import { TILE, BUILDER_WADE_DEPTH, BUILDER_WADE_TIME, SEA_LEVEL, WET_DEPTH, FLOOD_DEPTH, NAVIGABLE_DEPTH, SUB_DETECT_RANGE, GARRISON_DAMAGE_MULT, MUD_IMPASSABLE, SLOPE_BUILDER, SLOPE_TERRAFORM_BUILDER, TICK_RATE, TERRA_RAISE_COST, TERRA_LOWER_YIELD } from '../shared/constants.js';
 import { Net } from '../client/js/net.js';
 
 let pass = 0, fail = 0;
 const ok = (c, m) => { if (c) { pass++; } else { fail++; console.log('  ✗ FAIL:', m); } };
 
+const deformationRoughness = (t, cells, pad = 1) => {
+  const set = new Set();
+  const add = (i) => {
+    if (i == null || i < 0 || i >= t.w * t.h) return;
+    const cx = i % t.w, cy = (i / t.w) | 0;
+    for (let yy = -pad; yy <= pad; yy++) for (let xx = -pad; xx <= pad; xx++) {
+      const nx = cx + xx, ny = cy + yy;
+      if (!inBounds(t, nx, ny) || Math.hypot(xx, yy) > pad + 0.25) continue;
+      set.add(tIdx(t, nx, ny));
+    }
+  };
+  for (const i of cells || []) add(i);
+  let samples = 0, maxCurve = 0, sharp = 0, needles = 0;
+  for (const i of set) {
+    const x = i % t.w, y = (i / t.w) | 0;
+    if (x <= 0 || y <= 0 || x >= t.w - 1 || y >= t.h - 1 || t.startSafe?.[i]) continue;
+    let sum = 0, n = 0, hi = -Infinity, lo = Infinity;
+    for (let yy = -1; yy <= 1; yy++) for (let xx = -1; xx <= 1; xx++) {
+      if (!xx && !yy) continue;
+      const j = (y + yy) * t.w + x + xx;
+      if (t.startSafe?.[j]) continue;
+      sum += t.height[j];
+      n++;
+      hi = Math.max(hi, t.height[j]);
+      lo = Math.min(lo, t.height[j]);
+    }
+    if (!n) continue;
+    samples++;
+    const curve = Math.abs(t.height[i] - sum / n);
+    maxCurve = Math.max(maxCurve, curve);
+    if (curve > 0.12) sharp++;
+    if (t.height[i] > hi + 0.12 || t.height[i] < lo - 0.12) needles++;
+  }
+  return { samples, maxCurve, sharp, needles };
+};
+
 const data = loadData();
 const match = new Match({ data, seed: 777, slots: 2 });
+
+for (const [group, defs] of [['Einheit', data.units], ['Gebäude', data.buildings]]) {
+  for (const [kind, def] of Object.entries(defs)) {
+    if (!def.weapon) continue;
+    const weapon = data.weapons[def.weapon];
+    ok(weapon && def.sight > weapon.range,
+      `${group} ${kind} sieht weiter als sie/es schießt (${def.sight} > ${weapon?.range})`);
+  }
+}
 
 // 1) Init-Paket korrekt geformt
 const init = match.init();
@@ -112,8 +160,21 @@ ok(Array.isArray(init.terrain.waterDepth) && init.terrain.waterDepth.length > 0,
     }
     return sum;
   };
+  const nearOreStats = (hq, radius) => {
+    let sum = 0, cells = 0, max = 0;
+    const cx = hq.tx + hq.size / 2, cy = hq.ty + hq.size / 2;
+    for (let y = Math.floor(cy - radius); y <= Math.ceil(cy + radius); y++) for (let x = Math.floor(cx - radius); x <= Math.ceil(cx + radius); x++) {
+      if (!inBounds(w.terrain, x, y) || Math.hypot(x + 0.5 - cx, y + 0.5 - cy) > radius) continue;
+      const v = w.terrain.ore[tIdx(w.terrain, x, y)] || 0;
+      if (v > 0) { sum += v; cells++; max = Math.max(max, v); }
+    }
+    return { sum, cells, max };
+  };
   for (const hq of [...w.entities.values()].filter(e => e.kind === 'hq')) {
-    ok(nearSum(w.terrain.ore, hq, 16) > 0, `Leichter Start hat Erz auf dem Startplateau (Spieler ${hq.owner})`);
+    const ore = nearOreStats(hq, 16);
+    ok(ore.sum > 0, `Leichter Start hat Erz auf dem Startplateau (Spieler ${hq.owner})`);
+    ok(ore.sum <= 2200 && ore.cells <= 16 && ore.max <= 380,
+      `Basisnahes Erz ist klein und schnell erschoepft (Spieler ${hq.owner}: ${Math.round(ore.sum)} Erz in ${ore.cells} Zellen)`);
     ok(nearSum(w.terrain.oil, hq, 16) > 0, `Leichter Start hat Öl auf dem Startplateau (Spieler ${hq.owner})`);
   }
   const riverContinuity = (world) => {
@@ -307,6 +368,20 @@ if (myUnit) {
 } else ok(false, 'Kampfeinheit zum Testen vorhanden');
 
 {
+  const w = createWorld({ data, seed: 17, map: { w: 32, h: 32 }, players: [{ id: 0, faction: 'KBN', controller: 'human' }] });
+  const site = spawnBuilding(w, 0, 'barracks', 12, 12);
+  ok(site.buildProgress === 0 && site.hp === Math.round(site.maxHp * 0.5),
+    'Angefangene Baustelle startet mit 50 Prozent der Trefferpunkte');
+  for (let k = 0; k < 140 && site.buildProgress < 1; k++) {
+    site._builderNear = w.tick;
+    stepProduction(w);
+    w.tick++;
+  }
+  ok(site.buildProgress >= 1 && site.hp === site.maxHp,
+    'Fertiggestellte Baustelle erreicht wieder volle Trefferpunkte');
+}
+
+{
   const w = createWorld({ data, seed: 15, map: { w: 32, h: 32 }, players: [{ id: 0, faction: 'KBN', controller: 'human' }] });
   const t = w.terrain;
   const cx = 16, cy = 16, W = t.w;
@@ -419,6 +494,44 @@ if (myUnit) {
     const [tx, ty] = worldToTile(u.moveTarget.x, u.moveTarget.y);
     return isPassable(t, u.domain, tx, ty);
   }), 'Gruppenbewegung wählt passierbare Zielpunkte');
+  const troops = [];
+  for (let k = 0; k < 12; k++) troops.push(spawnUnit(w, 0, 'rifleman', 14 + (k % 4) * 0.45, 18 + Math.floor(k / 4) * 0.45));
+  applyCommand(w, { type: 'move', units: troops.map(u => u.id), x: 40, y: 40 }, 0);
+  const footGoals = troops.map(u => u.moveTarget);
+  const maxFootGoalDist = Math.max(...footGoals.map(g => Math.hypot(g.x - 40, g.y - 40)));
+  let minFootGoalDist = Infinity;
+  for (const a of footGoals) for (const b of footGoals) {
+    if (a === b) continue;
+    minFootGoalDist = Math.min(minFootGoalDist, Math.hypot(a.x - b.x, a.y - b.y));
+  }
+  ok(maxFootGoalDist <= 0.55 && minFootGoalDist <= 0.24,
+    'Fußtruppen bekommen viel dichtere Zielpunkte als Fahrzeuge');
+  const tightA = spawnUnit(w, 0, 'rifleman', 52, 52);
+  const tightB = spawnUnit(w, 0, 'rifleman', 52.16, 52);
+  for (let k = 0; k < 12; k++) { buildSpatial(w, 8); stepMovement(w); }
+  ok(Math.hypot(tightA.x - tightB.x, tightA.y - tightB.y) < 0.22,
+    'Fußtruppen dürfen eng nebeneinander stehen bleiben');
+
+  const normalFoot = spawnUnit(w, 0, 'rifleman', 6, 48);
+  const mudFoot = spawnUnit(w, 0, 'rifleman', 6, 54);
+  const snowFoot = spawnUnit(w, 0, 'rifleman', 6, 60);
+  for (let x = 2; x <= 18; x++) {
+    t.mud[tIdx(t, x, 27)] = 1;
+    if (t.snow) t.snow[tIdx(t, x, 30)] = 1;
+  }
+  for (const u of [normalFoot, mudFoot, snowFoot]) {
+    u.order = { type: 'move' };
+    u.moveTarget = { x: 34, y: u.y };
+    u.path = [];
+    u.repathCd = 999;
+  }
+  const nx0 = normalFoot.x, mx0 = mudFoot.x, sx0 = snowFoot.x;
+  for (let k = 0; k < 8; k++) stepMovement(w);
+  const normalMoved = normalFoot.x - nx0;
+  const mudMoved = mudFoot.x - mx0;
+  const snowMoved = snowFoot.x - sx0;
+  ok(mudMoved < normalMoved * 0.45 && snowMoved < normalMoved * 0.45,
+    'Fußtruppen bewegen sich in tiefem Matsch und Schnee nur sehr langsam');
 }
 
 {
@@ -531,8 +644,66 @@ ok(match.player(0).controller === 'ai', 'Sitz fällt nach Disconnect-Timeout an 
   const terrainJobs = (w.terraJobs || []).filter(j => j.owner === 0);
   ok(routeInfra.length > 0 || terrainJobs.length > 0,
     'KI bereitet bei unerreichbarem Fahrzeugangriff zuerst Straße/Brücke/Terrain vor');
+  ok(routeInfra.some(e => e.kind === 'bridge'),
+    'KI plant Richtung Gegner eine Brücke über einen Flussriegel');
   ok(tanks.every(u => !u.moveTarget),
     'KI verschiebt die Fahrzeug-Angriffswelle, bis die Route vorbereitet ist');
+  for (let k = 0; k < 220; k++) step(w);
+  const finishedBridges = ownerEntities(w, 0, 'building').filter(e => e.kind === 'bridge');
+  ok(finishedBridges.length > 0 && finishedBridges.every(e => e.buildProgress >= 1 && e._fortified),
+    'KI stellt geplante Brückenquerungen fertig');
+}
+
+{
+  const w = createWorld({
+    data,
+    seed: 910,
+    map: { w: 40, h: 40 },
+    players: [{ id: 0, faction: 'KBN', controller: 'ai' }, { id: 1, faction: 'HLX', controller: 'ai' }],
+  });
+  const t = w.terrain;
+  for (const p of w.players) {
+    p.resources.ore = 20000;
+    p.resources.materials = 10000;
+    p.resources.fuel = 5000;
+    p.resources.ammo = 5000;
+    p.resources.water = 5000;
+  }
+  for (let i = 0; i < t.type.length; i++) {
+    t.type[i] = TT.LAND; t.height[i] = 0.5; t.height0[i] = 0.5;
+    t.water[i] = 0; t.baseWater[i] = 0; t.block[i] = 0; t.cover[i] = 0; t.coverBuilt[i] = 0;
+    t.ore[i] = 0; if (t.oil) t.oil[i] = 0;
+    if (t.mud) t.mud[i] = 0;
+    if (t.road) t.road[i] = 0;
+    if (t.roadBuilt) t.roadBuilt[i] = 0;
+    if (t.bridge) t.bridge[i] = 0;
+    if (t.tunnel) t.tunnel[i] = 0;
+    if (t.lakeMask) t.lakeMask[i] = 0;
+  }
+  const hq0 = ownerEntities(w, 0, 'building').find(b => b.kind === 'hq');
+  const hq1 = ownerEntities(w, 1, 'building').find(b => b.kind === 'hq');
+  const vertical = Math.abs(hq0.tx - hq1.tx) >= Math.abs(hq0.ty - hq1.ty);
+  const barrier = vertical ? Math.round((hq0.tx + hq1.tx) / 2) : Math.round((hq0.ty + hq1.ty) / 2);
+  for (let k = 0; k < (vertical ? t.h : t.w); k++) {
+    const x = vertical ? barrier : k;
+    const y = vertical ? k : barrier;
+    const i = tIdx(t, x, y);
+    t.type[i] = TT.WATER;
+    t.height[i] = SEA_LEVEL - 0.08;
+    t.height0[i] = t.height[i];
+    t.water[i] = NAVIGABLE_DEPTH * 1.4;
+    t.baseWater[i] = t.water[i];
+    t.bridge[i] = 1;
+  }
+  for (const e of ownerEntities(w, 1, 'unit')) e.dead = true;
+  for (let n = 0; n < 4; n++) spawnUnit(w, 0, 'tank', hq0.x + 2 + n * 0.7, hq0.y + 2);
+  initAi(w.players[0]);
+  w.players[0].ai.attackTimer = 6;
+  w.players[0].ai.waveSize = 2;
+  stepAi(w, w.players[0], applyCommand);
+  const routeInfra = ownerEntities(w, 0, 'building').filter(e => ['road', 'bridge', 'tunnel'].includes(e.kind));
+  ok(routeInfra.some(e => e.kind === 'bridge'),
+    'KI baut eigene Brücken auch auf bereits fahrbaren Kartenpässen');
 }
 
 {
@@ -579,16 +750,147 @@ ok(match.player(0).controller === 'ai', 'Sitz fällt nach Disconnect-Timeout an 
 {
   const w = createWorld({
     data,
+    seed: 94,
+    map: { w: 32, h: 24 },
+    players: [{ id: 0, faction: 'KBN', controller: 'ai' }, { id: 1, faction: 'HLX', controller: 'human' }],
+  });
+  const t = w.terrain;
+  w.entities.clear();
+  for (const p of w.players) {
+    p.resources.ore = 20000;
+    p.resources.materials = 10000;
+    p.resources.fuel = 5000;
+    p.resources.ammo = 5000;
+    p.resources.water = 5000;
+  }
+  for (let i = 0; i < t.type.length; i++) {
+    t.type[i] = TT.LAND; t.height[i] = 0.5; t.height0[i] = 0.5;
+    t.water[i] = 0; t.baseWater[i] = 0; t.block[i] = 0; t.cover[i] = 0; t.coverBuilt[i] = 0;
+    t.ore[i] = 0; if (t.oil) t.oil[i] = 0;
+    if (t.mud) t.mud[i] = 0;
+    if (t.road) t.road[i] = 0;
+    if (t.roadBuilt) t.roadBuilt[i] = 0;
+    if (t.bridge) t.bridge[i] = 0;
+    if (t.tunnel) t.tunnel[i] = 0;
+  }
+  const hq0 = spawnBuilding(w, 0, 'hq', 4, 10); hq0.buildProgress = 1;
+  const hq1 = spawnBuilding(w, 1, 'hq', 22, 10); hq1.buildProgress = 1;
+  spawnUnit(w, 0, 'tank', hq0.x + 2, hq0.y);
+  initAi(w.players[0]);
+  stepAi(w, w.players[0], applyCommand);
+  ok(ownerEntities(w, 0, 'building').some(e => e.kind === 'road'),
+    'KI baut auch bei erreichbarem Gegner eine Straßenachse Richtung Front');
+}
+
+{
+  const w = createWorld({
+    data,
+    seed: 93,
+    map: { w: 32, h: 24 },
+    players: [{ id: 0, faction: 'KBN', controller: 'ai' }, { id: 1, faction: 'HLX', controller: 'human' }],
+  });
+  const t = w.terrain;
+  w.entities.clear();
+  for (const p of w.players) {
+    p.resources.ore = 20000;
+    p.resources.materials = 10000;
+    p.resources.fuel = 5000;
+    p.resources.ammo = 5000;
+    p.resources.water = 5000;
+  }
+  for (let i = 0; i < t.type.length; i++) {
+    t.type[i] = TT.LAND; t.height[i] = 0.5; t.height0[i] = 0.5;
+    t.water[i] = 0; t.baseWater[i] = 0; t.block[i] = 0; t.cover[i] = 0; t.coverBuilt[i] = 0;
+    t.ore[i] = 0; if (t.oil) t.oil[i] = 0;
+    if (t.mud) t.mud[i] = 0;
+    if (t.road) t.road[i] = 0;
+    if (t.roadBuilt) t.roadBuilt[i] = 0;
+    if (t.bridge) t.bridge[i] = 0;
+    if (t.tunnel) t.tunnel[i] = 0;
+  }
+  const hq0 = spawnBuilding(w, 0, 'hq', 4, 10); hq0.buildProgress = 1;
+  const hq1 = spawnBuilding(w, 1, 'hq', 22, 10); hq1.buildProgress = 1;
+  for (let y = 10; y <= 13; y++) for (let x = 13; x <= 15; x++) {
+    const i = tIdx(t, x, y);
+    t.type[i] = TT.CLIFF;
+    t.height[i] = 0.88;
+    t.bridge[i] = 1; // Vorgeprägte Kartenpässe sollen trotzdem durch KI-Tunnel gesichert werden.
+  }
+  spawnUnit(w, 0, 'builder', hq0.x + 2, hq0.y + 2);
+  spawnUnit(w, 0, 'tank', hq0.x + 2, hq0.y);
+  initAi(w.players[0]);
+  stepAi(w, w.players[0], applyCommand);
+  ok((w.tunnels || []).length === 1 && ownerEntities(w, 0, 'building').filter(e => e.kind === 'tunnel').length === 2,
+    'KI plant Richtung Gegner einen eigenen Tunnel durch einen bereits fahrbaren Klippenriegel');
+  for (let k = 0; k < 400 && !(w.tunnels || []).some(tn => tn.active); k++) step(w);
+  ok((w.tunnels || []).some(tn => tn.active),
+    'KI stellt den geplanten Tunnel mit nur einer erreichbaren Mündung fertig');
+}
+
+{
+  const w = createWorld({
+    data,
+    seed: 95,
+    map: { w: 80, h: 24 },
+    players: [{ id: 0, faction: 'KBN', controller: 'ai' }, { id: 1, faction: 'HLX', controller: 'human' }],
+  });
+  const t = w.terrain;
+  w.entities.clear();
+  for (const p of w.players) {
+    p.resources.ore = 50000;
+    p.resources.materials = 50000;
+    p.resources.fuel = 5000;
+    p.resources.ammo = 5000;
+    p.resources.water = 5000;
+  }
+  for (let i = 0; i < t.type.length; i++) {
+    t.type[i] = TT.LAND; t.height[i] = 0.5; t.height0[i] = 0.5;
+    t.water[i] = 0; t.baseWater[i] = 0; t.block[i] = 0; t.cover[i] = 0; t.coverBuilt[i] = 0;
+    t.ore[i] = 0; if (t.oil) t.oil[i] = 0;
+    if (t.mud) t.mud[i] = 0;
+    if (t.road) t.road[i] = 0;
+    if (t.roadBuilt) t.roadBuilt[i] = 0;
+    if (t.bridge) t.bridge[i] = 0;
+    if (t.tunnel) t.tunnel[i] = 0;
+  }
+  const hq0 = spawnBuilding(w, 0, 'hq', 3, 10); hq0.buildProgress = 1; hq0.hp = hq0.maxHp;
+  const hq1 = spawnBuilding(w, 1, 'hq', 70, 10); hq1.buildProgress = 1; hq1.hp = hq1.maxHp;
+  for (let y = 0; y < t.h; y++) for (let x = 48; x <= 50; x++) {
+    const i = tIdx(t, x, y);
+    t.type[i] = TT.CLIFF;
+    t.height[i] = 0.88;
+    t.height0[i] = 0.88;
+  }
+  spawnUnit(w, 0, 'builder', hq0.x + 2, hq0.y + 2);
+  spawnUnit(w, 0, 'tank', hq0.x + 2, hq0.y);
+  initAi(w.players[0]);
+  stepAi(w, w.players[0], applyCommand);
+  const firstRouteInfra = ownerEntities(w, 0, 'building').filter(e => ['road', 'bridge', 'tunnel'].includes(e.kind));
+  ok((w.tunnels || []).length === 1 && firstRouteInfra.every(e => e.kind !== 'road'),
+    'KI priorisiert einen entfernten Klippen-Tunnel vor langen Straßenketten');
+}
+
+{
+  const w = createWorld({
+    data,
     seed: 88,
     map: { w: 40, h: 40 },
     players: [{ id: 0, faction: 'KBN', controller: 'ai' }, { id: 1, faction: 'HLX', controller: 'ai' }],
   });
   for (const p of w.players) for (const k of Object.keys(p.resources)) p.resources[k] = 0;
   const hq0 = ownerEntities(w, 0, 'building').find(b => b.kind === 'hq');
+  const hq1 = ownerEntities(w, 1, 'building').find(b => b.kind === 'hq');
   for (let n = 0; n < 4; n++) spawnUnit(w, 0, 'tank', hq0.x + 2 + n * 0.4, hq0.y + 2);
-  w.tick = 15000; // weit im KI-only-Endspiel: Score-Entscheidung darf greifen
-  for (let k = 0; k < 1400 && w.players.filter(p => !p.defeated).length > 1; k++) step(w);
-  ok(w.players.filter(p => !p.defeated).length <= 1, 'Reines KI-Patt wird im Endspiel deterministisch entschieden');
+  for (let n = 0; n < 4; n++) spawnUnit(w, 1, 'tank', hq1.x - 2 - n * 0.4, hq1.y - 2);
+  w.tick = 15000; // weit im KI-only-Endspiel: hoher Druck, aber keine künstliche Aufgabe.
+  for (let k = 0; k < 1400; k++) {
+    stepAi(w, w.players[0], applyCommand);
+    stepAi(w, w.players[1], applyCommand);
+    w.tick++;
+  }
+  ok(w.aiDirector?.pressure >= 10, 'KI-only-Endspiel erzeugt maximalen Angriffsdruck');
+  ok(w.players.every(p => !p.defeated) && w.players.every(p => ownerEntities(w, p.id).length > 0),
+    'KI gibt bei vorhandener Basis und Armee nicht per Score-Entscheid auf');
 }
 
 // 7) Befestigungen & Deckung (Phase 7): Wall blockiert + deckt, Graben deckt, Entfernen räumt auf.
@@ -641,6 +943,22 @@ ok(match.player(0).controller === 'ai', 'Sitz fällt nach Disconnect-Timeout an 
 
   for (let i = 0; i < t.type.length; i++) {
     t.type[i] = TT.LAND; t.height[i] = 0.5; t.water[i] = 0; t.baseWater[i] = 0; t.block[i] = 0; t.cover[i] = 0; t.tunnel[i] = 0;
+    if (t.bridge) t.bridge[i] = 0;
+  }
+  for (let y = 0; y < t.h; y++) {
+    const i = tIdx(t, 4, y);
+    t.water[i] = WET_DEPTH * 0.55;
+    t.baseWater[i] = t.water[i];
+  }
+  ok(!isPassable(t, 'land', 4, midY, 'infantry'), 'Fußtruppen betreten auch flaches sichtbares Wasser nicht');
+  const blockedFootWater = findPath(t, 'land', 1, midY, 8, midY, 2000, Infinity, { category: 'infantry' });
+  ok(blockedFootWater === null, 'Fußtruppen-Pfadfindung führt nicht durch eine Wasserlinie');
+  t.bridge[tIdx(t, 4, midY)] = 1;
+  ok(isPassable(t, 'land', 4, midY, 'infantry'), 'Brücken bleiben für Fußtruppen über Wasser passierbar');
+
+  for (let i = 0; i < t.type.length; i++) {
+    t.type[i] = TT.LAND; t.height[i] = 0.5; t.water[i] = 0; t.baseWater[i] = 0; t.block[i] = 0; t.cover[i] = 0; t.tunnel[i] = 0;
+    if (t.bridge) t.bridge[i] = 0;
   }
   for (let y = 1; y <= 8; y++) t.water[tIdx(t, 4, y)] = WET_DEPTH + 0.08;
   const aroundWater = findPath(t, 'land', 1, 5, 8, 5, 2000, Infinity, { category: 'vehicle' });
@@ -694,6 +1012,43 @@ ok(match.player(0).controller === 'ai', 'Sitz fällt nach Disconnect-Timeout an 
   stepMovement(hw);
   ok(group.every((u, i) => Math.hypot(u.x - before[i].x, u.y - before[i].y) > 0.001),
     'Alle Einheiten eines menschlichen Mehrfach-Move bewegen sich im naechsten Tick Richtung Zielpunkt');
+
+  const lw = createWorld({ data, seed: 92, map: { w: 64, h: 64 }, players: [{ id: 0, faction: 'KBN', controller: 'human' }] });
+  const lt = lw.terrain;
+  lw.entities.clear();
+  for (let i = 0; i < lt.type.length; i++) {
+    lt.type[i] = TT.LAND; lt.height[i] = 0.5; lt.water[i] = 0; lt.baseWater[i] = 0; lt.block[i] = 0; lt.cover[i] = 0;
+    if (lt.mud) lt.mud[i] = 0;
+  }
+  const largeGroup = [];
+  for (let n = 0; n < 36; n++) largeGroup.push(spawnUnit(lw, 0, 'truck', 4 + (n % 6) * 1.2, 4 + Math.floor(n / 6) * 1.2));
+  applyCommand(lw, { type: 'move', units: largeGroup.map(u => u.id), x: 96, y: 48 }, 0);
+  const maxLargeGoalDist = Math.max(...largeGroup.map(u => Math.hypot(u.moveTarget.x - 96, u.moveTarget.y - 48)));
+  ok(maxLargeGoalDist <= 16,
+    'Große Fahrzeuggruppen bekommen Formationsziele nahe am Klickpunkt statt weit davor');
+
+  const bw = createWorld({ data, seed: 91, map: { w: 32, h: 32 }, players: [{ id: 0, faction: 'KBN', controller: 'human' }] });
+  const bt = bw.terrain;
+  bw.entities.clear();
+  for (let i = 0; i < bt.type.length; i++) {
+    bt.type[i] = TT.LAND; bt.height[i] = 0.5; bt.water[i] = 0; bt.baseWater[i] = 0; bt.block[i] = 0; bt.cover[i] = 0;
+    if (bt.mud) bt.mud[i] = 0;
+  }
+  for (let y = 0; y < bt.h; y++) {
+    const wall = spawnBuilding(bw, 0, 'wall', 14, y);
+    wall.buildProgress = 1;
+    applyFortification(bw, wall);
+  }
+  const blockedGroup = [];
+  for (let n = 0; n < 8; n++) blockedGroup.push(spawnUnit(bw, 0, 'truck', 4, 4 + n * 2));
+  bw._pbTick = bw.tick; bw._pathBudget = 0;
+  applyCommand(bw, { type: 'move', units: blockedGroup.map(u => u.id), x: 48, y: 12 }, 0);
+  const blockedBefore = blockedGroup.map(u => ({ x: u.x, y: u.y }));
+  ok(blockedGroup.every(u => u._waitingForPath),
+    'Menschlicher Mehrfach-Move wartet bei blockierter Direktlinie auf Pfade statt blind loszufahren');
+  stepMovement(bw);
+  ok(blockedGroup.every((u, i) => Math.hypot(u.x - blockedBefore[i].x, u.y - blockedBefore[i].y) < 1e-6),
+    'Blockierte Gruppen machen keinen Stakkato-Schritt ohne Pfad');
 }
 
 // 8) Dynamisches Wasser (Phase 8): Becken-Füllung, Fluss, Damm-Barriere, Fluten, Trockenlegen.
@@ -745,6 +1100,49 @@ ok(match.player(0).controller === 'ai', 'Sitz fällt nach Disconnect-Timeout an 
   t2.water[tIdx(t2, 28, 24)] = NAVIGABLE_DEPTH + 0.02;
   ok(isPassable(t2, 'water', 28, 24), 'Tief geflutete Zelle: für See passierbar');
 
+  const wDam = createWorld({ data, seed: 2, map: { w: 42, h: 42 }, players: [{ id: 0, faction: 'KBN', controller: 'human' }] });
+  const dmt = wDam.terrain;
+  dmt.sources.length = 0; dmt.waterActive.clear();
+  for (let i = 0; i < dmt.water.length; i++) {
+    dmt.type[i] = TT.LAND; dmt.height[i] = 0.48 + (i % dmt.w) * 0.003; dmt.height0[i] = dmt.height[i];
+    dmt.water[i] = 0; dmt.baseWater[i] = 0; dmt.waterBlock[i] = 0; dmt.block[i] = 0;
+    if (dmt.lakeMask) dmt.lakeMask[i] = 0;
+    if (dmt.startSafe) dmt.startSafe[i] = 0;
+  }
+  const testDam = spawnBuilding(wDam, 0, 'dam', 20, 19);
+  for (let y = 0; y < testDam.size; y++) for (let x = 0; x < testDam.size; x++) {
+    const i = tIdx(dmt, testDam.tx + x, testDam.ty + y);
+    dmt.height[i] = 0.44; dmt.height0[i] = 0.44;
+  }
+  const damBaseBefore = Float64Array.from(dmt.height);
+  testDam.buildProgress = 1; applyFortification(wDam, testDam);
+  let damLow = Infinity, damBank = -Infinity;
+  for (let y = -1; y <= testDam.size; y++) for (let x = -1; x <= testDam.size; x++) {
+    const nx = testDam.tx + x, ny = testDam.ty + y;
+    if (!inBounds(dmt, nx, ny)) continue;
+    const i = tIdx(dmt, nx, ny);
+    if (x >= 0 && x < testDam.size && y >= 0 && y < testDam.size) damLow = Math.min(damLow, dmt.height[i]);
+    else damBank = Math.max(damBank, damBaseBefore[i]);
+  }
+  ok(damLow > damBank + 0.12, 'Staudamm-Krone liegt höher als die angrenzenden Ufer');
+  ok(dmt.waterBlock[tIdx(dmt, testDam.tx, testDam.ty)] > 0, 'Staudamm stempelt eine Wassersperre');
+  removeFortification(wDam, testDam);
+  let damReset = true;
+  for (let y = 0; y < testDam.size; y++) for (let x = 0; x < testDam.size; x++) {
+    const i = tIdx(dmt, testDam.tx + x, testDam.ty + y);
+    if (Math.abs(dmt.height[i] - damBaseBefore[i]) > 1e-6 || dmt.waterBlock[i] !== 0) damReset = false;
+  }
+  ok(damReset, 'Staudamm-Rückbau setzt Höhe und Wassersperre exakt zurück');
+
+  for (let y = 15; y <= 25; y++) dmt.waterBlock[tIdx(dmt, 20, y)] = 1;
+  const damSrc = tIdx(dmt, 27, 20);
+  for (let k = 0; k < 90; k++) { dmt.water[damSrc] += 0.09; dmt.waterActive.add(damSrc); wDam.tick++; stepWater(wDam); }
+  const blockedDown = dmt.water[tIdx(dmt, 18, 20)], blockedUp = dmt.water[tIdx(dmt, 24, 20)];
+  ok(blockedUp > WET_DEPTH && blockedDown < blockedUp * 0.25, 'Staudamm sperrt den direkten Durchfluss');
+  for (let k = 0; k < 260; k++) { dmt.water[damSrc] += 0.09; dmt.waterActive.add(damSrc); wDam.tick++; stepWater(wDam); }
+  const sideFlow = Math.max(dmt.water[tIdx(dmt, 20, 14)], dmt.water[tIdx(dmt, 21, 14)], dmt.water[tIdx(dmt, 20, 26)], dmt.water[tIdx(dmt, 21, 26)]);
+  ok(sideFlow > WET_DEPTH, 'Aufgestautes Wasser fließt seitlich um die Staudamm-Enden');
+
   // Fluten tötet Landeinheiten, nicht aber Luft/See.
   const fc = tIdx(t2, 28, 24);
   t2.water[fc] = FLOOD_DEPTH + 0.15; t2.waterActive.add(fc);
@@ -754,6 +1152,19 @@ ok(match.player(0).controller === 'ai', 'Sitz fällt nach Disconnect-Timeout an 
   for (let k = 0; k < 6; k++) { t2.water[fc] = FLOOD_DEPTH + 0.15; w2.tick++; stepWater(w2); }
   ok(land.hp < lhp, 'Landeinheit ertrinkt in der Flut (Schaden)');
   ok(air.hp === ahp, 'Lufteinheit nimmt keinen Flutschaden');
+
+  const swift = tIdx(t2, 30, 24), swiftDown = tIdx(t2, 31, 24);
+  for (const i of [swift, swiftDown]) {
+    t2.type[i] = TT.LAND; t2.block[i] = 0; t2.waterBlock[i] = 0; t2.baseWater[i] = 0;
+  }
+  t2.height[swift] = 0.50; t2.height[swiftDown] = 0.25;
+  t2.water[swift] = FLOOD_DEPTH + 0.13; t2.water[swiftDown] = 0;
+  t2.waterActive.add(swift); t2.waterActive.add(swiftDown);
+  const swept = spawnUnit(w2, 0, 'rifleman', (30 + 0.5) * 2, (24 + 0.5) * 2);
+  const sweptX = swept.x;
+  w2.tick = 100; stepWater(w2);
+  ok(swept.dead && swept.x > sweptX + 0.1,
+    'Starke Strömung spült Fußtruppen weg und tötet sie sofort');
 
   // Trockenlegen: Wasser entfernen → Zelle wird wieder für Land begehbar.
   t2.water[fc] = 0; t2.waterActive.add(fc); w2.tick++; stepWater(w2);
@@ -900,7 +1311,23 @@ ok(match.player(0).controller === 'ai', 'Sitz fällt nach Disconnect-Timeout an 
   const victim = spawnUnit(wv, 1, 'tank', 21, 20);
   applyDamage(wv, victim, 99999, vetUnit); // tödlich
   ok(victim.dead && vetUnit.xp > 0, 'Angreifer erhält XP für Abschuss');
+  const tankDeath = wv.events.find(ev => ev.type === 'death' && ev.id === victim.id);
+  ok(tankDeath?.category === 'vehicle' && tankDeath.domain === 'land' && tankDeath.facing != null,
+    'Fahrzeug-Tod liefert Renderer-Metadaten für Wracks');
   ok(vetUnit.xp >= ranks[1].xp ? vetUnit.vet >= 1 : true, 'Rang steigt bei erreichter XP-Schwelle');
+  const infVictim = spawnUnit(wv, 1, 'rifleman', 22, 20);
+  applyDamage(wv, infVictim, 99999, vetUnit);
+  const infDeath = wv.events.find(ev => ev.type === 'death' && ev.id === infVictim.id);
+  ok(infDeath?.category === 'infantry' && infDeath.domain === 'land',
+    'Infanterie-Tod liefert Renderer-Metadaten für Umfallen statt Explosion');
+  const waterInfVictim = spawnUnit(wv, 1, 'rifleman', 23, 20);
+  applyDamage(wv, waterInfVictim, 99999, null, 'water', { vx: 0.7, vy: -0.2, depth: 0.18 });
+  const infWashout = wv.events.find(ev => ev.type === 'washout' && ev.id === waterInfVictim.id);
+  ok(infWashout?.category === 'infantry' && infWashout.domain === 'land'
+    && Math.hypot(infWashout.vx || 0, infWashout.vy || 0) > 0.1,
+    'Infanterie-Wassertod liefert Washout-Metadaten fürs Wegschwemmen');
+  ok(!wv.events.some(ev => ev.type === 'death' && ev.id === waterInfVictim.id),
+    'Infanterie-Wassertod erzeugt keinen normalen Death-Event');
 
   // 10c) Beförderung verbessert Schaden, max. HP und Sicht und heilt teilweise.
   const promoted = spawnUnit(wv, 0, 'rifleman', 10, 10);
@@ -1047,6 +1474,41 @@ ok(match.player(0).controller === 'ai', 'Sitz fällt nach Disconnect-Timeout an 
   buildSpatial(wt);
   const stillGround = nearestEnemy(wt, myTank, myTank.sight);
   ok(stillGround && stillGround.domain !== 'air', 'Panzer ignoriert Luftziele trotz Nähe');
+  wt.players[0].controller = 'ai';
+  const enemyRoad = spawnBuilding(wt, 1, 'road', 21, 20); enemyRoad.buildProgress = 1; applyFortification(wt, enemyRoad);
+  buildSpatial(wt);
+  ok(nearestEnemy(wt, myTank, myTank.sight)?.id !== enemyRoad.id,
+    'KI-Einheiten ignorieren Straßen bei der Zielerfassung');
+  const roadHp = enemyRoad.hp;
+  applyDamage(wt, enemyRoad, roadHp + 1, myTank);
+  ok(!enemyRoad.dead && enemyRoad.hp === roadHp, 'KI-Schaden zerstört keine Straßen');
+}
+
+// 14a) KI-Einheiten greifen auch bei normalem Bewegungsbefehl nahe Gegner automatisch an.
+{
+  const w = createWorld({
+    data, seed: 3132, map: { w: 32, h: 32 },
+    players: [{ id: 0, faction: 'KBN', controller: 'ai' }, { id: 1, faction: 'HLX', controller: 'human' }],
+  });
+  w.entities.clear();
+  w.players[0].resources.ammo = 100;
+  const tank = spawnUnit(w, 0, 'tank', 20, 20);
+  tank.order = { type: 'move' };
+  const enemyUnit = spawnUnit(w, 1, 'rifleman', 25, 20);
+  buildSpatial(w);
+  stepCombat(w);
+  ok(w.events.some(e => e.type === 'fire' && e.id === tank.id) && enemyUnit.hp < enemyUnit.maxHp,
+    'KI-Einheit feuert aus normaler Bewegung auf nahe gegnerische Einheit');
+
+  enemyUnit.dead = true; enemyUnit.hp = 0;
+  tank.target = null; tank.cd = 0;
+  w.projectiles.length = 0;
+  w.events.length = 0;
+  const enemyBuilding = spawnBuilding(w, 1, 'power_plant', 11, 10); enemyBuilding.buildProgress = 1;
+  buildSpatial(w);
+  stepCombat(w);
+  ok(w.events.some(e => e.type === 'fire' && e.id === tank.id) && enemyBuilding.hp < enemyBuilding.maxHp,
+    'KI-Einheit feuert aus normaler Bewegung auf nahes gegnerisches Gebäude');
 }
 
 // 15) Fraktions-Modifikatoren werden tatsächlich angewandt (costMult/research/hpMult/armorMult).
@@ -1264,7 +1726,29 @@ ok(match.player(0).controller === 'ai', 'Sitz fällt nach Disconnect-Timeout an 
   ok(lt.water[poolA] + lt.water[poolB] >= levelMass0 * 0.96,
     'Nivellieren einer geschlossenen Senke erhält die Wassermasse weitgehend');
 
-  // (d3) Hat temporäres Wasser einen offenen Ablauf zum Kartenrand/Meer, darf es nicht als
+  // (d3) Ein abgeschlossenes tiefes Loch hat keinen Ablauf: Unterwasser-Erosion darf den Pegel
+  // nicht dauerhaft verändern oder das Loch immer weiter ausbaggern.
+  const ew = createWorld({ data, seed: 5555, map: { w: 32, h: 32 }, players: [{ id: 0, faction: 'KBN', controller: 'human' }] });
+  const et = ew.terrain, ex = 15, ey = 15, hole = ey * ew.terrain.w + ex;
+  et.sources.length = 0; et.waterActive.clear();
+  for (let i = 0; i < et.water.length; i++) {
+    et.type[i] = TT.LAND; et.height[i] = 0.84; et.height0[i] = 0.84;
+    et.water[i] = 0; et.baseWater[i] = 0; et.waterBlock[i] = 0; et.block[i] = 0;
+    if (et.lakeMask) et.lakeMask[i] = 0;
+    if (et.startSafe) et.startSafe[i] = 0;
+  }
+  et.height[hole] = et.height0[hole] = 0.32;
+  et.water[hole] = 0.22;
+  et.waterActive.add(hole);
+  const holeLevel0 = et.height[hole] + et.water[hole];
+  for (let k = 0; k < 1200; k++) { stepWater(ew); ew.tick++; }
+  const holeLevel1 = et.height[hole] + et.water[hole];
+  ok(Math.abs(holeLevel1 - holeLevel0) < 0.004,
+    `Abflussloses Loch behaelt seinen Pegel ohne Quelle (${holeLevel0.toFixed(3)} -> ${holeLevel1.toFixed(3)})`);
+  ok(Math.abs(et.terra[hole] || 0) < 0.001,
+    'Abflussloses Loch wird durch stehendes Wasser nicht endlos tiefer erodiert');
+
+  // (d4) Hat temporäres Wasser einen offenen Ablauf zum Kartenrand/Meer, darf es nicht als
   // dauerhafte Pfützenfläche liegen bleiben.
   const ow = createWorld({ data, seed: 5454, map: { w: 32, h: 32 }, players: [{ id: 0, faction: 'KBN', controller: 'human' }] });
   const ot = ow.terrain, ox = 22, oy = 16;
@@ -1415,6 +1899,48 @@ ok(match.player(0).controller === 'ai', 'Sitz fällt nach Disconnect-Timeout an 
   }
   ok(fissureCells >= Math.round(Math.max(t.w, t.h) * 0.08), `Erdbeben reißt einen langen Graben auf (${fissureCells} Zellen)`);
   ok(fissureActive > 0, 'Erdbebengraben weckt das Wassersystem und kann volllaufen');
+  const quakeChanged = [];
+  for (let i = 0; i < t.terra.length; i++) if (Math.abs(t.terra[i]) > 0.004) quakeChanged.push(i);
+  const quakeRough = deformationRoughness(t, quakeChanged, 1);
+  ok(quakeRough.samples > 50 && quakeRough.needles === 0 && quakeRough.maxCurve <= 0.22 && quakeRough.sharp <= 12,
+    `Erdbeben-Deformation bleibt gerundet statt zackig (samples=${quakeRough.samples}, nadeln=${quakeRough.needles}, maxKurve=${quakeRough.maxCurve.toFixed(3)}, scharf=${quakeRough.sharp})`);
+
+  const rockWorld = createWorld({ data, seed: 606, map: { w: 32, h: 32 }, players: [{ id: 0, faction: 'KBN', controller: 'human' }] });
+  initEnv(rockWorld);
+  const rockTerrain = rockWorld.terrain;
+  rockWorld.entities.clear();
+  if (rockTerrain.waterActive) rockTerrain.waterActive.clear();
+  for (let i = 0; i < rockTerrain.type.length; i++) {
+    rockTerrain.type[i] = TT.LAND; rockTerrain.height[i] = 0.62; rockTerrain.height0[i] = 0.62; rockTerrain.terra[i] = 0;
+    rockTerrain.water[i] = 0; rockTerrain.baseWater[i] = 0; rockTerrain.waterBlock[i] = 0; rockTerrain.block[i] = 0;
+    if (rockTerrain.cover) rockTerrain.cover[i] = 0;
+    if (rockTerrain.startSafe) rockTerrain.startSafe[i] = 0;
+  }
+  const rockPipes = [];
+  for (let y = 8; y <= 24; y++) for (let x = 8; x <= 24; x++) {
+    const i = tIdx(rockTerrain, x, y);
+    const high = (x % 2) === 0;
+    rockTerrain.height[i] = high ? 0.88 : 0.54;
+    rockTerrain.height0[i] = rockTerrain.height[i];
+    if (!high) {
+      const pipe = spawnBuilding(rockWorld, 0, 'pipe', x, y);
+      pipe.buildProgress = 1; pipe.hp = pipe.maxHp;
+      rockPipes.push(pipe);
+    }
+  }
+  const [rockQx, rockQy] = tileToWorld(16, 16);
+  (rockWorld.controls || (rockWorld.controls = {})).insanity = 1;
+  rockWorld.env.insanity = 1;
+  rockWorld.env.weather = 'clear'; rockWorld.env.weatherLeft = 1e9; rockWorld.env._nextQuake = 1e9;
+  rockWorld.env.quake = { x: rockQx, y: rockQy, tx: 16, ty: 16, r: 10, left: 1, fissureDone: true, burstDone: true, rocksDone: 1 };
+  rockWorld.events = [];
+  rockWorld.tick = 3;
+  stepEnvironment(rockWorld);
+  const rockHitPipes = rockPipes.filter(pipe => pipe.dead || pipe.hp < pipe.maxHp);
+  const survivingRockHits = rockHitPipes.filter(pipe => !pipe.dead && pipe.hp > 0 && pipe.hp < pipe.maxHp);
+  ok(rockHitPipes.length > 0, 'Beben-Steinschlag trifft die Test-Pipeline');
+  ok(survivingRockHits.length > rockHitPipes.length * 0.8,
+    'Pipelines überleben Steinschlag überwiegend beschädigt statt sofort zu brechen');
 
   // (g) Regen destabilisiert steile, nasse Hänge auch ohne Beben.
   const rHigh = qy * t.w + qx + 4, rLow = rHigh + 1;
@@ -1438,6 +1964,35 @@ ok(match.player(0).controller === 'ai', 'Sitz fällt nach Disconnect-Timeout an 
   }));
   ok(t.height[rHigh] < 0.78 - 1e-4 && rainDeposit && rainSlideEvents.some(ev => (ev.path || []).length >= 4),
     'Regen/Fließwasser löst längeren Hangrutsch aus: oben Abtrag, hangabwärts Anlandung');
+
+  const capStarts = [];
+  const capX = qx + 10, capY = qy + 8;
+  for (let n = 0; n < 6; n++) {
+    const high = capY * t.w + capX + n * 2, low = high + 1;
+    t.height[high] = 0.82; t.height0[high] = 0.82; t.terra[high] = 0; t.water[high] = 0;
+    t.height[low] = 0.50; t.height0[low] = 0.50; t.terra[low] = 0; t.water[low] = 0;
+    capStarts.push(high);
+  }
+  t.waterActive = new Set(capStarts);
+  we.events = []; we.tick++;
+  checkRainSlides(we, 1e9);
+  const cappedRock = we.events.find(ev => ev.type === 'rockfall');
+  ok(!cappedRock || cappedRock.count <= 1, 'Regen-Hangrutsche sind pro Prüfung begrenzt und erzeugen keinen Felssturz-Spam');
+
+  const edgeX = 2, edgeY = qy + 16, edgeHigh = edgeY * t.w + edgeX, edgeLow = edgeHigh + 1;
+  for (let yy = -1; yy <= 1; yy++) for (let xx = 0; xx <= 2; xx++) {
+    const i = (edgeY + yy) * t.w + edgeX + xx;
+    t.height[i] = 0.56; t.height0[i] = 0.56; t.terra[i] = 0; t.water[i] = 0;
+  }
+  t.height[edgeHigh] = 0.88; t.height0[edgeHigh] = 0.88;
+  t.height[edgeLow] = 0.42; t.height0[edgeLow] = 0.42;
+  const dryEdgeUnit = spawnUnit(we, 0, 'rifleman', (edgeX + 0.5) * 2, (edgeY + 0.5) * 2);
+  const dryEdgeHp = dryEdgeUnit.hp;
+  t.waterActive = new Set([edgeHigh]);
+  we.events = []; we.tick++;
+  for (let k = 0; k < 8; k++) checkRainSlides(we, 1e9);
+  ok(dryEdgeUnit.hp === dryEdgeHp && !dryEdgeUnit.dead,
+    'Regen-Hangrutsche starten nicht am Kartenrand und töten dort keine trockenen Einheiten');
 
   // (h) Snapshot enthält Umwelt-Status.
   const ws = createWorld({ data, seed: 5, players: [{ id: 0, faction: 'KBN', controller: 'human' }] });
@@ -1505,6 +2060,21 @@ ok(match.player(0).controller === 'ai', 'Sitz fällt nach Disconnect-Timeout an 
   ok(isPassable(t, 'water', wx, wy), 'Schiffe passieren unter der Brücke');
   removeFortification(w, br);
   ok(!isPassable(t, 'land', wx, wy), 'Zerstörte Brücke: Wasser wieder unpassierbar');
+  let gi = -1;
+  for (let y = 4; y < t.h - 4 && gi < 0; y++) for (let x = 4; x < t.w - 4; x++) {
+    if (canPlaceBuilding(w, x, y, 1, data.buildings.trench, 0)) { gi = tIdx(t, x, y); break; }
+  }
+  ok(gi >= 0, 'Trockene Graben-Testzelle gefunden');
+  const gx = gi % t.w, gy = (gi / t.w) | 0;
+  t.type[gi] = TT.LAND; t.height[gi] = 0.55; t.water[gi] = 0; t.baseWater[gi] = 0; t.block[gi] = 0;
+  if (t.ore) t.ore[gi] = 0;
+  if (t.oil) t.oil[gi] = 0;
+  ok(!canPlaceBuilding(w, gx, gy, 1, data.buildings.bridge, 0), 'Brücke darf nicht frei auf trockenes Land');
+  const trench = spawnBuilding(w, 0, 'trench', gx, gy); trench.buildProgress = 1; applyFortification(w, trench);
+  ok(!isPassable(t, 'land', gx, gy), 'Graben sperrt trockene Zelle');
+  ok(canPlaceBuilding(w, gx, gy, 1, data.buildings.bridge, 0), 'Brücke darf über einen Graben gelegt werden');
+  const gapBridge = spawnBuilding(w, 0, 'bridge', gx, gy); gapBridge.buildProgress = 1; applyFortification(w, gapBridge);
+  ok(isPassable(t, 'land', gx, gy), 'Brücke über Graben macht die Sperre passierbar');
   // Klippenzelle finden
   let ci = -1; for (let i = 0; i < t.type.length; i++) if (t.type[i] === TT.CLIFF) { ci = i; break; }
   ok(ci >= 0, 'Klippenzelle gefunden');
@@ -1563,6 +2133,7 @@ ok(match.player(0).controller === 'ai', 'Sitz fällt nach Disconnect-Timeout an 
   const w = createWorld({ data, seed: 778, map: { w: 32, h: 32 }, players: [{ id: 0, faction: 'KBN', controller: 'human' }] });
   const t = w.terrain;
   w.entities.clear();
+  if (!t.startSafe) t.startSafe = new Uint8Array(t.w * t.h);
   for (let i = 0; i < t.type.length; i++) {
     t.type[i] = TT.LAND; t.height[i] = 0.5; t.water[i] = 0; t.baseWater[i] = 0; t.block[i] = 0; t.cover[i] = 0;
     if (t.ore) t.ore[i] = 0;
@@ -1572,20 +2143,229 @@ ok(match.player(0).controller === 'ai', 'Sitz fällt nach Disconnect-Timeout an 
     if (t.roadBuilt) t.roadBuilt[i] = 0;
     if (t.bridge) t.bridge[i] = 0;
   }
-  const pipe = spawnBuilding(w, 0, 'pipe', 10, 10); pipe.buildProgress = 1;
+  const pipe = spawnBuilding(w, 0, 'pipe', 10, 10); pipe.buildProgress = 1; pipe.hp = pipe.maxHp;
   ok(isPassable(t, 'land', 10, 10), 'Pipeline selbst blockiert Bodenbewegung nicht');
   ok(canPlaceBuilding(w, 10, 10, 1, data.buildings.road, 0), 'Straße darf einen Pipeline-Durchfahrpunkt kreuzen');
   const road = spawnBuilding(w, 0, 'road', 10, 10); road.buildProgress = 1; applyFortification(w, road);
   ok(isPassable(t, 'land', 10, 10), 'Pipeline-Durchfahrt bleibt auch mit Straße passierbar');
+  const roadOnly = spawnBuilding(w, 0, 'road', 12, 10); roadOnly.buildProgress = 1; applyFortification(w, roadOnly);
+  ok(canPlaceBuilding(w, 12, 10, 1, data.buildings.pipe, 0), 'Pipeline darf über eine bestehende Straße geführt werden');
+  const roadPipe = spawnBuilding(w, 0, 'pipe', 12, 10); roadPipe.buildProgress = 1; roadPipe.hp = roadPipe.maxHp;
+  ok(isPassable(t, 'land', 12, 10, 'vehicle'), 'Fahrzeuge fahren unter der Pipeline weiter über die Straße');
+  const rx = 18, ry = 10, ri = tIdx(t, rx, ry);
+  t.type[ri] = TT.WATER; t.height[ri] = SEA_LEVEL - 0.06; t.water[ri] = NAVIGABLE_DEPTH; t.baseWater[ri] = t.water[ri];
+  const waterRoad = spawnBuilding(w, 0, 'road', rx, ry); waterRoad.buildProgress = 1; applyFortification(w, waterRoad); waterRoad.hp = 1;
+  applyDamage(w, waterRoad, 999, null, 'water');
+  ok(!waterRoad.dead && waterRoad.hp === 1, 'Straße im Wasser ignoriert Wasserschaden');
+  const site = spawnBuilding(w, 0, 'factory', 20, 10); site.buildProgress = 0.25; site.hp = 1;
+  applyDamage(w, site, 999, null, 'water');
+  ok(!site.dead && site.hp === 1, 'Baustelle ignoriert Wasserschaden');
+  const px = 24, py = 10;
+  for (let yy = 0; yy < 2; yy++) for (let xx = 0; xx < 2; xx++) {
+    const i = tIdx(t, px + xx, py + yy);
+    t.type[i] = TT.WATER; t.height[i] = SEA_LEVEL - 0.08; t.water[i] = NAVIGABLE_DEPTH + 0.05; t.baseWater[i] = t.water[i];
+    if (t.lakeMask) t.lakeMask[i] = 1;
+  }
+  const pumpSite = spawnBuilding(w, 0, 'water_pump', px, py); pumpSite.buildProgress = 0; pumpSite.hp = 1;
+  const pumpBuilder = spawnUnit(w, 0, 'builder', 3, 3);
+  pumpBuilder.resourceRole = 'build';
+  pumpBuilder.order = { type: 'construct', site: pumpSite.id };
+  pumpBuilder._conT = 46;
+  stepConstruction(w);
+  ok(!pumpSite.dead && pumpSite.hp === 1 && pumpBuilder.order.type === 'idle',
+    'Pumpstations-Baustelle bleibt bei schwankendem Wasserpegel stehen und gibt den Bagger frei');
+  const stuckSite = spawnBuilding(w, 0, 'factory', 28, 10); stuckSite.buildProgress = 0; stuckSite.hp = 1;
+  const stuckBuilder = spawnUnit(w, 0, 'builder', 3, 5);
+  stuckBuilder.resourceRole = 'build';
+  stuckBuilder.order = { type: 'construct', site: stuckSite.id };
+  stuckBuilder._conT = 46;
+  stepConstruction(w);
+  ok(stuckSite.dead, 'Normale unerreichbare Baustelle wird weiterhin abgebrochen');
 
   const bx = 14, by = 10, bi = tIdx(t, bx, by);
   t.type[bi] = TT.WATER; t.height[bi] = SEA_LEVEL - 0.08; t.water[bi] = NAVIGABLE_DEPTH + 0.05; t.baseWater[bi] = t.water[bi];
   ok(canPlaceBuilding(w, bx, by, 1, data.buildings.pipe, 0), 'Pipeline darf jetzt auch frei durchs Wasser verlegt werden (waterOptional)');
+  const ux = 16, uy = 10, ui = tIdx(t, ux, uy);
+  t.type[ui] = TT.WATER; t.height[ui] = SEA_LEVEL - 0.08; t.water[ui] = NAVIGABLE_DEPTH + 0.05; t.baseWater[ui] = t.water[ui];
+  const underwaterPipe = spawnBuilding(w, 0, 'pipe', ux, uy); underwaterPipe.buildProgress = 1; underwaterPipe.hp = 1;
+  applyDamage(w, underwaterPipe, 999, null, 'rockfall', { rockfall: 1 });
+  ok(!underwaterPipe.dead && underwaterPipe.hp === 1, 'Unterwasser-Pipeline ignoriert naturbedingten Schaden');
   const bridge = spawnBuilding(w, 0, 'bridge', bx, by); bridge.buildProgress = 1; applyFortification(w, bridge);
   ok(canPlaceBuilding(w, bx, by, 1, data.buildings.pipe, 0), 'Pipeline darf auf einer fertigen Brücke über Wasser geführt werden');
-  const bridgePipe = spawnBuilding(w, 0, 'pipe', bx, by); bridgePipe.buildProgress = 1;
+  const bridgePipe = spawnBuilding(w, 0, 'pipe', bx, by); bridgePipe.buildProgress = 1; bridgePipe.hp = bridgePipe.maxHp;
   ok(isPassable(t, 'land', bx, by) && isPassable(t, 'water', bx, by),
     'Pipeline auf der Brücke lässt Land- und Wasserwege offen');
+  pipe.hp = 30;
+  w.players[0].controller = 'ai';
+  const repairBuilder = spawnUnit(w, 0, 'builder', 10 * 2 + 1, 11 * 2 + 1);
+  repairBuilder.resourceRole = 'build';
+  for (let k = 0; k < 60 && pipe.hp < pipe.maxHp; k++) step(w);
+  ok(pipe.hp >= pipe.maxHp, 'KI-Bagger repariert beschädigte Pipeline');
+}
+
+// 20b) Brücken und Staudämme müssen vom Ufer/aus der Nähe gebaut werden können.
+{
+  const makeFlatWorld = (seed) => {
+    const w = createWorld({ data, seed, map: { w: 32, h: 32 }, players: [{ id: 0, faction: 'KBN', controller: 'human' }] });
+    const t = w.terrain;
+    w.entities.clear();
+    for (let i = 0; i < t.type.length; i++) {
+      t.type[i] = TT.LAND; t.height[i] = 0.55; t.water[i] = 0; t.baseWater[i] = 0; t.block[i] = 0; t.cover[i] = 0;
+      if (t.height0) t.height0[i] = 0.55;
+      if (t.coverBuilt) t.coverBuilt[i] = 0;
+      if (t.ore) t.ore[i] = 0;
+      if (t.oil) t.oil[i] = 0;
+      if (t.mud) t.mud[i] = 0;
+      if (t.road) t.road[i] = 0;
+      if (t.roadBuilt) t.roadBuilt[i] = 0;
+      if (t.bridge) t.bridge[i] = 0;
+      if (t.waterBlock) t.waterBlock[i] = 0;
+      if (t.lakeMask) t.lakeMask[i] = 0;
+    }
+    return w;
+  };
+  {
+    const w = makeFlatWorld(779);
+    const t = w.terrain;
+    const bx = 14, by = 14, bi = tIdx(t, bx, by);
+    t.type[bi] = TT.WATER; t.height[bi] = SEA_LEVEL - 0.08; t.water[bi] = NAVIGABLE_DEPTH + 0.05; t.baseWater[bi] = t.water[bi];
+    const bridge = spawnBuilding(w, 0, 'bridge', bx, by);
+    const builder = spawnUnit(w, 0, 'builder', bridge.x - 7, bridge.y);
+    builder.resourceRole = 'build';
+    builder.order = { type: 'construct', site: bridge.id };
+    ok(Math.hypot(bridge.x - builder.x, bridge.y - builder.y) > (bridge.size || 1) + 3,
+      'Brücken-Testbagger steht außerhalb der alten Baustellen-Reichweite');
+    for (let k = 0; k < 100 && bridge.buildProgress < 1; k++) step(w);
+    ok(bridge.buildProgress >= 1, 'Bagger in der Nähe baut die Brücke über Wasser fertig');
+  }
+  {
+    const w = makeFlatWorld(780);
+    const dam = spawnBuilding(w, 0, 'dam', 15, 15);
+    const builder = spawnUnit(w, 0, 'builder', dam.x + 7, dam.y);
+    builder.resourceRole = 'build';
+    builder.order = { type: 'construct', site: dam.id };
+    ok(Math.hypot(dam.x - builder.x, dam.y - builder.y) > (dam.size || 1) + 3,
+      'Staudamm-Testbagger steht außerhalb der alten Baustellen-Reichweite');
+    for (let k = 0; k < 180 && dam.buildProgress < 1; k++) step(w);
+    ok(dam.buildProgress >= 1, 'Bagger in der Nähe baut den Staudamm fertig');
+  }
+}
+
+{
+  const w = createWorld({ data, seed: 902, map: { w: 32, h: 24 }, players: [{ id: 0, faction: 'KBN', controller: 'ai' }] });
+  const t = w.terrain, p = w.players[0];
+  w.entities.clear();
+  p.resources.ore = 10000; p.resources.materials = 10000; p.resources.water = 1000; p.resources.fuel = 1000;
+  for (let i = 0; i < t.type.length; i++) {
+    t.type[i] = TT.LAND; t.height[i] = 0.55; t.water[i] = 0; t.baseWater[i] = 0; t.block[i] = 0; t.cover[i] = 0;
+    if (t.height0) t.height0[i] = 0.55;
+    if (t.coverBuilt) t.coverBuilt[i] = 0;
+    if (t.ore) t.ore[i] = 0;
+    if (t.oil) t.oil[i] = 0;
+    if (t.mud) t.mud[i] = 0;
+    if (t.road) t.road[i] = 0;
+    if (t.roadBuilt) t.roadBuilt[i] = 0;
+    if (t.bridge) t.bridge[i] = 0;
+    if (t.tunnel) t.tunnel[i] = 0;
+    if (t.lakeMask) t.lakeMask[i] = 0;
+  }
+  const hq = spawnBuilding(w, 0, 'hq', 3, 8); hq.buildProgress = 1; hq.hp = hq.maxHp;
+  const prod = spawnBuilding(w, 0, 'oil_derrick', 8, 8); prod.buildProgress = 1; prod.hp = prod.maxHp;
+  const sink = spawnBuilding(w, 0, 'oil_depot', 18, 8); sink.buildProgress = 1; sink.hp = sink.maxHp;
+  const road = spawnBuilding(w, 0, 'road', 12, 7); road.buildProgress = 1; road.hp = road.maxHp; applyFortification(w, road);
+  spawnUnit(w, 0, 'builder', hq.x + 2, hq.y + 2);
+  initAi(p);
+  stepAi(w, p, applyCommand);
+  ok(ownerEntities(w, 0, 'building').some(e => e.kind === 'pipe' && e.tx === road.tx && e.ty === road.ty),
+    'KI darf Pipeline-Segmente direkt über Straßen planen');
+  ok(isPassable(t, 'land', road.tx, road.ty, 'vehicle'),
+    'KI-Pipeline auf Straße blockiert Fahrzeuge nicht');
+}
+
+// 20a.1) Komplett zerstörte Pipeline-Segmente werden als fehlende Leitung wieder aufgebaut.
+{
+  const w = createWorld({ data, seed: 780, map: { w: 32, h: 24 }, players: [{ id: 0, faction: 'KBN', controller: 'human' }] });
+  const t = w.terrain, p = w.players[0];
+  w.entities.clear();
+  p.resources.ore = 10000; p.resources.materials = 10000; p.resources.water = 1000; p.resources.fuel = 1000;
+  for (let i = 0; i < t.type.length; i++) {
+    t.type[i] = TT.LAND; t.height[i] = 0.55; t.water[i] = 0; t.baseWater[i] = 0; t.block[i] = 0; t.cover[i] = 0;
+    if (t.height0) t.height0[i] = 0.55;
+    if (t.ore) t.ore[i] = 0;
+    if (t.oil) t.oil[i] = 0;
+    if (t.lakeMask) t.lakeMask[i] = 0;
+  }
+  const hq = spawnBuilding(w, 0, 'hq', 3, 8); hq.buildProgress = 1;
+  const prod = spawnBuilding(w, 0, 'oil_derrick', 8, 8); prod.buildProgress = 1;
+  const sink = spawnBuilding(w, 0, 'oil_depot', 18, 8); sink.buildProgress = 1;
+  const segs = [[10, 8], [12, 8], [14, 8], [16, 8]].map(([x, y]) => {
+    const seg = spawnBuilding(w, 0, 'pipe', x, y); seg.buildProgress = 1;
+    return seg;
+  });
+  stepEconomy(w);
+  ok(prod._pipelineConnected === true, 'Testleitung ist vor dem Bruch verbunden');
+  const missing = segs[1];
+  applyDamage(w, missing, missing.hp + 1, null, 'rockfall', { rockfall: 1 });
+  step(w); // Cleanup entfernt das tote Segment und merkt die Lücke.
+  ok(![...w.entities.values()].some(e => e.id === missing.id), 'Zerstörtes Pipeline-Segment ist vollständig entfernt');
+  ok(w.aiPipeRebuildSites?.some(s => s.owner === 0 && s.tx === missing.tx && s.ty === missing.ty), 'Fehlendes Pipeline-Segment wird für KI-Wiederaufbau gemerkt');
+  p.controller = 'ai';
+  const repairBuilder = spawnUnit(w, 0, 'builder', missing.x, missing.y + 2);
+  repairBuilder.resourceRole = 'build';
+  let rebuilt = null;
+  for (let k = 0; k < 180; k++) {
+    step(w);
+    rebuilt = [...w.entities.values()].find(e => e.owner === 0 && e.kind === 'pipe' && !e.dead && e.tx === missing.tx && e.ty === missing.ty);
+    if (rebuilt?.buildProgress >= 1) break;
+  }
+  ok(rebuilt?.buildProgress >= 1, 'KI baut ein komplett fehlendes Pipeline-Segment wieder auf');
+  for (let k = 0; k < 15; k++) step(w);
+  ok(prod._pipelineConnected === true, 'Wiederaufgebautes Segment verbindet die Förderkette erneut');
+}
+
+// 20a.2) Basis-Plateaus bleiben auf den unteren beiden Umwelt-Schwierigkeitsgraden kraterfrei.
+{
+  const w = createWorld({ data, seed: 779, map: { w: 32, h: 32 }, players: [{ id: 0, faction: 'KBN', controller: 'human' }] });
+  const t = w.terrain;
+  w.entities.clear();
+  if (!t.startSafe) t.startSafe = new Uint8Array(t.w * t.h);
+  for (let i = 0; i < t.type.length; i++) {
+    t.type[i] = TT.LAND; t.height[i] = 0.65; t.water[i] = 0; t.baseWater[i] = 0;
+    if (t.height0) t.height0[i] = 0.65;
+    if (t.terra) t.terra[i] = 0;
+    if (t.startSafe) t.startSafe[i] = 0;
+  }
+  const tx = 12, ty = 12, ci = tIdx(t, tx, ty);
+  for (let y = ty - 1; y <= ty + 1; y++) for (let x = tx - 1; x <= tx + 1; x++) t.startSafe[tIdx(t, x, y)] = 1;
+  const h0 = t.height[ci];
+  w.controls.insanity = 1;
+  w.projectiles.push({ x: tx * 2 + 1, y: ty * 2 + 1, speed: 1000, dmg: 0, splash: 3, vs: {}, owner: 0, attackerId: null, targetId: null, gx: tx * 2 + 1, gy: ty * 2 + 1 });
+  stepCombat(w);
+  ok(Math.abs(t.height[ci] - h0) < 1e-9, 'StartSafe-Plateau bleibt bei Schwierigkeit 1 kraterfrei');
+  ok(w.events.some(e => e.type === 'explosion' && e.noCrater), 'Explosion im StartSafe-Plateau markiert Renderer-Krater als unterdrückt');
+  w.events.length = 0;
+  w.controls.insanity = 3;
+  w.projectiles.push({ x: tx * 2 + 1, y: ty * 2 + 1, speed: 1000, dmg: 0, splash: 3, vs: {}, owner: 0, attackerId: null, targetId: null, gx: tx * 2 + 1, gy: ty * 2 + 1 });
+  stepCombat(w);
+  ok(t.height[ci] < h0 - 0.005, 'Auf höheren Schwierigkeiten können Explosionen das Plateau weiter vernarben');
+}
+
+// 20a.3) Feuernde Einheiten liefern genug Event-Daten, um sie kurz im Nebel aufzudecken.
+{
+  const w = createWorld({
+    data, seed: 781, map: { w: 32, h: 32 },
+    players: [{ id: 0, faction: 'KBN', controller: 'human' }, { id: 1, faction: 'HLX', controller: 'human' }],
+  });
+  w.entities.clear();
+  w.events.length = 0;
+  w.players[0].resources.ammo = 100;
+  const shooter = spawnUnit(w, 0, 'tank', 20, 20);
+  const target = spawnUnit(w, 1, 'tank', 20, 26);
+  shooter.target = target.id;
+  stepCombat(w);
+  const fire = w.events.find(e => e.type === 'fire');
+  ok(fire?.id === shooter.id && fire.owner === shooter.owner && fire.etype === 'unit',
+    'Schuss-Event markiert die feuernde Einheit für Fog-of-War-Reveal');
 }
 
 // 20b) Erzabbau legt Haufen an; LKW/Erz-LKW fahren den Haufen ins Erzlager.
@@ -1713,6 +2493,56 @@ ok(match.player(0).controller === 'ai', 'Sitz fällt nach Disconnect-Timeout an 
   }
   ok(maxWetBedStep <= 0.078,
     `Wasserbetten bleiben glatt genug für clippingfreie Wasserflächen (maxStufe=${maxWetBedStep.toFixed(3)})`);
+  {
+    const normalMask = new Uint8Array(W * H);
+    const mark = (i, radius) => {
+      const cx = i % W, cy = (i / W) | 0;
+      for (let yy = -radius; yy <= radius; yy++) for (let xx = -radius; xx <= radius; xx++) {
+        const nx = cx + xx, ny = cy + yy;
+        if (nx < 0 || ny < 0 || nx >= W || ny >= H || Math.hypot(xx, yy) > radius) continue;
+        normalMask[ny * W + nx] = 1;
+      }
+    };
+    for (const p of t.riverPaths || []) for (const i of p) mark(i, 4);
+    for (const p of t.furrowPaths || []) for (const i of p) mark(i, 3);
+    for (const v of t.valleys || []) for (const i of v.path || []) mark(i, 4);
+    for (const L of t.lakes || []) {
+      const rr = (L.r || 3) + 4;
+      for (let y = Math.floor(L.y - rr); y <= Math.ceil(L.y + rr); y++) for (let x = Math.floor(L.x - rr); x <= Math.ceil(L.x + rr); x++) {
+        if (x < 0 || y < 0 || x >= W || y >= H || Math.hypot(x - L.x, y - L.y) > rr) continue;
+        normalMask[y * W + x] = 1;
+      }
+    }
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+      const i = y * W + x;
+      if (Math.min(x, y, W - 1 - x, H - 1 - y) < 6) normalMask[i] = 1;
+      if (t.startSafe?.[i]) normalMask[i] = 1;
+      if (Math.hypot(x + 0.5 - W / 2, y + 0.5 - H / 2) <= centerCoreR + 6) normalMask[i] = 1;
+    }
+    let normalSamples = 0, sharpNormalCurves = 0, normalNeedles = 0, maxNormalCurve = 0;
+    for (let y = 1; y < H - 1; y++) for (let x = 1; x < W - 1; x++) {
+      const i = y * W + x;
+      if (normalMask[i] || t.water[i] > WET_DEPTH || t.height[i] < SEA_LEVEL + 0.03) continue;
+      let sum = 0, n = 0, hi = -Infinity, lo = Infinity;
+      for (let yy = -1; yy <= 1; yy++) for (let xx = -1; xx <= 1; xx++) {
+        if (!xx && !yy) continue;
+        const j = (y + yy) * W + x + xx;
+        if (normalMask[j] || t.water[j] > WET_DEPTH || t.height[j] < SEA_LEVEL + 0.03) continue;
+        sum += t.height[j];
+        n++;
+        hi = Math.max(hi, t.height[j]);
+        lo = Math.min(lo, t.height[j]);
+      }
+      if (!n) continue;
+      normalSamples++;
+      const curve = Math.abs(t.height[i] - sum / n);
+      maxNormalCurve = Math.max(maxNormalCurve, curve);
+      if (curve > 0.085) sharpNormalCurves++;
+      if (t.height[i] > hi + 0.10 || t.height[i] < lo - 0.10) normalNeedles++;
+    }
+    ok(normalSamples > 5000 && sharpNormalCurves <= 8 && normalNeedles === 0 && maxNormalCurve <= 0.13,
+      `Normales Gelände bleibt weich statt nadelig/gezackt (samples=${normalSamples}, kurven=${sharpNormalCurves}, nadeln=${normalNeedles}, maxKurve=${maxNormalCurve.toFixed(3)})`);
+  }
 
   // (c) Strategische Hochseen über dem Meeresspiegel + trockene, flutbare Täler.
   ok(t.lakes && t.lakes.length >= 4, `Mindestens 4 Hochseen generiert (${t.lakes.length})`);
@@ -1880,25 +2710,55 @@ ok(match.player(0).controller === 'ai', 'Sitz fällt nach Disconnect-Timeout an 
   const terraPile = terraJob ? w.entities.get(terraJob.earthPileId) : null;
   ok(terraPile && terraPile.kind === 'earth_pile', 'Abgrab-Auftrag weist automatisch einen Erdhügelplatz zu');
   ok(Math.abs(t.height[ji] - jh0) < 1e-9, 'Terraform-Auftrag veraendert die physikalische Hoehe erst nach Abschluss');
-  for (let k = 0; k < 600 && w.terraJobs.length; k++) step(w);
+  let sawTerraCargo = false, sawTerraDump = false;
+  for (let k = 0; k < 600 && w.terraJobs.length; k++) {
+    step(w);
+    sawTerraCargo = sawTerraCargo || ownerEntities(w, 0, 'unit').some(u => u.kind === 'builder' && u.order?.type === 'terra' && u.order?.state === 'dump' && (u.cargo || 0) > 0);
+    sawTerraDump = sawTerraDump || w.events.some(ev => ev.type === 'dump' && ev.resource === 'materials'
+      && terraPile && Math.hypot((ev.dx ?? 0) - terraPile.x, (ev.dy ?? 0) - terraPile.y) <= 0.1);
+  }
   ok(w.terraJobs.length === 0, 'Abgrab-Auftrag wurde von einem Bagger erledigt');
+  ok(sawTerraCargo, 'Bagger transportiert den Aushub sichtbar zum Erdhügel');
+  ok(sawTerraDump, 'Bagger lädt den Aushub am Erdhügel mit Dump-Animation ab');
   ok(t.height[ji] < jh0 - 0.05, `Zelle wurde abgegraben (${jh0.toFixed(2)} → ${t.height[ji].toFixed(2)})`);
   ok((terraPile?.amount || 0) > 0, 'Abgraben füllt den Erdhügel mit Erde');
   ok(P.resources.materials <= mat0 + 1, 'Abgraben bucht Erde nicht direkt ins Depot');
 
-  // (h) Schwere Fahrzeuge gehen im Wasser kaputt.
+  // (h) Schwere Fahrzeuge halten flaches Wasser aus und gehen erst in Tiefwasser kaputt.
   let wi = -1; for (let i = 0; i < t.water.length; i++) if (t.water[i] > WET_DEPTH && t.water[i] < FLOOD_DEPTH) { wi = i; break; }
   if (wi < 0) for (let i = 0; i < t.water.length; i++) if (t.water[i] > WET_DEPTH) { wi = i; break; }
+  const wtx = wi % W, wty = (wi / W) | 0;
+  for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+    const x = wtx + dx, y = wty + dy;
+    if (!inBounds(t, x, y)) continue;
+    const i = tIdx(t, x, y);
+    t.type[i] = TT.LAND; t.height[i] = 0.5; t.height0[i] = 0.5; t.water[i] = WET_DEPTH * 1.2; t.baseWater[i] = 0;
+    t.block[i] = 0; t.waterBlock[i] = 0;
+    if (t.waterActive) t.waterActive.add(i);
+  }
   const [twx, twy] = [(wi % W) * 2 + 1, ((wi / W) | 0) * 2 + 1];
   const tank = spawnUnit(w, 0, 'tank', twx, twy);
   const thp = tank.hp;
   for (let k = 0; k < 20; k++) { stepWater(w); w.tick++; }
-  ok(tank.hp < thp, 'Schweres Fahrzeug nimmt im Wasser Schaden (säuft ab)');
+  ok(tank.hp === thp && !tank.dead, 'Schweres Fahrzeug übersteht flaches Wasser ohne Schaden');
+  for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+    const x = wtx + dx, y = wty + dy;
+    if (!inBounds(t, x, y)) continue;
+    const i = tIdx(t, x, y);
+    t.water[i] = NAVIGABLE_DEPTH + 0.08;
+    if (t.waterActive) t.waterActive.add(i);
+  }
+  for (let k = 0; k < 10; k++) { stepWater(w); w.tick++; }
+  ok(tank.hp < thp, 'Schweres Fahrzeug nimmt erst in tiefem Wasser Schaden');
 
   // (i) Gebäude verfallen, wenn sie zu lange im Wasser stehen (nach Schonfrist).
   const flooded = spawnBuilding(w, 0, 'turret', wi % W, (wi / W) | 0); flooded.buildProgress = 1;
   const bhp = flooded.hp;
-  for (let k = 0; k < 40; k++) { stepWater(w); w.tick++; w.time += 0.5; } // Zeit > Schonfrist verstreichen lassen
+  for (let k = 0; k < 40; k++) {
+    t.water[wi] = Math.max(t.water[wi] || 0, NAVIGABLE_DEPTH + 0.08);
+    if (t.waterActive) t.waterActive.add(wi);
+    stepWater(w); w.tick++; w.time += 0.5;
+  } // Zeit > Schonfrist verstreichen lassen
   ok(flooded.hp < bhp, 'Überflutetes Gebäude verfällt nach und nach');
 
   // (j) Snapshot streamt Schnee, Straßen & Strom-Flag.
@@ -1936,6 +2796,18 @@ ok(match.player(0).controller === 'ai', 'Sitz fällt nach Disconnect-Timeout an 
   t.roadBuilt[ai] = 1; t.roadBuilt[bi] = 1;
   ok(slopeOk(t, ai, bi, tank.maxSlope, 0.135), 'mit Straße überwindet der Panzer den Hang');
   t.roadBuilt[ai] = 0; t.roadBuilt[bi] = 0;
+
+  // (b2) Fahrzeuge nehmen für ein Straßenband auch einen Umweg in Kauf.
+  const ry = 34, dy = 37, sx = 30, gx = 46;
+  for (let y = ry - 1; y <= dy; y++) for (let x = sx - 1; x <= gx + 1; x++) {
+    const i = y * W + x;
+    t.type[i] = TT.LAND; t.height[i] = 0.55; t.height0[i] = 0.55; t.terra[i] = 0;
+    t.water[i] = 0; t.baseWater[i] = 0; t.block[i] = 0; t.cover[i] = 0; t.road[i] = 0; t.roadBuilt[i] = 0;
+  }
+  for (let x = sx; x <= gx; x++) t.roadBuilt[ry * W + x] = 1;
+  const roadPrefPath = findPath(t, 'land', sx, dy, gx, dy, 600, tank.maxSlope, { category: 'vehicle', heavy: true });
+  const roadPrefCells = roadPrefPath ? roadPrefPath.filter(([x, y]) => y === ry && x >= sx && x <= gx).length : 0;
+  ok(roadPrefCells >= 10, 'Fahrzeug-Pfadfindung bevorzugt ein längeres Straßenband gegenüber der direkten Geländequerung');
 
   // (c) Kollision: massive Gebäude blockieren ihre Zellen, Zerstörung gibt sie frei.
   let ci = -1;
@@ -1982,30 +2854,90 @@ ok(match.player(0).controller === 'ai', 'Sitz fällt nach Disconnect-Timeout an 
   for (let k = 0; k < 6; k++) { stepWater(w); w.tick++; }
   ok(raft.x > rx0 + 0.3, `Strömung reißt die Einheit mit (${(raft.x - rx0).toFixed(2)} m flussabwärts)`);
 
-  // (g) Schneelawine: schwere Schneelast an steilem Hang geht ab, Event + Schneeabtrag.
-  for (const i of t.snowIdx) t.snow[i] = 0;
-  const si = t.snowIdx[(t.snowIdx.length / 2) | 0];
+  // (g) Schneelawine: Basisnähe bleibt ruhig, am Zentralberg geht schwere Schneelast ab.
+  const originalSnowIdx = [...t.snowIdx];
+  const prepareAvalancheCell = (i) => {
+    const x = i % W, y = (i / W) | 0;
+    for (let yy = -1; yy <= 1; yy++) for (let xx = -1; xx <= 1; xx++) {
+      const nx = x + xx, ny = y + yy;
+      if (!inBounds(t, nx, ny)) continue;
+      const j = tIdx(t, nx, ny);
+      t.type[j] = TT.LAND; t.water[j] = 0; t.baseWater[j] = 0; t.block[j] = 0;
+      t.height[j] = 1.36; t.height0[j] = 1.36;
+    }
+    const low = inBounds(t, x + 1, y) ? tIdx(t, x + 1, y) : tIdx(t, x - 1, y);
+    t.height[i] = 1.55; t.height0[i] = 1.55; t.snow[i] = 1.0;
+    t.height[low] = 1.34; t.height0[low] = 1.34; t.snow[low] = 0;
+  };
+  const avalancheBaseHq = ownerEntities(w, 0, 'building').find(e => e.kind === 'hq');
+  const hx = avalancheBaseHq.tx + avalancheBaseHq.size / 2, hy = avalancheBaseHq.ty + avalancheBaseHq.size / 2;
+  let baseSnow = -1;
+  for (let y = 1; y < t.h - 1 && baseSnow < 0; y++) for (let x = 1; x < t.w - 1; x++) {
+    const d = Math.hypot(x + 0.5 - hx, y + 0.5 - hy);
+    if (d >= 18 && d <= 24) { baseSnow = tIdx(t, x, y); break; }
+  }
+  t.snow.fill(0);
+  prepareAvalancheCell(baseSnow);
+  t.snowIdx = [baseSnow];
+  w.events = [];
+  for (let k = 0; k < 120; k++) checkAvalanches(w, 1e9);
+  ok(!w.events.some(ev => ev.type === 'avalanche'), 'Lawinen starten nicht in Basisnähe');
+
+  t.snow.fill(0);
+  const si = originalSnowIdx.reduce((best, i) => {
+    const bx = best % W, by = (best / W) | 0;
+    const x = i % W, y = (i / W) | 0;
+    return Math.hypot(x + 0.5 - t.w / 2, y + 0.5 - t.h / 2) < Math.hypot(bx + 0.5 - t.w / 2, by + 0.5 - t.h / 2) ? i : best;
+  }, originalSnowIdx[0]);
+  prepareAvalancheCell(si);
+  t.snowIdx = [si];
   t.snow[si] = 1.0;
-  t.height[si] = 0.95; t.height[si + 1] = 0.85;   // garantiert lawinenfähiger Steilhang
-  t.height0[si] = 0.95; t.height0[si + 1] = 0.85; t.water[si + 1] = 0;
+  const avalancheTerraBefore = Float32Array.from(t.terra);
   w.events = [];
   for (let k = 0; k < 6000 && !w.events.some(ev => ev.type === 'avalanche'); k++) checkAvalanches(w, 1e9);
   const aval = w.events.find(ev => ev.type === 'avalanche');
   ok(aval, 'Lawine geht ab (Event mit Pfad)');
   ok(t.snow[si] < 1.0, 'Lawine trägt die Schneelast ab');
-  ok(t.height[si] < 0.95, 'Lawine schürft den Abrisshang aus');
+  ok(t.height[si] < 1.55, 'Lawine schürft den Abrisshang aus');
   if (aval && aval.path && aval.path.length >= 2) {
-    const ax = Math.round(aval.path[aval.path.length - 2] / 2 - 0.5);
-    const ay = Math.round(aval.path[aval.path.length - 1] / 2 - 0.5);
+    const ax = Math.round(aval.path[aval.path.length - 2] / TILE - 0.5);
+    const ay = Math.round(aval.path[aval.path.length - 1] / TILE - 0.5);
     const ai2 = ay * W + ax;
     ok(t.terra[ai2] > 0 || t.water[ai2] > 0, 'Lawine lagert am Auslauf Material/Schmelzwasser ab');
   }
+  const avalancheChanged = [];
+  for (let i = 0; i < t.terra.length; i++) if (Math.abs((t.terra[i] || 0) - (avalancheTerraBefore[i] || 0)) > 0.002) avalancheChanged.push(i);
+  const avalancheRough = deformationRoughness(t, avalancheChanged, 1);
+  ok(avalancheRough.samples > 10 && avalancheRough.needles === 0 && avalancheRough.maxCurve <= 0.24 && avalancheRough.sharp <= 12,
+    `Lawinen-Deformation bleibt gerundet statt zackig (samples=${avalancheRough.samples}, nadeln=${avalancheRough.needles}, maxKurve=${avalancheRough.maxCurve.toFixed(3)}, scharf=${avalancheRough.sharp})`);
+  t.snowIdx = originalSnowIdx;
 
   // (h) Straßenbau außerhalb der Basis: road-Gebäude stempelt Straßenzellen.
+  const farFromBuildings = (i) => {
+    const x = (i % W) + 0.5, y = ((i / W) | 0) + 0.5;
+    for (const e of w.entities.values()) {
+      if (e.etype !== 'building' || e.dead || e.def?.roadBuilt || e.def?.pipe || e.def?.bridges || e.def?.tunnels) continue;
+      if (['terrain', 'infrastructure', 'fortification', 'hydro'].includes(e.def?.role)) continue;
+      const ex = e.tx + e.size / 2, ey = e.ty + e.size / 2;
+      if (Math.hypot(x - ex, y - ey) <= e.size / 2 + 3) return false;
+    }
+    return true;
+  };
   let ri = -1;
-  for (let i = ci + 200; i < t.type.length; i++) if (t.type[i] === TT.LAND && !t.block[i] && t.water[i] === 0 && t.ore[i] === 0) { ri = i; break; }
+  for (let i = ci + 200; i < t.type.length; i++) {
+    if (t.type[i] === TT.LAND && !t.block[i] && t.water[i] === 0 && t.ore[i] === 0 && farFromBuildings(i)) { ri = i; break; }
+  }
   const road = spawnBuilding(w, 0, 'road', ri % W, (ri / W) | 0); road.buildProgress = 1; applyF(w, road);
   ok(roadAtIdx(t, ri), 'Gebaute Straße zählt als Straßenzelle (Tempo + Steigungsbonus)');
+  ok((t.terra[ri] || 0) > 0.01, 'Straße außerhalb der Basis wird leicht angehoben');
+  t.water[ri] = WET_DEPTH + 0.02; t.baseWater[ri] = 0;
+  ok(isPassable(t, 'land', ri % W, (ri / W) | 0, 'vehicle'), 'Angehobene Straße bleibt bei niedrigem Hochwasser befahrbar');
+  const hq = ownerEntities(w, 0, 'building').find(e => e.kind === 'hq' && !e.dead);
+  const nearRoad = spawnBuilding(w, 0, 'road', hq.tx + hq.size + 1, hq.ty); nearRoad.buildProgress = 1; applyF(w, nearRoad);
+  const nearI = tIdx(t, nearRoad.tx, nearRoad.ty);
+  ok((t.terra[nearI] || 0) <= 0.01, 'Straßen direkt an Gebäuden heben das Basisgelände nicht an');
+  removeF(w, nearRoad);
+  t.water[ri] = 0;
   removeF(w, road);
   ok(!roadAtIdx(t, ri), 'Zerstörte Straße verschwindet aus dem Netz');
 
@@ -2136,6 +3068,184 @@ ok(match.player(0).controller === 'ai', 'Sitz fällt nach Disconnect-Timeout an 
     const lkw = spawnUnit(w, 0, 'truck', 130, 130);
     applyCommand(w, { type: 'assist', units: [lkw.id], target: pile.id }, 0);
     ok(lkw.order.type === 'haul_pile' && lkw.order.pile === pile.id, 'Assist: LKW übernimmt Erdhaufen-Abfuhr');
+  }
+}
+
+// 23b) Terraforming-Erdlogistik: Bagger fährt zum Erdhügel/Lager und kippt sichtbar ab.
+{
+  const flatTerraWorld = (seed) => {
+    const w = createWorld({ data, seed, map: { w: 48, h: 48 }, players: [{ id: 0, faction: 'KBN', controller: 'human' }] });
+    const t = w.terrain;
+    w.entities.clear();
+    w.terraJobs = [];
+    w.env = { weather: 'clear', weatherLeft: 1e9, daylight: 1, dayT: 0.5, solar: 1 };
+    w._nextQuake = 1e9; w._lightningCd = 1e9;
+    for (let i = 0; i < t.type.length; i++) {
+      t.type[i] = TT.LAND; t.height[i] = 0.62; t.height0[i] = 0.62; t.terra[i] = 0;
+      t.water[i] = 0; t.baseWater[i] = 0; t.block[i] = 0; t.cover[i] = 0;
+      if (t.mud) t.mud[i] = 0;
+      if (t.tracks) t.tracks[i] = 0;
+      if (t.road) t.road[i] = 0;
+      if (t.roadBuilt) t.roadBuilt[i] = 0;
+      if (t.bridge) t.bridge[i] = 0;
+      if (t.lakeMask) t.lakeMask[i] = 0;
+    }
+    if (t.waterActive) t.waterActive.clear();
+    return w;
+  };
+
+  {
+    const w = flatTerraWorld(23101);
+    const t = w.terrain, p = w.players[0];
+    p.resources.materials = 0;
+    const [bx, by] = tileToWorld(24, 24);
+    spawnUnit(w, 0, 'builder', bx, by).resourceRole = 'earth';
+    applyCommand(w, { type: 'terraform', tx: 24, ty: 24, dir: -1 }, 0);
+    const job = w.terraJobs[0];
+    const pile = job ? w.entities.get(job.earthPileId) : null;
+    ok(pile && Math.hypot(pile.tx - 24, pile.ty - 24) <= 6.5, 'Erdhügel entstehen näher an der Baustelle');
+    const h0 = t.height[tIdx(t, 24, 24)];
+    let sawCargo = false, sawDump = false;
+    for (let k = 0; k < 700 && w.terraJobs.length; k++) {
+      step(w);
+      sawCargo = sawCargo || ownerEntities(w, 0, 'unit').some(u => u.kind === 'builder' && u.order?.type === 'terra' && u.order?.state === 'dump' && (u.cargo || 0) >= TERRA_LOWER_YIELD);
+      sawDump = sawDump || w.events.some(ev => ev.type === 'dump' && ev.unit != null && pile
+        && Math.hypot((ev.dx ?? 0) - pile.x, (ev.dy ?? 0) - pile.y) <= 0.1);
+    }
+    ok(w.terraJobs.length === 0, 'Abgraben wartet auf die Fahrt zum Erdhügel und schließt dann ab');
+    ok(sawCargo && sawDump, 'Abgraben lädt den Aushub am Erdhügel mit Animation ab');
+    ok((pile?.amount || 0) >= TERRA_LOWER_YIELD, 'Abgraben bucht Erde erst nach dem Abladen in den Erdhügel');
+    ok(t.height[tIdx(t, 24, 24)] < h0 - 0.05, 'Abgrab-Auftrag senkt das Gelände nach der Arbeit');
+  }
+
+  {
+    const w = flatTerraWorld(23104);
+    const t = w.terrain, p = w.players[0];
+    p.resources.materials = 0;
+    const worker = spawnUnit(w, 0, 'builder', 24 * 2 + 1, 24 * 2 + 1);
+    worker.resourceRole = 'earth';
+    for (const [tx, ty] of [[24, 24], [25, 24], [26, 24]]) applyCommand(w, { type: 'terraform', tx, ty, dir: -1 }, 0);
+    const pile = w.entities.get(w.terraJobs[0].earthPileId);
+    let ticks = 0, sawChain = false, sawIdleGap = false, pileGrowths = 0, lastPileAmount = pile?.amount || 0;
+    for (; ticks < 420 && w.terraJobs.length; ticks++) {
+      step(w);
+      if (pile && (pile.amount || 0) > lastPileAmount) {
+        pileGrowths++;
+        lastPileAmount = pile.amount || 0;
+      }
+      if (w.events.some(ev => ev.type === 'terra_done')) {
+        const stillOpen = w.terraJobs.length > 0;
+        if (stillOpen) {
+          sawChain = sawChain || worker.order?.type === 'terra';
+          sawIdleGap = sawIdleGap || worker.order?.type === 'idle';
+        }
+      }
+    }
+    ok(w.terraJobs.length === 0 && ticks < 260,
+      `Bagger erledigt mehrere Abgrab-Abschnitte zügig nacheinander (${ticks} Ticks)`);
+    ok(sawChain && !sawIdleGap, 'Bagger fährt nach dem Abgraben automatisch zum nächsten Abschnitt weiter');
+    ok(t.height[tIdx(t, 26, 24)] < 0.58, 'Auch der letzte Abgrab-Folgeabschnitt wird ausgeführt');
+    ok(pileGrowths >= 3 && pile.amount === TERRA_LOWER_YIELD * 3,
+      'Der Erdhaufen wächst mit jeder Abgrab-Lieferung sichtbar weiter');
+  }
+
+  {
+    const w = flatTerraWorld(23106);
+    const p = w.players[0];
+    p.resources.materials = 0;
+    const worker = spawnUnit(w, 0, 'builder', 24 * 2 + 1, 24 * 2 + 1);
+    worker.resourceRole = 'earth';
+    applyCommand(w, { type: 'terraform', tx: 24, ty: 24, dir: -1 }, 0);
+    const job = w.terraJobs[0];
+    const pile = w.entities.get(job.earthPileId);
+    const oldX = pile.x, oldY = pile.y;
+    let retargeted = false, dumpedAtNewPile = false;
+    for (let k = 0; k < 260 && w.terraJobs.length; k++) {
+      step(w);
+      if (!retargeted && worker.order?.type === 'terra' && worker.order.state === 'dump') {
+        applyCommand(w, { type: 'setPile', job: job.id, tx: 30, ty: 24 }, 0);
+        retargeted = true;
+        ok(pile.tx === 30 && pile.ty === 24, 'Abgrab-Baustelle setzt die Erdhaufenposition neu');
+        ok(worker.moveTarget && Math.hypot(worker.moveTarget.x - pile.x, worker.moveTarget.y - pile.y) < 7
+          && Math.hypot(worker.moveTarget.x - oldX, worker.moveTarget.y - oldY) > 5,
+          'Bagger wird beim Umsetzen direkt zum neuen Erdhaufen umgelenkt');
+      }
+      dumpedAtNewPile = dumpedAtNewPile || w.events.some(ev => ev.type === 'dump' && ev.unit === worker.id
+        && Math.hypot((ev.dx ?? 0) - pile.x, (ev.dy ?? 0) - pile.y) <= 0.1);
+    }
+    ok(retargeted && w.terraJobs.length === 0, 'Bagger fährt nach dem Umsetzen weiter zwischen Abschnitt und Erdhaufen');
+    ok(dumpedAtNewPile && pile.amount === TERRA_LOWER_YIELD, 'Aushub landet am neu gesetzten Erdhaufen');
+  }
+
+  {
+    const w = flatTerraWorld(23102);
+    const t = w.terrain, p = w.players[0];
+    p.resources.materials = 0;
+    const pile = spawnBuilding(w, 0, 'earth_pile', 21, 24);
+    pile.amount = TERRA_RAISE_COST + 2;
+    const [bx, by] = tileToWorld(20, 24);
+    spawnUnit(w, 0, 'builder', bx, by).resourceRole = 'earth';
+    const i = tIdx(t, 26, 24), h0 = t.height[i];
+    applyCommand(w, { type: 'terraform', tx: 26, ty: 24, dir: 1 }, 0);
+    ok(w.terraJobs.length === 1, 'Aufschütten akzeptiert einen nahen Erdhügel als Quelle');
+    let sawDump = false;
+    for (let k = 0; k < 700 && w.terraJobs.length; k++) {
+      step(w);
+      sawDump = sawDump || w.events.some(ev => ev.type === 'dump' && ev.unit != null
+        && Math.hypot((ev.dx ?? 0) - (26 * 2 + 1), (ev.dy ?? 0) - (24 * 2 + 1)) <= 0.1);
+    }
+    ok(w.terraJobs.length === 0, 'Aufschütten mit Erdhügelquelle wird abgeschlossen');
+    ok(pile.amount === 2, 'Aufschütten nimmt Erde aus dem nächsten Erdhügel');
+    ok(p.resources.materials === 0, 'Aufschütten aus Erdhügeln belastet das Baumateriallager nicht');
+    ok(t.height[i] > h0 + 0.05, 'Aufschütten hebt das Gelände nach dem Abladen an');
+    ok(sawDump, 'Aufschütten erzeugt eine Dump-Animation an der Zielzelle');
+  }
+
+  {
+    const w = flatTerraWorld(23105);
+    const t = w.terrain, p = w.players[0];
+    p.resources.materials = 0;
+    const pile = spawnBuilding(w, 0, 'earth_pile', 21, 24);
+    pile.amount = TERRA_RAISE_COST * 3;
+    const worker = spawnUnit(w, 0, 'builder', 21 * 2 + 1, 25 * 2 + 1);
+    worker.resourceRole = 'earth';
+    for (const [tx, ty] of [[24, 24], [25, 24], [26, 24]]) applyCommand(w, { type: 'terraform', tx, ty, dir: 1 }, 0);
+    let ticks = 0, sawChain = false, sawIdleGap = false;
+    for (; ticks < 520 && w.terraJobs.length; ticks++) {
+      step(w);
+      if (w.events.some(ev => ev.type === 'terra_done')) {
+        const stillOpen = w.terraJobs.length > 0;
+        if (stillOpen) {
+          sawChain = sawChain || worker.order?.type === 'terra';
+          sawIdleGap = sawIdleGap || worker.order?.type === 'idle';
+        }
+      }
+    }
+    ok(w.terraJobs.length === 0 && ticks < 340,
+      `Bagger erledigt mehrere Aufschuett-Abschnitte zügig nacheinander (${ticks} Ticks)`);
+    ok(sawChain && !sawIdleGap, 'Bagger fährt nach dem Aufschütten automatisch zum nächsten Abschnitt weiter');
+    ok(t.height[tIdx(t, 26, 24)] > 0.70 && pile.amount === 0,
+      'Alle Aufschütt-Folgeabschnitte verbrauchen den Erdhaufen und heben das Gelände');
+  }
+
+  {
+    const w = flatTerraWorld(23103);
+    const t = w.terrain, p = w.players[0];
+    p.resources.materials = TERRA_RAISE_COST + 3;
+    const depot = spawnBuilding(w, 0, 'material_depot', 5, 5);
+    depot.buildProgress = 1; depot.hp = depot.maxHp;
+    const farPile = spawnBuilding(w, 0, 'earth_pile', 2, 42);
+    farPile.amount = 100;
+    const [bx, by] = tileToWorld(6, 7);
+    spawnUnit(w, 0, 'builder', bx, by).resourceRole = 'earth';
+    const i = tIdx(t, 31, 30), h0 = t.height[i];
+    applyCommand(w, { type: 'terraform', tx: 31, ty: 30, dir: 1 }, 0);
+    ok(w.terraJobs.length === 1, 'Aufschütten fällt ohne nahen Erdhügel auf das Baumateriallager zurück');
+    for (let k = 0; k < 900 && w.terraJobs.length; k++) step(w);
+    ok(w.terraJobs.length === 0, 'Aufschütten vom Baumateriallager wird abgeschlossen');
+    ok(farPile.amount === 100, 'Ein zu weit entfernter Erdhügel wird nicht als Quelle benutzt');
+    ok(p.resources.materials === 3, 'Baumateriallager zahlt nur, wenn kein naher Erdhügel verfügbar ist');
+    ok(t.height[i] > h0 + 0.05, 'Depot-Aufschüttung hebt das Gelände');
   }
 }
 

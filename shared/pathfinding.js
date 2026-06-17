@@ -8,16 +8,29 @@ const NEI = [
   [1, 1, 1.414], [1, -1, 1.414], [-1, 1, 1.414], [-1, -1, 1.414],
 ];
 const GOAL_FALLBACK_RADIUS = 8;
+const ROAD_COST_VEHICLE = 0.13;
+const ROAD_COST_INFANTRY = 0.62;
+const ROAD_HEURISTIC_VEHICLE = 0.45;
+const ROAD_HEURISTIC_INFANTRY = 0.75;
 
 // Bewegungskosten einer Zelle: Steigung & Hügel verteuern, Deckung neutral.
 function tileCost(t, tx, ty, opts) {
-  // Straßen klar bevorzugen: Fahrzeuge fahren dort 6× schneller, also Wegkosten stark senken
-  // (ein Umweg über die Straße bis ~5× Länge lohnt sich noch). Infanterie nur leicht bevorzugt.
-  if (roadAtIdx(t, tx, ty)) return (opts && opts.category !== 'infantry') ? 0.2 : 0.7;
+  // Straßen klar bevorzugen: Fahrzeuge fahren dort massiv schneller, also Wegkosten stark senken.
+  // Infanterie profitiert, aber deutlich weniger als Fahrzeuge.
+  if (roadAtIdx(t, tIdx(t, tx, ty))) return (opts && opts.category !== 'infantry') ? ROAD_COST_VEHICLE : ROAD_COST_INFANTRY;
   let c = 1;
   if (tileType(t, tx, ty) === TT.HILL) c += 0.4;
-  if (t.mud) c += t.mud[tIdx(t, tx, ty)] * (opts && opts.heavy ? 8 : 2);
+  const i = tIdx(t, tx, ty);
+  if (opts?.category === 'infantry') {
+    if (t.mud) c += (t.mud[i] || 0) * 8;
+    if (t.snow) c += Math.sqrt(Math.max(0, t.snow[i] || 0)) * 7;
+  } else if (t.mud) c += t.mud[i] * (opts && opts.heavy ? 8 : 2);
   return c;
+}
+
+function heuristicScale(opts) {
+  if (!opts) return 1;
+  return opts.category === 'infantry' ? ROAD_HEURISTIC_INFANTRY : ROAD_HEURISTIC_VEHICLE;
 }
 
 function mudCrawlerPassable(t, domain, tx, ty, opts) {
@@ -85,7 +98,7 @@ function searchPath(t, domain, sx, sy, hx, hy, goalSet, goalRadius, maxIter, max
   if (goalSet.has(startI)) return markGoal([], sx, sy);
   const H = (i) => {
     const ix = i % W, iy = (i / W) | 0;
-    return Math.max(0, Math.hypot(ix - hx, iy - hy) - goalRadius);
+    return Math.max(0, Math.hypot(ix - hx, iy - hy) - goalRadius) * heuristicScale(opts);
   };
   g[startI] = 0;
   heapPush(open, [H(startI), startI]);

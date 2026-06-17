@@ -146,7 +146,11 @@ function collapseTunnel(world, tn) {
     const u = world.entities.get(uid);
     if (!u || u.dead) continue;
     u.dead = true; u.hp = 0; u.inTunnel = null;
-    world.events.push({ type: 'death', id: u.id, x: u.x, y: u.y, etype: 'unit', kind: u.kind, cause: 'tunnel_collapse' });
+      world.events.push({
+        type: 'death', id: u.id, x: u.x, y: u.y, etype: 'unit', kind: u.kind,
+        owner: u.owner, category: u.category, domain: u.domain, facing: u.facing || 0,
+        cause: 'tunnel_collapse',
+      });
   }
   tn.inside.length = 0;
   tn.active = false;

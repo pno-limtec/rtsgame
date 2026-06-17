@@ -1,9 +1,9 @@
 // Bewegungssystem: Pfadverfolgung, Fahrzeugphysik (drehen→fahren, Beschleunigung),
 // Gelände-/Straßen-/Wetter-Einfluss, leichte Separation.
 import { findPath } from '../pathfinding.js';
-import { worldToTile, tileToWorld, tileType, TT, inBounds, tIdx, isPassable, slopeOk, roadAtIdx, forestBlocks, waterBlocksLand } from '../terrain.js';
+import { worldToTile, tileToWorld, tileType, TT, inBounds, tIdx, isPassable, slopeOk, roadAtIdx, forestBlocks, waterBlocksLand, infantryWaterBlocksLand } from '../terrain.js';
 import {
-  BUILDER_WADE_DEPTH, BUILDER_WADE_TIME, DT, FLOOD_DEPTH, WET_DEPTH, ROAD_SPEED, ROAD_SPEED_VEHICLE, PONTOON_SPEED, MUD_SPEED_HEAVY,
+  BUILDER_WADE_DEPTH, BUILDER_WADE_TIME, DT, FLOOD_DEPTH, TILE, WET_DEPTH, ROAD_SPEED, ROAD_SPEED_VEHICLE, PONTOON_SPEED, MUD_SPEED_HEAVY,
   TURN_RATE_VEHICLE, TURN_RATE_NAVAL, VEHICLE_ACCEL, SLOPE_ON_ROAD, CONSTRUCT_RANGE, STEEP_BUILD_SLOPE,
   RAIN_AIR_SLOW, STORM_NAVAL_SLOW, FOG_NAVAL_SLOW, FOG_NAVAL_DRIFT, FOG_NAVAL_CRASH_DMG,
   TRACK_GAIN_LIGHT, TRACK_GAIN_HEAVY, MUD_GAIN_HEAVY, MUD_IMPASSABLE, MUD_SPEED_MIN,
@@ -12,6 +12,8 @@ import {
 import { applyDamage } from '../world.js';
 
 const wrapAngle = (a) => { while (a > Math.PI) a -= Math.PI * 2; while (a < -Math.PI) a += Math.PI * 2; return a; };
+const INFANTRY_MUD_SPEED_MIN = 0.16;
+const INFANTRY_SNOW_SPEED_MIN = 0.16;
 
 // Bewegungsziel setzen → Pfad berechnen. PFAD-BUDGET: höchstens N volle A*-Suchen pro Tick
 // (KI-Angriffswellen schicken sonst 30+ Einheiten im selben Tick auf 192²-Suche → 300ms-Spikes);
@@ -32,6 +34,10 @@ function canTraverseMuddyWet(t, e, i) {
   return mudOk || wadeOk;
 }
 
+function waterBlocksUnit(t, e, i) {
+  return e?.category === 'infantry' ? infantryWaterBlocksLand(t, i) : waterBlocksLand(t, i);
+}
+
 export function setMoveGoal(world, ent, wx, wy, opts = {}) {
   ent.moveTarget = { x: wx, y: wy };
   ent.repathCd = 0;
@@ -42,7 +48,7 @@ export function setMoveGoal(world, ent, wx, wy, opts = {}) {
   if (world._pbTick !== world.tick) { world._pbTick = world.tick; world._pathBudget = PATHS_PER_TICK; }
   if (world._pathBudget <= 0) {
     ent.path = []; ent.pathGoal = null;
-    ent._waitingForPath = opts.waitForPath !== false;
+    ent._waitingForPath = opts.waitForPath !== false || !canMoveDirectWithoutPath(world, ent, wx, wy);
     ent.repathCd = 0.2 + (ent.id % 9) * 0.1;   // Suche nachholen, zeitversetzt
     return;
   }
@@ -51,11 +57,7 @@ export function setMoveGoal(world, ent, wx, wy, opts = {}) {
   const [gx, gy] = worldToTile(wx, wy);
   // Pipelines & Brücken dürfen an steilen Hängen gebaut werden — der Bagger meistert dafür eine
   // deutlich höhere Steigung auf dem Weg zur Baustelle.
-  let maxSlope = ent.maxSlope ?? Infinity;
-  if (ent.kind === 'builder' && (ent.order?.type === 'construct' || ent.order?.type === 'terra')) {
-    const site = ent.order.site != null ? world.entities.get(ent.order.site) : null;
-    if (site && (site.def?.pipe || site.def?.bridges)) maxSlope = Math.max(maxSlope, STEEP_BUILD_SLOPE);
-  }
+  const maxSlope = movementMaxSlope(world, ent);
   const path = findPath(world.terrain, ent.domain, sx, sy, gx, gy, 48000, maxSlope,
     { heavy: !!ent.heavy, category: ent.category, mudCrawler: ent.kind === 'builder', builderWade: builderWadeOrder(ent), terraCrawler: ent.kind === 'builder', roughCrawler: ent.kind === 'tractor' }); // große Karte → mehr Iterationen
   ent.pathGoal = path?.goal || [gx, gy];
@@ -66,6 +68,48 @@ export function setMoveGoal(world, ent, wx, wy, opts = {}) {
   ent.path = path || [];
   ent._pathFailed = !path;
   if (!path) ent.repathCd = 2.6 + (ent.id % 7) * 0.13;
+}
+
+function movementMaxSlope(world, ent) {
+  let maxSlope = ent.maxSlope ?? Infinity;
+  if (ent.kind === 'builder' && (ent.order?.type === 'construct' || ent.order?.type === 'terra')) {
+    const site = ent.order.site != null ? world.entities.get(ent.order.site) : null;
+    if (site && (site.def?.pipe || site.def?.bridges)) maxSlope = Math.max(maxSlope, STEEP_BUILD_SLOPE);
+  }
+  return maxSlope;
+}
+
+function canMoveDirectWithoutPath(world, ent, wx, wy) {
+  if (ent.domain === 'air') return true;
+  const t = world.terrain;
+  const [sx, sy] = worldToTile(ent.x, ent.y);
+  const [gx, gy] = worldToTile(wx, wy);
+  if (!directTileIsTraversable(t, ent, sx, sy, -1)) return false;
+  const dist = Math.hypot(wx - ent.x, wy - ent.y);
+  const samples = Math.max(1, Math.ceil(dist / (0.55 * TILE)));
+  let px = sx, py = sy, pi = tIdx(t, sx, sy);
+  const maxSlope = movementMaxSlope(world, ent);
+  for (let n = 1; n <= samples; n++) {
+    const f = n / samples;
+    const [tx, ty] = worldToTile(ent.x + (wx - ent.x) * f, ent.y + (wy - ent.y) * f);
+    if (tx === px && ty === py) continue;
+    const ti = tIdx(t, tx, ty);
+    if (!directTileIsTraversable(t, ent, tx, ty, ti)) return false;
+    if (maxSlope !== Infinity && (ent.domain === 'land' || ent.domain === 'amphibious')
+      && !slopeOk(t, pi, ti, maxSlope, SLOPE_ON_ROAD, ent.kind === 'builder' ? SLOPE_TERRAFORM_BUILDER : null)) return false;
+    px = tx; py = ty; pi = ti;
+  }
+  return directTileIsTraversable(t, ent, gx, gy, -1);
+}
+
+function directTileIsTraversable(t, ent, tx, ty, idx) {
+  if (!inBounds(t, tx, ty)) return false;
+  const i = idx >= 0 ? idx : tIdx(t, tx, ty);
+  if (!isPassable(t, ent.domain, tx, ty, ent.category) && !canTraverseMuddyWet(t, ent, i)) return false;
+  if (forestBlocks(t, ent.domain, tx, ty, { category: ent.category, roughCrawler: ent.kind === 'tractor' })) return false;
+  if (ent.heavy && ent.domain === 'land' && t.mud && t.mud[i] >= MUD_IMPASSABLE) return false;
+  if (ent.domain === 'land' && waterBlocksUnit(t, ent, i) && !(t.bridge && t.bridge[i] > 0) && !canTraverseMuddyWet(t, ent, i)) return false;
+  return true;
 }
 
 export function stopMove(ent) {
@@ -126,7 +170,8 @@ export function stepMovement(world) {
       const ci = tIdx(terrain, ctx, cty);
       const onRoad = roadAtIdx(terrain, ci);
       const raining = weather === 'rain' || weather === 'storm';
-      // Fahrzeuge fahren auf Straßen 6× so schnell wie im Gelände; Infanterie nur leicht schneller.
+      const infantry = e.category === 'infantry';
+      // Fahrzeuge fahren auf Straßen deutlich schneller als im Gelände; Infanterie nur leicht schneller.
       if (onRoad) speed *= e.category === 'infantry' ? ROAD_SPEED : ROAD_SPEED_VEHICLE;
       else if (raining && e.heavy) speed *= MUD_SPEED_HEAVY;
       // Pontonbrücke: nur langsam befahrbar (wackelige, improvisierte Querung).
@@ -134,7 +179,12 @@ export function stepMovement(world) {
       if (terrain.mud && !onRoad) {
         const mud = terrain.mud[tIdx(terrain, ctx, cty)];
         if (e.heavy && mud >= MUD_IMPASSABLE) speed = 0;
+        else if (infantry && mud > 0) speed *= Math.max(INFANTRY_MUD_SPEED_MIN, 1 - mud * 1.2);
         else if (mud > 0) speed *= Math.max(MUD_SPEED_MIN, 1 - mud * (e.heavy ? 0.9 : 0.45));
+      }
+      if (infantry && terrain.snow && !onRoad) {
+        const snow = terrain.snow[ci] || 0;
+        if (snow > 0) speed *= Math.max(INFANTRY_SNOW_SPEED_MIN, 1 - Math.sqrt(snow) * 1.25);
       }
     }
     // Wetter-Risiken je Domäne: Sturm bremst Schiffe (Wellengang) und Flieger, Nebel zwingt
@@ -146,9 +196,11 @@ export function stepMovement(world) {
       speed *= RAIN_AIR_SLOW;
     }
     // In Flutwasser gefangene Landeinheiten kommen nur kriechend voran.
-    const curDepth = inBounds(terrain, ctx, cty) ? (terrain.water[tIdx(terrain, ctx, cty)] || 0) : 0;
+    const depthI = inBounds(terrain, ctx, cty) ? tIdx(terrain, ctx, cty) : -1;
+    const curDepth = depthI >= 0 ? (terrain.water[depthI] || 0) : 0;
+    const protectedRoadFlood = depthI >= 0 && roadAtIdx(terrain, depthI) && curDepth <= FLOOD_DEPTH && !waterBlocksLand(terrain, depthI);
     if (e.domain === 'land' && curDepth > FLOOD_DEPTH) speed *= e.kind === 'builder' ? 0.52 : 0.35;
-    else if (e.kind === 'builder' && curDepth > WET_DEPTH) speed *= 0.72;
+    else if (e.kind === 'builder' && curDepth > WET_DEPTH && !protectedRoadFlood) speed *= 0.72;
 
     // nächster Wegpunkt
     let tgt;
@@ -220,7 +272,7 @@ export function stepMovement(world) {
     const blockedByMud = e.heavy && e.domain === 'land' && inBounds(terrain, ntx, nty)
       && terrain.mud && terrain.mud[nxtI] >= MUD_IMPASSABLE;
     const blockedByWater = e.domain === 'land' && inBounds(terrain, ntx, nty)
-      && waterBlocksLand(terrain, nxtI) && !(terrain.bridge && terrain.bridge[nxtI] > 0)
+      && waterBlocksUnit(terrain, e, nxtI) && !(terrain.bridge && terrain.bridge[nxtI] > 0)
       && !canTraverseMuddyWet(terrain, e, nxtI);
     const blockedByForest = forestBlocks(terrain, e.domain, ntx, nty, { category: e.category, roughCrawler: e.kind === 'tractor' });
     const tooSteep = (e.domain === 'land' || e.domain === 'amphibious') && nxtI !== curI
@@ -486,8 +538,8 @@ function separation(world) {
       // Separation darf Einheiten nicht in unpassierbares Gelände drücken (z. B. Schiffe an Land).
       // Fahrzeuge nur sanft schieben — starke Seitwärts-Schübe sehen aus wie Seitwärtsfahren.
       const isVeh = e.category !== 'infantry';
-      const strength = e.moveTarget ? (isVeh ? 0.1 : 0.22) : (isVeh ? 0.06 : 0.12);
-      const step = Math.min(isVeh ? 0.1 : 0.28, mag * strength);
+      const strength = e.moveTarget ? (isVeh ? 0.1 : 0.16) : (isVeh ? 0.06 : 0.08);
+      const step = Math.min(isVeh ? 0.1 : 0.2, mag * strength);
       const nx = e.x + (px / mag) * step, ny = e.y + (py / mag) * step;
       const [stx, sty] = worldToTile(nx, ny);
       if (isPassable(world.terrain, e.domain, stx, sty, e.category) && !forestBlocks(world.terrain, e.domain, stx, sty, { category: e.category, roughCrawler: e.kind === 'tractor' })) { e.x = nx; e.y = ny; }
@@ -496,6 +548,7 @@ function separation(world) {
 }
 
 function desiredSpacing(a, b) {
+  if (a.category === 'infantry' && b.category === 'infantry' && a.domain === 'land' && b.domain === 'land') return 0.18;
   if (a.category === 'vehicle' || b.category === 'vehicle' || a.heavy || b.heavy) return 2.1;
   if (a.domain === 'water' || b.domain === 'water') return 2.4;
   return 1.35;

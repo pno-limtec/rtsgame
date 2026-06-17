@@ -4,7 +4,10 @@ import {
   AI_REPLAN_TICKS, PIPE_LINK_RANGE, CONSTRUCT_RANGE, TILE,
   SLOPE_BUILDER, SLOPE_HEAVY, SLOPE_ON_ROAD,
 } from '../constants.js';
-import { ownerEntities, canAfford, effectiveCost, dist, canPlaceBuilding, spawnUnit } from '../world.js';
+import {
+  ownerEntities, canAfford, effectiveCost, dist, canPlaceBuilding, spawnUnit,
+  shouldAiIgnoreTarget, infrastructureCanOverlap,
+} from '../world.js';
 import { findPath } from '../pathfinding.js';
 import { validateTunnel } from '../systems/tunnel.js';
 import {
@@ -85,11 +88,8 @@ const AI_SITE_STUCK_TICKS = 900;        // 90s ohne Baufortschritt: Baustelle bl
 const AI_PRESSURE_START_TICKS = 4200;   // ab 7 Minuten: KI geht schrittweise ins Endspiel
 const AI_PRESSURE_STEP_TICKS = 900;     // alle 90s aggressiver
 const AI_STALE_SCORE_EPS = 160;         // Score-Rauschen ignorieren
-const AI_DOMINANCE_HOLD_TICKS = 1200;   // 2 Minuten klare Überlegenheit reicht für KI-only Entscheidung
-const AI_FORCE_DECISION_PRESSURE = 7;   // nach langer Zeit reicht eine kleinere Führung
-const AI_HARD_DECISION_PRESSURE = 10;   // sehr langes KI-only Patt wird deterministisch entschieden
-const AI_ROUTE_PLAN_COOLDOWN = AI_REPLAN_TICKS * 2;
-const AI_ROUTE_MAX_CELLS = 24;             // Straße in EINEM Zug bis hierher legen (durchgehende Route)
+const AI_ROUTE_PLAN_COOLDOWN = AI_REPLAN_TICKS;
+const AI_ROUTE_MAX_CELLS = 32;             // Straße in EINEM Zug bis hierher legen (durchgehende Route)
 const INFRA_KINDS = new Set(['road', 'bridge', 'tunnel', 'pipe']); // zählen nicht als Bau-Throttle
 const AI_ROUTE_PATH_ITER = 30000;
 const AI_CHEAT_STUCK_TICKS = 900;       // 90s ohne Aufbaufortschritt = Deadlock → KI darf cheaten (früh genug, bevor der Director sie aufgibt)
@@ -171,23 +171,7 @@ function updateAiDirector(world) {
   const pressure = Math.min(10, Math.max(timePressure, stalePressure));
   const leader = scores[0], weakest = scores[scores.length - 1];
   world.aiDirector = { aiOnly: true, pressure, leaderId: leader.player.id, weakestId: weakest.player.id };
-
-  if (pressure < 3 || !leader || !weakest || leader.player.id === weakest.player.id) return;
-  const forcedDecision = pressure >= AI_HARD_DECISION_PRESSURE;
-  const strongLead = forcedDecision
-    || leader.score > Math.max(weakest.score * (pressure >= AI_FORCE_DECISION_PRESSURE ? 1.18 : 1.75), weakest.score + (pressure >= AI_FORCE_DECISION_PRESSURE ? 450 : 1800));
-  if (!strongLead) { world._aiDirectorDominance = null; return; }
-  const dom = world._aiDirectorDominance;
-  if (!dom || dom.leaderId !== leader.player.id || dom.weakestId !== weakest.player.id) {
-    world._aiDirectorDominance = { leaderId: leader.player.id, weakestId: weakest.player.id, since: world.tick };
-    return;
-  }
-  if (world.tick - dom.since >= AI_DOMINANCE_HOLD_TICKS) {
-    weakest.player.defeated = true;
-    world.events?.push({ type: 'defeat', player: weakest.player.id, reason: 'ai_stalemate' });
-    for (const e of world.entities.values()) if (e.owner === weakest.player.id) { e.dead = true; e.hp = 0; }
-    world._aiDirectorDominance = null;
-  }
+  world._aiDirectorDominance = null;
 }
 
 function aiPowerScore(world, owner) {
@@ -274,6 +258,9 @@ function buildMoatRing(world, player, s, applyCommand) {
   return false;
 }
 
+const isWaterLevelSensitiveSite = (e) => e?.etype === 'building' && e.buildProgress < 1
+  && (e.def?.pump || e.def?.mustStandInWater || e.kind === 'water_pump');
+
 function manageStalledConstruction(world, player, s) {
   const sites = s.buildings.filter(b => b.buildProgress < 1 && !b.dead);
   if (!sites.length) return false;
@@ -288,6 +275,10 @@ function manageStalledConstruction(world, player, s) {
     }
     const limit = hasBuilder ? AI_SITE_STUCK_TICKS : Math.floor(AI_SITE_STUCK_TICKS * 0.45);
     if (world.tick - (b._aiStuckSince || world.tick) < limit) continue;
+    if (isWaterLevelSensitiveSite(b)) {
+      b._aiStuckSince = world.tick;
+      continue;
+    }
     const refund = effectiveCost(world, player.id, b.def || {});
     for (const [k, v] of Object.entries(refund || {})) player.resources[k] = (player.resources[k] || 0) + Math.round(v * 0.55);
     b.dead = true;
@@ -494,7 +485,6 @@ function managePipelines(world, player, s, applyCommand) {
   if (!def || !canAfford(player, effectiveCost(world, player.id, def))) return false;
   const producers = s.buildings.filter(b => b.buildProgress >= 1 && producerResource(b));
   for (const prod of producers) {
-    if (prod._pipelineConnected === true) continue;
     const resource = producerResource(prod);
     const sinks = s.buildings.filter(b => b.buildProgress >= 1 && depotResources(b).includes(resource));
     if (!sinks.length) continue;
@@ -505,11 +495,43 @@ function managePipelines(world, player, s, applyCommand) {
     let near = null, nd = Infinity;
     for (const k of sinks) { const d = pipeDist(prod, k); if (d < nd) { nd = d; near = k; } }
     if (near && pipeWorkPending(world, player.id, prod, near)) continue;
+    if (near && rebuildMissingPipelineSegments(world, player, prod, near, resource, def, applyCommand)) return true;
     // KOMPLETTE Pipeline in einem Zug legen — nicht ein Segment pro Runde, das mitten im Nichts
     // stehen bleibt. So ist die Förderkette Bohrturm/Pumpwerk → Lager IMMER durchgängig.
     if (planFullPipeline(world, player, prod, sinks, def, applyCommand)) return true;
   }
   return false;
+}
+
+function rebuildMissingPipelineSegments(world, player, prod, sink, resource, def, applyCommand) {
+  const sites = world.aiPipeRebuildSites;
+  if (!sites?.length) return false;
+  const cost = effectiveCost(world, player.id, def);
+  const ax = prod.tx + prod.size / 2, ay = prod.ty + prod.size / 2;
+  const bx = sink.tx + sink.size / 2, by = sink.ty + sink.size / 2;
+  const wanted = [];
+  const keep = [];
+  for (const site of sites) {
+    if (site.owner !== player.id) { keep.push(site); continue; }
+    if (site.resource && site.resource !== resource) { keep.push(site); continue; }
+    if (existingOrPendingBuilding(world, player.id, 'pipe', site.tx, site.ty)) continue;
+    if (!nearLine(site.tx, site.ty, ax, ay, bx, by, PIPE_LINK_RANGE + 1)) { keep.push(site); continue; }
+    if (!placeable(world, site.tx, site.ty, 1, def, player.id)) { keep.push(site); continue; }
+    wanted.push(site);
+  }
+  if (!wanted.length) {
+    world.aiPipeRebuildSites = keep;
+    return false;
+  }
+  wanted.sort((a, b) => pipeDist(prod, a) - pipeDist(prod, b) || a.tick - b.tick);
+  let built = false;
+  for (const site of wanted) {
+    if (!canAfford(player, cost)) { keep.push(site); continue; }
+    applyCommand(world, { type: 'build', building: 'pipe', tx: site.tx, ty: site.ty }, player.id);
+    built = true;
+  }
+  world.aiPipeRebuildSites = keep;
+  return built;
 }
 
 // Legt die gesamte Leitungskette vom Produzenten zur nächsten passenden Senke entlang der direkten
@@ -628,12 +650,13 @@ function planBridgeCrossing(world, from, gx, gy) {
   return null;
 }
 
-function bridgeSpanFromEntry(world, ex, ey, maxLen = 30) {
+function bridgeSpanFromEntry(world, ex, ey, maxLen = 30, owner = null) {
   if (!isBridgeCandidateCell(world, ex, ey)) return null;
   const t = world.terrain;
   const bridgeAnchor = (x, y) => {
     if (!inBounds(t, x, y)) return false;
     const i = tIdx(t, x, y);
+    if (waterBlocksLand(t, i)) return owner != null && existingOrPendingBuilding(world, owner, 'bridge', x, y);
     if (t.bridge && t.bridge[i] > 0) return true;
     return !waterBlocksLand(t, i) && isPassable(t, 'land', x, y, 'vehicle');
   };
@@ -642,7 +665,7 @@ function bridgeSpanFromEntry(world, ex, ey, maxLen = 30) {
     let x = ex, y = ey;
     while (inBounds(t, x, y) && cells.length < maxLen) {
       const i = tIdx(t, x, y);
-      if (!waterBlocksLand(t, i) || !persistentWaterBlocksLand(t, i) || (t.bridge && t.bridge[i] > 0)) break;
+      if (!waterBlocksLand(t, i) || !persistentWaterBlocksLand(t, i)) break;
       cells.push([x, y]);
       x += dx; y += dy;
     }
@@ -662,15 +685,14 @@ function bridgeSpanFromEntry(world, ex, ey, maxLen = 30) {
 }
 
 function manageAccessRoutes(world, player, s, applyCommand) {
-  if (!s.hq || constructionBusy(s)) return false;
+  if (!s.hq) return false;
   const pressure = world.aiDirector?.pressure || 0;
-  const landArmy = s.army.filter(u => u.domain === 'land');
-  // Angriffsstraßen/-brücken zum Gegner sind für FAHRZEUGE da (Infanterie watet/klettert ohnehin) und
-  // dürfen den Bau der ERSTEN Fabrik nicht verdrängen: Infrastruktur läuft im stepAi VOR manageBuild,
-  // d. h. solange die KI Straßen legt, kommt die Fabrik nie dran (gemessen: Seiten mit 60+ Straßen, aber
-  // ohne Fabrik → reine Infanterie). Erst ab einer Fabrik (= Fahrzeug-Siegpfad existiert) Routen bauen.
-  if (s.factories < 1) return false;
-  if (landArmy.length < (pressure > 0 ? 2 : 5) && s.vehicleArmy < 1) return false;
+  // Dauerhafte Straßenachse Richtung Gegner: auch wenn Fahrzeuge bereits irgendwie durchkommen,
+  // soll die KI ihr Frontnetz mit Straße, Brücke oder Tunnel verbessern. Damit das frühe Makro nicht
+  // verhungert, startet sie nach einem kleinen Wirtschaftsanker oder sobald Fahrzeuge/Druck da sind.
+  const routeReady = s.factories >= 1 || s.vehicleArmy >= 1 || s.barracks >= 1
+    || s.oreDepots >= 1 || s.materialDepots >= 1 || pressure > 0;
+  if (!routeReady) return false;
   const enemy = pickEnemyTarget(world, player, pressure > 0);
   if (!enemy) return false;
   // Route IMMER vom (unbeweglichen) HQ aus planen — sonst wandert die Linie mit der jeweils
@@ -678,9 +700,7 @@ function manageAccessRoutes(world, player, s, applyCommand) {
   // Überquerung fertigzustellen. Stabiler Ankerpunkt = eine durchgehende Brücke/Straße.
   const from = { tx: Math.round(s.hq.tx + s.hq.size / 2), ty: Math.round(s.hq.ty + s.hq.size / 2) };
   const [gx, gy] = worldToTile(enemy.x, enemy.y);
-  if (canReachTile(world.terrain, from.tx, from.ty, gx, gy, SLOPE_HEAVY,
-    { heavy: true, category: 'vehicle' }, 5)) return false;
-  return planRouteInfrastructure(world, player, s, from, { tx: gx, ty: gy }, applyCommand, { preferRoad: true });
+  return planRouteInfrastructure(world, player, s, from, { tx: gx, ty: gy }, applyCommand, { preferRoad: true, passive: true });
 }
 
 function constructionBusy(s) {
@@ -788,7 +808,9 @@ function isBridgeCandidateCell(world, tx, ty) {
   // NUR über dauerhafte Gewässer (Fluss/See/Meer) brücken. Eine vorübergehende Überflutung
   // (Regen, Damm, Flutkanal) hebt zwar t.water, ist aber kein Fluss → sonst stellt die KI bei
   // jeder Pfütze im Gelände Brückenpfeiler ab. baseWater unterscheidet beides.
-  return waterBlocksLand(t, i) && persistentWaterBlocksLand(t, i) && !(t.bridge && t.bridge[i] > 0);
+  // Vorgeprägte Terrain-Brücken zählen nicht als KI-Bauwerk: die KI soll solche Kartenpässe
+  // mit eigenen Brücken sichern können, statt sie als erledigte Bauaufgabe zu ignorieren.
+  return waterBlocksLand(t, i) && persistentWaterBlocksLand(t, i);
 }
 
 function hasBridgeShore(world, tx, ty) {
@@ -1389,6 +1411,7 @@ function pickEnemyTarget(world, player, decisive = false, raid = false) {
     if (e.owner === player.id || e.dead) continue;
     const owner = world.players.find(p => p.id === e.owner);
     if (!owner || owner.defeated) continue;
+    if (shouldAiIgnoreTarget(world, player.id, e)) continue;
     // Bevorzugt Produktionsgebäude/HQ; im Endspiel noch stärker auf Entscheidungsziele.
     const production = e.etype === 'building' && (e.def?.produces_units || e.def?.produces_category);
     // Raid-Doktrin: greift die VERSORGUNG an — Pipelines, Bohrtürme, Pumpwerke, Depots zuerst.
@@ -1464,11 +1487,23 @@ function canReachBuildSpot(t, builder, tx, ty, size) {
 
 function planRouteInfrastructure(world, player, s, from, to, applyCommand, opts = {}) {
   if (!from || !to || !s.hq) return false;
-  if (routeWorkPending(world, player.id, from, to)) return true;
-  if ((world.tick - (player.ai.routePlanTick || -Infinity)) < AI_ROUTE_PLAN_COOLDOWN) return true;
-  if (constructionBusy(s)) return true;
-
   const cells = lineTiles(from.tx, from.ty, to.tx, to.ty);
+  const vehiclePath = findPath(world.terrain, 'land', from.tx, from.ty, to.tx, to.ty,
+    AI_ROUTE_PATH_ITER, SLOPE_HEAVY, { heavy: true, category: 'vehicle' });
+  const vehicleGoal = vehiclePath?.goal || null;
+  const usableVehiclePath = vehiclePath && vehicleGoal
+    && Math.hypot(vehicleGoal[0] - to.tx, vehicleGoal[1] - to.ty) <= 5;
+  if (!routeBarrierWorkPending(world, player.id, from, to)
+      && ((usableVehiclePath && planRouteBarrier(world, player, from, vehiclePath, applyCommand))
+        || planRouteBarrier(world, player, from, cells, applyCommand))) {
+    player.ai.routePlanTick = world.tick;
+    return true;
+  }
+  const waiting = opts.passive ? false : true;
+  if (routeWorkPending(world, player.id, from, to)) return waiting;
+  if ((world.tick - (player.ai.routePlanTick || -Infinity)) < AI_ROUTE_PLAN_COOLDOWN) return waiting;
+  if (!opts.passive && constructionBusy(s)) return true;
+
   let prev = from;
   let roadsBuilt = 0;
   for (let n = 0; n < cells.length; n++) {
@@ -1486,7 +1521,7 @@ function planRouteInfrastructure(world, player, s, from, to, applyCommand, opts 
     }
     // Wasserlauf (Fluss): die GANZE zusammenhängende Wasserspanne auf einmal überbrücken, statt eine
     // Kachel pro Planungsrunde — sonst bleibt die Brücke unvollständig und kein Fahrzeug kommt rüber.
-    if (waterBlocksLand(world.terrain, i) && !(world.terrain.bridge && world.terrain.bridge[i] > 0)) {
+    if (waterBlocksLand(world.terrain, i)) {
       if (planBridgeSpan(world, player, cells, n, applyCommand)) {
         player.ai.routePlanTick = world.tick;
         return true;
@@ -1513,6 +1548,24 @@ function planRouteInfrastructure(world, player, s, from, to, applyCommand, opts 
   return false;
 }
 
+function planRouteBarrier(world, player, from, cells, applyCommand) {
+  let prev = from;
+  for (let n = 0; n < cells.length; n++) {
+    const [tx, ty] = cells[n];
+    if (!inBounds(world.terrain, tx, ty)) break;
+    const i = tIdx(world.terrain, tx, ty);
+    if (world.terrain.type[i] === TT.CLIFF && !(world.terrain.tunnel && world.terrain.tunnel[i] > 0)) {
+      const tunnelAct = planTunnelOverRidge(world, cells, n, prev);
+      if (tunnelAct && issueRouteAction(world, player, tunnelAct, applyCommand)) return true;
+    }
+    if (waterBlocksLand(world.terrain, i)) {
+      if (planBridgeSpan(world, player, cells, n, applyCommand)) return true;
+    }
+    if (world.terrain.type[i] !== TT.CLIFF && !waterBlocksLand(world.terrain, i)) prev = { tx, ty };
+  }
+  return false;
+}
+
 // Eine zusammenhängende Wasserspanne (Fluss) auf der Route in EINEM Zug überbrücken: ab der ersten
 // Wasserzelle alle folgenden Wasserzellen als Brücke setzen, soweit das Erz reicht (Rest folgt in
 // den nächsten Runden). So entsteht eine durchgehende Brücke statt verstreuter Einzelpfeiler.
@@ -1524,13 +1577,13 @@ function planBridgeSpan(world, player, cells, n, applyCommand) {
   // KÜRZESTE ORTHOGONALE Überquerung ab der Eintrittszelle (x- ODER y-Richtung). Wichtig: eine
   // diagonale Brückentreppe ist für Fahrzeuge NICHT passierbar (A* schneidet keine Wasser-Ecken),
   // darum bauen wir eine gerade, orthogonal zusammenhängende Spanne quer durch den Fluss.
-  const span = bridgeSpanFromEntry(world, ex, ey);
+  const span = bridgeSpanFromEntry(world, ex, ey, 30, player.id);
   if (!span) return false;
   const cost = effectiveCost(world, player.id, def);
   let built = false;
   for (const [x, y] of span.cells) {
     const i = tIdx(t, x, y);
-    if (!(t.bridge && t.bridge[i] > 0) && !existingOrPendingBuilding(world, player.id, 'bridge', x, y)
+    if (!existingOrPendingBuilding(world, player.id, 'bridge', x, y)
       && placeable(world, x, y, 1, def, player.id)) {
       if (!canAfford(player, cost)) break;                     // Erz alle → Rest in der nächsten Runde
       applyCommand(world, { type: 'build', building: 'bridge', tx: x, ty: y }, player.id);
@@ -1594,8 +1647,9 @@ function issueRouteAction(world, player, action, applyCommand) {
   }
   if (action.type === 'tunnel') {
     // placeTunnel prüft Hang/Länge/Kosten selbst; bei zu wenig Erz No-op (Cooldown verhindert Spam).
+    const before = world.tunnels?.length || 0;
     applyCommand(world, { type: 'tunnel', sx: action.sx, sy: action.sy, ex: action.ex, ey: action.ey }, player.id);
-    return true;
+    return (world.tunnels?.length || 0) > before;
   }
   const def = world.data.buildings[action.kind];
   if (!def || !canAfford(player, effectiveCost(world, player.id, def))) return false;
@@ -1613,6 +1667,15 @@ function routeWorkPending(world, owner, from, to) {
   }
   for (const j of world.terraJobs || []) {
     if (j.owner === owner && nearLine(j.tx, j.ty, from.tx, from.ty, to.tx, to.ty, 3)) return true;
+  }
+  return false;
+}
+
+function routeBarrierWorkPending(world, owner, from, to) {
+  for (const e of world.entities.values()) {
+    if (e.owner !== owner || e.dead || e.etype !== 'building' || e.buildProgress >= 1) continue;
+    if (e.kind !== 'bridge' && e.kind !== 'tunnel') continue;
+    if (nearLine(e.tx, e.ty, from.tx, from.ty, to.tx, to.ty, 3)) return true;
   }
   return false;
 }
@@ -1831,7 +1894,10 @@ function placeable(world, tx, ty, size, def = null, owner = null) {
   for (const e of world.entities.values()) {
     if (e.etype !== 'building') continue;
     const pad = keepGap ? 1 : 0;
-    if (tx < e.tx + e.size + pad && tx + size + pad > e.tx && ty < e.ty + e.size + pad && ty + size + pad > e.ty) return false;
+    if (tx < e.tx + e.size + pad && tx + size + pad > e.tx && ty < e.ty + e.size + pad && ty + size + pad > e.ty) {
+      if (!keepGap && infrastructureCanOverlap(def, e.def || world.data.buildings[e.kind])) continue;
+      return false;
+    }
   }
   return true;
 }

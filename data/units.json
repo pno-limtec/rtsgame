@@ -68,7 +68,7 @@
     "armor": "infantry",
     "hp": 110,
     "speed": 2.8,
-    "sight": 7,
+    "sight": 8,
     "cost": {
       "ore": 200
     },
@@ -86,7 +86,7 @@
     "armor": "infantry",
     "hp": 95,
     "speed": 2.7,
-    "sight": 8,
+    "sight": 11,
     "cost": {
       "ore": 240
     },
@@ -124,7 +124,7 @@
     "armor": "heavy",
     "hp": 420,
     "speed": 3.6,
-    "sight": 8,
+    "sight": 9,
     "cost": {
       "ore": 460,
       "fuel": 40
@@ -145,7 +145,7 @@
     "armor": "light",
     "hp": 160,
     "speed": 2.4,
-    "sight": 8,
+    "sight": 17,
     "cost": {
       "ore": 520,
       "fuel": 30
@@ -166,7 +166,7 @@
     "armor": "light",
     "hp": 180,
     "speed": 3,
-    "sight": 8,
+    "sight": 15,
     "cost": {
       "ore": 480,
       "fuel": 35
@@ -187,7 +187,7 @@
     "armor": "light",
     "hp": 200,
     "speed": 4.2,
-    "sight": 9,
+    "sight": 10,
     "cost": {
       "ore": 360,
       "fuel": 30
@@ -336,7 +336,7 @@
     "armor": "air",
     "hp": 230,
     "speed": 7,
-    "sight": 10,
+    "sight": 19,
     "cost": {
       "ore": 1600,
       "fuel": 140
@@ -397,7 +397,7 @@
     "armor": "heavy",
     "hp": 700,
     "speed": 3.8,
-    "sight": 12,
+    "sight": 13,
     "cost": {
       "ore": 650,
       "fuel": 50
@@ -416,7 +416,7 @@
     "armor": "light",
     "hp": 320,
     "speed": 3.4,
-    "sight": 9,
+    "sight": 11,
     "cost": {
       "ore": 520,
       "fuel": 40

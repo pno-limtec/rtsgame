@@ -19,6 +19,7 @@ export function stepProduction(world) {
       const workerOnSite = !e.def.buildTime || (e._builderNear != null && world.tick - e._builderNear <= 1);
       if (workerOnSite) {
         e.buildProgress = Math.min(1, e.buildProgress + (DT / bt) * ratio);
+        e.hp = Math.max(e.hp, Math.round(e.maxHp * (0.5 + e.buildProgress * 0.5)));
         if (e.buildProgress >= 1) onBuildingComplete(world, e);
       }
       continue;
@@ -57,6 +58,7 @@ function siblingSpeedFactor(world, e) {
 }
 
 function onBuildingComplete(world, e) {
+  e.hp = e.maxHp;
   world.events.push({ type: 'build', x: e.x, y: e.y, kind: e.kind, owner: e.owner });
   applyFortification(world, e); // Wall/Graben/Tunnelmündung aktivieren Deckung & Sperre/Passierbarkeit
   if (e._tunnelId != null) activateTunnelIfReady(world, e); // beide Mündungen fertig → Röhre öffnen

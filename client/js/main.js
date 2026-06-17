@@ -11,7 +11,7 @@ async function boot() {
   const net = new Net();
   const renderer = new Renderer(document.getElementById('game'));
   const input = new Input(net, renderer, data);
-  const ui = new UI(net, input, data);
+  const ui = new UI(net, input, data, renderer);
   const audio = new Audio();
   const rawCmd = net.cmd.bind(net);
   const INFANTRY = new Set(['rifleman', 'at_soldier', 'engineer']);
@@ -68,6 +68,7 @@ async function boot() {
   if (typeof window !== 'undefined') window.__if = { net, renderer, input, ui, audio };
 
   net.on('init', (m) => {
+    input.selectedTerraJob = null;
     renderer.resetWorld();
     renderer.buildTerrain(m);
     ui.renderBuildbar();
@@ -75,11 +76,12 @@ async function boot() {
   net.on('joined', () => {
     applyFogOption();
     input.selected.clear();
+    input.selectedTerraJob = null;
     input.onSelectionChange && input.onSelectionChange();
     ui.renderBuildbar();
     ui.renderSpectatorbar();
   });
-  net.on('viewseat', () => { ui.renderTop(); ui.renderSpectatorbar(); input.selected.clear(); input.onSelectionChange && input.onSelectionChange(); });
+  net.on('viewseat', () => { ui.renderTop(); ui.renderSpectatorbar(); input.selected.clear(); input.selectedTerraJob = null; input.onSelectionChange && input.onSelectionChange(); });
 
   net.connect();
 
@@ -127,10 +129,14 @@ async function boot() {
     renderer.updateRoads(net.roads);   // automatisches Straßennetz
     renderer.updateTunnels(net.tunnels); // Tunnelröhren (durchgehend)
     renderer.updateGroundWear(net.ground); // Fahrzeugspuren, Pfützenrillen, Matsch
-    renderer.updateConstructionJobs(net.jobs);
+    renderer.updateConstructionJobs(net.jobs, input.selectedTerraJob);
     // tote/ausgewählte Einheiten bereinigen
     const live = new Set(net.entities(1).map(e => e.id));
     for (const id of [...input.selected]) if (!live.has(id)) input.selected.delete(id);
+    if (input.selectedTerraJob != null && !(net.jobs || []).some(j => j[0] === input.selectedTerraJob)) {
+      input.selectedTerraJob = null;
+      input.onSelectionChange && input.onSelectionChange();
+    }
   }, renderer.perf?.uiInterval ?? 250);
 
   // Auswahlrahmen als Overlay

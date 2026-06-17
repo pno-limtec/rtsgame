@@ -107,7 +107,7 @@
   "turret": {
     "label": "Kanonenturm", "role": "defense",
     "hp": 800, "cost": { "ore": 600 }, "buildTime": 10,
-    "power": -25, "size": 1, "sight": 10, "weapon": "turret_cannon", "turret": true,
+    "power": -25, "size": 1, "sight": 12, "weapon": "turret_cannon", "turret": true,
     "desc": "Stationäre Kanonenverteidigung gegen Fahrzeuge, Gebäude und Schiffe in Küstennähe."
   },
   "mg_turret": {
@@ -125,7 +125,7 @@
   "sam_site": {
     "label": "SAM-Stellung", "role": "defense",
     "hp": 600, "cost": { "ore": 700 }, "buildTime": 10,
-    "power": -25, "size": 1, "sight": 12, "weapon": "sam_missile", "turret": true,
+    "power": -25, "size": 1, "sight": 15, "weapon": "sam_missile", "turret": true,
     "desc": "Stationäre Raketen-Flugabwehr mit hoher Reichweite."
   },
   "sonar": {
@@ -150,7 +150,7 @@
     "label": "Brücke", "role": "infrastructure",
     "hp": 700, "cost": { "ore": 120, "materials": 25 }, "buildTime": 5,
     "power": 0, "size": 1, "sight": 3, "bridges": true, "buildOnWater": true, "buildRadius": 3, "lineBuild": true, "remoteBuild": true,
-    "desc": "Per Linie über Wasser gezogen (Ufer zu Ufer, wie ein Tunnel). Landeinheiten überqueren Wasser; Schiffe passieren darunter. Zerstörbar — Nachschublinien sichern!"
+    "desc": "Per Linie über Wasser oder Gräben gezogen (Ufer zu Ufer, wie ein Tunnel). Landeinheiten überqueren Wasser; Schiffe passieren darunter. Zerstörbar — Nachschublinien sichern!"
   },
   "pontoon": {
     "label": "Pontonbrücke", "role": "infrastructure",
@@ -184,7 +184,7 @@
     "hp": 1600, "cost": { "ore": 500, "materials": 80 }, "buildTime": 12,
     "power": 30, "size": 2, "sight": 5, "terraform": 0.16, "buildRadius": 3,
     "blocks": true, "waterBlocks": true,
-    "desc": "Hoher Wall, der Wasser aufstaut und Energie erzeugt. Zerstörung setzt eine Flutwelle frei."
+    "desc": "Hoher Staudamm, der Wasser aufstaut und Energie erzeugt. Bei vollem Staubecken läuft Wasser seitlich um die Enden, nicht über die Krone."
   },
   "earth_pile": {
     "label": "Erdhügel", "role": "terrain",

@@ -8,7 +8,7 @@
 // Zellen fallen aus der Menge. Determinismus: aktive Menge wird je Schritt sortiert abgearbeitet.
 import {
   BUILDER_WADE_DEPTH, BUILDER_WADE_TIME, DT, WATER_STEP_TICKS, WATER_FLOW, WATER_SOURCE_RATE,
-  WET_DEPTH, FLOOD_DEPTH, WATER_MAX_DEPTH, FLOOD_DPS, SEA_LEVEL,
+  WET_DEPTH, FLOOD_DEPTH, NAVIGABLE_DEPTH, WATER_MAX_DEPTH, FLOOD_DPS, SEA_LEVEL,
   RAIN_FRAC, RAIN_DEPTH, STORM_RAIN_MULT,
   DROUGHT_RIVER_DRAIN, FLOOD_CAP_FRAC,
   SNOW_MELT, SNOW_FALL, MELT_WATER, SNOW_LINE, SNOW_FALL_LINE, SNOW_BAND_CAP,
@@ -66,6 +66,11 @@ const DRAIN_SEARCH_LIMIT = 9000;
 const STORM_SEA_CURRENT_MIN_DEPTH = Math.max(CURRENT_MIN_DEPTH, 0.075);
 const STORM_SEA_CURRENT_SPEED = 1.45;
 const STORM_SEA_CURRENT_SWIRL = 0.38;
+const CURRENT_INFANTRY_WASH_SPEED = 0.72;
+const CURRENT_WASH_DRIFT_MIN = 0.07;
+const CURRENT_VEHICLE_RESIST = 0.24;
+const CURRENT_HEAVY_RESIST = 0.55;
+const VEHICLE_DEEP_WATER_DAMAGE_DEPTH = NAVIGABLE_DEPTH;
 
 function flowGround(t, i) {
   return t.height[i] - ((t.tracks && t.tracks[i] > TRACK_PUDDLE_MIN) ? t.tracks[i] * TRACK_DEPRESSION : 0);
@@ -124,22 +129,6 @@ function shouldSimulateWater(t, i) {
   if (isOpenSeaCell(t, i)) return depth > base + SETTLE_EPS;
   if (base > FLOW_DEPTH_EPS || depth > FLOW_DEPTH_EPS) return true;
   return depth > base + FLOW_DEPTH_EPS;
-}
-
-function hasSurfaceGradient(t, i, eps = FLOW_EPS) {
-  const waterBlock = t.waterBlock;
-  if (waterBlock[i] > 0) return false;
-  const x = i % t.w, y = (i / t.w) | 0;
-  const s0 = flowGround(t, i) + t.water[i];
-  for (let dir = 0; dir < 8; dir++) {
-    const dx = DIR_X[dir], dy = DIR_Y[dir], dist = DIR_DIST[dir];
-    const nx = x + dx, ny = y + dy;
-    if (nx < 0 || ny < 0 || nx >= t.w || ny >= t.h) continue;
-    const j = ny * t.w + nx;
-    if (waterBlock[j] > 0) continue;
-    if (Math.abs(s0 - (flowGround(t, j) + t.water[j])) / dist > eps) return true;
-  }
-  return false;
 }
 
 function hasOutflow(t, i, eps = FLOW_EPS) {
@@ -474,7 +463,7 @@ function simulateCA(t, dtW, world) {
     const hasDownhillGround = hasDownhillGroundNeighbor(t, i, gi);
     // Tiefer liegende, nicht gesperrte Nachbarn sammeln.
     const blockedI = waterBlock[i] > 0;
-    let lowerCount = 0, headSum = 0, maxGroundDrop = 0, touchesBarrier = blockedI, blockedUphill = false;
+    let lowerCount = 0, headSum = 0, maxGroundDrop = 0, blockedUphill = false;
     let surfaceSum = si, surfaceCount = 1;
     const x = i % w, y = (i / w) | 0;
     for (let dir = 0; dir < 8; dir++) {
@@ -482,7 +471,7 @@ function simulateCA(t, dtW, world) {
       const nx = x + dx, ny = y + dy;
       if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
       const j = ny * w + nx;
-      if (blockedI || waterBlock[j] > 0) { touchesBarrier = true; continue; } // Damm/Deich sperrt diese Kante
+      if (blockedI || waterBlock[j] > 0) continue; // Damm/Deich sperrt diese Kante
       const gj = flowGround(t, j);
       const sj = gj + water[j];
       const head = (si - sj) / dist;
@@ -516,11 +505,10 @@ function simulateCA(t, dtW, world) {
       const basinDamping = (t.lakeMask && t.lakeMask[i]) ? 0.18 : 1;
       const equalizeCap = Math.max(0, si - surfaceSum / surfaceCount) * 0.82;
       const flowCap = Math.min(avail, equalizeCap + maxGroundDrop * SLOPE_FLOW_RELIEF);
-      const barrierDamping = touchesBarrier ? 0 : 1;
       const directedBoost = blockedUphill && maxGroundDrop > 0
         ? Math.min(DIRECTED_RUNOFF_BOOST_MAX, 1.12 + maxGroundDrop * 22)
         : 1;
-      const out = Math.min(avail, flowCap, headSum * 0.72 * WATER_FLOW * mobility * pressure * basinDamping * barrierDamping * directedBoost);
+      const out = Math.min(avail, flowCap, headSum * 0.72 * WATER_FLOW * mobility * pressure * basinDamping * directedBoost);
       if (out > SETTLE_EPS) {
         for (let n = 0; n < lowerCount; n++) {
           const j = lowerIdx[n];
@@ -566,9 +554,9 @@ function simulateCA(t, dtW, world) {
       // meeresverbundenem Boden läuft über settleWaterComponents/drainOutletComponent als
       // Oberflächenabfluss ab — sichtbares Wasser bleibt davon unberührt.
       const lake = t.lakeMask && t.lakeMask[i];
-      const gradient = hasSurfaceGradient(t, i, FLOW_EPS);
+      const outflow = hasOutflow(t, i, FLOW_EPS);
       const thinMoisture = !lake && baseWater[i] <= FLOW_DEPTH_EPS && water[i] <= FLOW_DEPTH_EPS;
-      if (lake || (!thinMoisture && gradient)) markActive(t, next, i);
+      if (lake || (!thinMoisture && outflow)) markActive(t, next, i);
     } else if (water[i] < baseWater[i] - SETTLE_EPS) {
       // Unter Seehöhe (trockengelegt): nur aktiv bleiben, wenn ein Nachbar tatsächlich höher
       // steht (Zufluss möglich) — sonst schlafen legen; jede Nachbar-Änderung weckt die Zelle
@@ -828,6 +816,7 @@ function erodePooledWater(t, active, dtW, next) {
     if (t.height[i] <= SEA_LEVEL - 0.02 && (t.baseWater?.[i] || 0) > WET_DEPTH) continue; // offenes Meer nicht vertiefen
     const cur = currentAt(t, i, depth);
     const stalled = cur.grad < 0.010;
+    if (stalled && !hasErosionOutlet(t, i, flowGround(t, i) + depth)) continue;
     if (!stalled && depth < WATER_ERODE_DEPTH * 1.55) continue;
     const slopeBoost = 1 + Math.min(2, groundSlope(t, i) * 10);
     const amt = Math.min(WATER_ERODE_MAX_STEP, (depth - WATER_ERODE_DEPTH) * WATER_ERODE_RATE * dtW * slopeBoost * (stalled ? 1.25 : 0.6));
@@ -839,6 +828,11 @@ function erodePooledWater(t, active, dtW, next) {
     changed++;
   }
   t._erosionCursor = (start + Math.max(1, Math.floor(active.length / 5))) % active.length;
+}
+
+function hasErosionOutlet(t, i, level) {
+  if (isOpenSeaCell(t, i) || isMainRiverCell(t, i) || isEdgeCell(t, i)) return true;
+  return componentHasDrainPathToSea(t, [i], level);
 }
 
 // Schnee bleibt trocken: am Ende jedes Wasser-Schritts kaskadiert sämtliches Wasser, das auf
@@ -902,8 +896,9 @@ function markActive(t, set, i) {
   if (i + w < w * h) set.add(i + w);
 }
 
-// Landeinheiten in gefluteten Zellen ertrinken; schwere Fahrzeuge saufen schon in flachem
-// Wasser ab; dauerhaft überflutete Gebäude verfallen nach und nach. Luft/See/Amphibien sicher.
+// Landeinheiten in gefluteten Zellen ertrinken; starke Strömung reißt Fußtruppen tödlich mit.
+// Fahrzeuge werden langsamer verdriftet und gehen erst in echtem Tiefwasser kaputt.
+// Dauerhaft überflutete Gebäude verfallen nach und nach. Luft/See/Amphibien sicher.
 function applyFloodDamage(world, didStep) {
   if (!didStep) return;
   const t = world.terrain;
@@ -934,17 +929,24 @@ function applyFloodDamage(world, didStep) {
     const ci = tIdx(t, tx, ty);
     const depth = t.water[ci];
     // Strömung: fließendes Wasser (Oberflächengefälle) reißt Einheiten flussabwärts —
-    // Landeinheiten voll, Schiffe abgeschwächt (Motorkraft hält dagegen).
+    // Fußtruppen voll, Fahrzeuge gedämpft, Schiffe abgeschwächt (Motorkraft hält dagegen).
+    let currentSpeed = 0;
+    let infantryWashedAway = false;
     if (depth > CURRENT_MIN_DEPTH) {
       const cur = currentAt(t, ci, depth, world);
       if (cur.grad > 0) {
         const floatingSurfaceShip = cur.seaStorm && (e.domain === 'water' || e.domain === 'amphibious') && !e.submerged;
+        const landVehicle = e.domain === 'land' && e.category !== 'infantry';
+        const resistance = e.heavy ? CURRENT_HEAVY_RESIST : landVehicle ? CURRENT_VEHICLE_RESIST : 0;
         const domainMult = floatingSurfaceShip ? 0.95
           : e.domain === 'water' || e.domain === 'amphibious' ? 0.35
-          : builderWaterWork(e, depth) ? 0.45
-            : (depth > FLOOD_DEPTH ? 1.35 : 1);
-        const currentSpeed = cur.speed ?? cur.grad * CURRENT_DRAG;
-        const drift = Math.min(CURRENT_MAX, currentSpeed) * dtW * domainMult;
+          : builderWaterWork(e, depth) ? 0.28
+            : e.heavy ? 0.24
+              : landVehicle ? 0.55
+                : (depth > FLOOD_DEPTH ? 1.35 : 1.15);
+        currentSpeed = cur.speed ?? cur.grad * CURRENT_DRAG;
+        const driftSpeed = Math.max(0, Math.min(CURRENT_MAX, currentSpeed) - resistance);
+        const drift = driftSpeed * dtW * domainMult;
         const nx = e.x + cur.dx * drift, ny = e.y + cur.dy * drift;
         let canDrift = true;
         if (e.domain === 'water' || e.domain === 'amphibious') {
@@ -958,16 +960,25 @@ function applyFloodDamage(world, didStep) {
         if (canDrift) {
           e.x = nx; e.y = ny;
           e.inFlood = world.tick;
+          infantryWashedAway = e.domain === 'land'
+            && e.category === 'infantry'
+            && currentSpeed >= CURRENT_INFANTRY_WASH_SPEED
+            && drift >= CURRENT_WASH_DRIFT_MIN;
         }
       }
     }
-    if (e.domain === 'water' || e.domain === 'amphibious') continue;
-    // Schwere Fahrzeuge gehen schon in flachem Wasser kaputt (Motor säuft ab).
-    if (e.heavy && depth > WET_DEPTH) {
-      applyDamage(world, e, HEAVY_WATER_DPS * dtW, null, 'water', waterDeathMeta(t, ci, depth));
-      e.inFlood = world.tick;
+    if (infantryWashedAway) {
+      applyDamage(world, e, e.hp + 9999, null, 'water', waterDeathMeta(t, ci, depth));
+      continue;
     }
-    if (depth > FLOOD_DEPTH && !builderWaterWork(e, depth)) {
+    if (e.domain === 'water' || e.domain === 'amphibious') continue;
+    if (e.category !== 'infantry' && depth > VEHICLE_DEEP_WATER_DAMAGE_DEPTH && !builderWaterWork(e, depth)) {
+      const sev = Math.min(1, (depth - VEHICLE_DEEP_WATER_DAMAGE_DEPTH) / (WATER_MAX_DEPTH - VEHICLE_DEEP_WATER_DAMAGE_DEPTH));
+      applyDamage(world, e, HEAVY_WATER_DPS * dtW * (0.45 + sev), null, 'water', waterDeathMeta(t, ci, depth));
+      e.inFlood = world.tick;
+      continue;
+    }
+    if (e.category === 'infantry' && depth > FLOOD_DEPTH) {
       // Schaden skaliert mit Tiefe; markiert Einheit als „im Wasser" für Verlangsamung.
       const sev = Math.min(1, (depth - FLOOD_DEPTH) / (WATER_MAX_DEPTH - FLOOD_DEPTH));
       applyDamage(world, e, FLOOD_DPS * dtW * (0.4 + sev), null, 'water', waterDeathMeta(t, ci, depth));

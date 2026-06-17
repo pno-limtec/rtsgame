@@ -1,5 +1,5 @@
 // Geländegenerierung & Abfragen: Höhenkarte, Tile-Typen, dynamisches Wasser.
-import { TILE, SEA_LEVEL, WET_DEPTH, NAVIGABLE_DEPTH, WATER_MAX_DEPTH, SNOW_LINE, SNOW_FALL_LINE, SNOW_INIT, EDGE_SEA } from './constants.js';
+import { TILE, SEA_LEVEL, WET_DEPTH, FLOOD_DEPTH, NAVIGABLE_DEPTH, WATER_MAX_DEPTH, SNOW_LINE, SNOW_FALL_LINE, SNOW_INIT, EDGE_SEA } from './constants.js';
 import { makeRng } from './rng.js';
 
 export const TT = { LAND: 0, HILL: 1, CLIFF: 2, WATER: 3, BRIDGE: 4 };
@@ -239,6 +239,31 @@ function roundTerrain(height, w, h, passes = 2, mix = 0.85) {
   }
 }
 
+function softenNormalTerrainCurves(height, w, h, protectedRadius = 0, passes = 3) {
+  const tmp = new Float32Array(w * h);
+  const weights = [1, 4, 6, 4, 1];
+  for (let p = 0; p < passes; p++) {
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+      const i = y * w + x;
+      const core = protectedRadius && inCenterMountainCore(w, h, x, y, protectedRadius);
+      let sum = 0, wsum = 0;
+      for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) {
+        const nx = x + dx, ny = y + dy;
+        if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
+        const wt = weights[dx + 2] * weights[dy + 2];
+        sum += height[ny * w + nx] * wt;
+        wsum += wt;
+      }
+      const avg = sum / Math.max(1, wsum);
+      const curve = avg - height[i];
+      const limit = core ? 0.070 : height[i] > SNOW_FALL_LINE ? 0.052 : 0.034;
+      const excess = Math.abs(curve) - limit;
+      tmp[i] = excess > 0 ? height[i] + Math.sign(curve) * excess * (core ? 0.32 : 0.62) : height[i];
+    }
+    for (let i = 0; i < w * h; i++) height[i] = Math.max(0.02, Math.min(MAX_HEIGHT, tmp[i]));
+  }
+}
+
 function smoothBelow(height, w, h, threshold, passes) {
   const tmp = new Float32Array(w * h);
   for (let p = 0; p < passes; p++) {
@@ -258,16 +283,20 @@ function smoothBelow(height, w, h, threshold, passes) {
 }
 
 function carveHighLake(height, w, h, x, y, r, level) {
-  for (let yy = -r - 2; yy <= r + 2; yy++) for (let xx = -r - 2; xx <= r + 2; xx++) {
+  const rim = 2.9;
+  for (let yy = -r - Math.ceil(rim); yy <= r + Math.ceil(rim); yy++) for (let xx = -r - Math.ceil(rim); xx <= r + Math.ceil(rim); xx++) {
     const nx = x + xx, ny = y + yy;
     if (nx < 1 || ny < 1 || nx >= w - 1 || ny >= h - 1) continue;
     const d = Math.hypot(xx, yy);
     const j = ny * w + nx;
     if (d <= r) {
-      const floor = level - 0.12 + (d / Math.max(1, r)) * 0.025;
+      const s = d / Math.max(1, r);
+      const floor = level - 0.12 + (s * s * (3 - 2 * s)) * 0.032;
       height[j] = Math.min(height[j], floor);
-    } else if (d <= r + 1.7) {
-      height[j] = Math.max(height[j], level + 0.035);
+    } else if (d <= r + rim) {
+      const f = Math.max(0, Math.min(1, (d - r) / rim));
+      const s = f * f * (3 - 2 * f);
+      height[j] = Math.max(height[j], level + 0.032 * (1 - s));
     }
   }
 }
@@ -811,6 +840,7 @@ export function generateTerrain({ w, h, seed = 1 }) {
   // wieder erzeugt haben (Flussufer, Kernrand). Mild gehalten, damit Flüsse/Berg erhalten bleiben;
   // die schiffbaren Fluss-Kerne werden direkt danach ohnehin neu gesetzt.
   roundTerrain(height, w, h, 1, 0.5);
+  softenNormalTerrainCurves(height, w, h, centerProtectRadius, 3);
   // Nutzbare, ebene Plateaus NACH der Rundung stempeln (sonst würden die Deckel weggeglättet).
   stampUsablePlateaus(height, w, h, rngP, cx0, cy0, valleys);
   // Die letzten Rundungs-/Plateau-Pässe dürfen Hochsee-Becken nicht wieder zuschieben. Vor der
@@ -1034,7 +1064,17 @@ export function isWet(t, tx, ty) {
 }
 
 export function waterBlocksLand(t, i) {
-  return (t.water?.[i] || 0) > WET_DEPTH;
+  const depth = t.water?.[i] || 0;
+  if (depth <= WET_DEPTH) return false;
+  const raisedRoad = t.roadBuilt && t.roadBuilt[i] > 0
+    && (t.terra?.[i] || 0) > 0.01
+    && (t.baseWater?.[i] || 0) <= WET_DEPTH
+    && depth <= FLOOD_DEPTH;
+  return !raisedRoad;
+}
+
+export function infantryWaterBlocksLand(t, i) {
+  return Math.max(t.water?.[i] || 0, t.baseWater?.[i] || 0) > WET_DEPTH * 0.35;
 }
 
 // Dauerhaftes (statisches) Gewässer an dieser Zelle — Fluss/See/Meer, NICHT eine vorübergehende
@@ -1192,6 +1232,64 @@ export function applyHeightDelta(t, i, delta, add) {
   }
 }
 
+export function smoothTerrainDeformation(t, cells, opts = {}) {
+  if (!t?.height || !cells) return;
+  const radius = opts.radius ?? 1;
+  const passes = opts.passes ?? 2;
+  const curveLimit = opts.curveLimit ?? 0.030;
+  const strength = opts.strength ?? 0.50;
+  const maxDelta = opts.maxDelta ?? 0.016;
+  const work = new Set();
+  const addPatch = (i) => {
+    if (i == null || i < 0 || i >= t.w * t.h) return;
+    const x = i % t.w, y = (i / t.w) | 0;
+    for (let yy = -radius; yy <= radius; yy++) for (let xx = -radius; xx <= radius; xx++) {
+      const nx = x + xx, ny = y + yy;
+      if (!inBounds(t, nx, ny)) continue;
+      if (Math.hypot(xx, yy) > radius + 0.25) continue;
+      const j = tIdx(t, nx, ny);
+      if (t.startSafe?.[j]) continue;
+      work.add(j);
+    }
+  };
+  if (typeof cells[Symbol.iterator] !== 'function') addPatch(cells);
+  else for (const i of cells) addPatch(i);
+  if (!work.size) return;
+  const indices = [...work];
+  const next = new Float32Array(indices.length);
+  for (let p = 0; p < passes; p++) {
+    let changed = false;
+    for (let n = 0; n < indices.length; n++) {
+      const i = indices[n];
+      const x = i % t.w, y = (i / t.w) | 0;
+      let sum = 0, wsum = 0;
+      for (let yy = -1; yy <= 1; yy++) for (let xx = -1; xx <= 1; xx++) {
+        const nx = x + xx, ny = y + yy;
+        if (!inBounds(t, nx, ny)) continue;
+        const j = tIdx(t, nx, ny);
+        if (t.startSafe?.[j]) continue;
+        const wt = (!xx && !yy) ? 4 : (!xx || !yy) ? 2 : 1;
+        sum += t.height[j] * wt;
+        wsum += wt;
+      }
+      if (!wsum) { next[n] = t.height[i]; continue; }
+      const curve = sum / wsum - t.height[i];
+      const excess = Math.abs(curve) - curveLimit;
+      next[n] = excess > 0
+        ? t.height[i] + Math.sign(curve) * Math.min(maxDelta, excess * strength)
+        : t.height[i];
+      if (Math.abs(next[n] - t.height[i]) > 1e-5) changed = true;
+    }
+    if (!changed) break;
+    for (let n = 0; n < indices.length; n++) {
+      const i = indices[n];
+      const dh = next[n] - t.height[i];
+      if (Math.abs(dh) <= 1e-5) continue;
+      applyHeightDelta(t, i, Math.abs(dh), dh > 0);
+    }
+  }
+}
+
 // Wasser-CA in einem Umkreis reaktivieren (nach Bau/Zerstörung einer Wassersperre).
 export function wakeWaterAround(t, tx, ty, size, pad = 2) {
   if (!t.waterActive) return;
@@ -1204,7 +1302,8 @@ export function wakeWaterAround(t, tx, ty, size, pad = 2) {
 // Erzvorkommen zur Laufzeit stempeln (garantiertes Feld an jeder Startbasis). Bevorzugt
 // Hangzellen (Erz steht am Hang an); auf völlig flachem Gelände wird normal gestempelt,
 // damit die Startwirtschaft nie verhungert.
-export function stampOre(t, cx, cy, r, amount = 1200) {
+export function stampOre(t, cx, cy, r, amount = 1200, opts = {}) {
+  const baseAmount = opts.baseAmount ?? 200;
   const slope = (i) => {
     const x = i % t.w;
     let s = 0;
@@ -1227,7 +1326,7 @@ export function stampOre(t, cx, cy, r, amount = 1200) {
       if (!isDryOreCell(t, i)) continue;
       if (wantSlope && slope(i) < 0.03) continue;
       if (t.ore[i] <= 0) t.oreList.push(i);
-      t.ore[i] = Math.max(t.ore[i], (1 - d / r) * amount + 200);
+      t.ore[i] = Math.max(t.ore[i], (1 - d / r) * amount + baseAmount);
       stamped++;
     }
     if (stamped >= 8) break;  // genug Hang-Erz gefunden → kein Flach-Fallback nötig
@@ -1270,13 +1369,13 @@ export function isPassable(t, domain, tx, ty, category) {
   if (!inBounds(t, tx, ty)) return false;
   const i = tIdx(t, tx, ty);
   const ty_ = t.type[i];
-  const wet = waterBlocksLand(t, i);
   const blocked = t.block && t.block[i] > 0; // Wall/Damm sperrt Boden, nicht aber Luft
   const onBridge = t.bridge && t.bridge[i] > 0;   // Brücke: Land quert Wasser (Schiffe fahren darunter durch)
   const inTunnel = t.tunnel && t.tunnel[i] > 0;   // Tunnel: Land quert Klippen
   // Fußsoldaten sind Kletterer: sie kommen auch über unwegsames Gelände (Klippen/Berge, verschneite
   // Gipfel) — nur nicht durch tiefes Wasser oder Sperren. Das gibt der Infanterie eine eigene Mobilität.
   const climber = category === 'infantry';
+  const wet = climber ? infantryWaterBlocksLand(t, i) : waterBlocksLand(t, i);
   switch (domain) {
     case 'air': return true;
     case 'water': return isNavigableWaterIdx(t, i) || ty_ === TT.BRIDGE || inTunnel; // Schiffe queren durch den Tunnel

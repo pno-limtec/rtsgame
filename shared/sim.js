@@ -1,6 +1,6 @@
 // Simulations-Orchestrator: fester Tick-Loop, Befehlsverarbeitung, Lebenszyklus.
 // Kennt weder Rendering noch Netzwerk — rein deterministische Logik.
-import { DT, FLOOD_DEPTH, MAX_UNITS_PER_PLAYER, MUD_IMPASSABLE, TERRA_RAISE_COST } from './constants.js';
+import { DT, FLOOD_DEPTH, MAX_UNITS_PER_PLAYER, MUD_IMPASSABLE } from './constants.js';
 import {
   createWorld, spawnBuilding, buildSpatial, ownerEntities,
   canAfford, pay, effectiveCost, canPlaceBuilding, requiresBuildingAnchor, removeFortification, removeSolidBlock, addResource,
@@ -17,12 +17,14 @@ import { stepGarrison } from './systems/garrison.js';
 import { stepRegen } from './systems/veterancy.js';
 import { stepEnvironment } from './systems/environment.js';
 import { stepRoads } from './systems/roads.js';
-import { stepConstruction, addTerraJob, assignEarthPile } from './systems/construction.js';
+import { stepConstruction, addTerraJob, assignEarthPile, hasTerraformRaiseSource, retargetEarthPileWorkers } from './systems/construction.js';
 import { stepRecovery } from './systems/recovery.js';
 import { placeTunnel, onTunnelMouthDestroyed, stepTunnels } from './systems/tunnel.js';
 import { stepCanal, canalLineTiles } from './systems/canal.js';
 import { forestBlocks, inBounds, isPassable, tIdx, worldToTile, tileToWorld } from './terrain.js';
 import { stepAi, initAi } from './ai/ai.js';
+
+const INFANTRY_FORMATION_SPACING = 0.22;
 
 export { createWorld };
 
@@ -77,6 +79,7 @@ export function enqueueCommand(world, cmd, playerId) {
 function cleanup(world) {
   for (const [id, e] of world.entities) {
     if (e.dead || e.hp <= 0) {
+      if (e.etype === 'building' && e.kind === 'pipe' && e.buildProgress >= 1 && e._deathCause !== 'sold') rememberDestroyedPipe(world, e);
       if (e.etype === 'building' && e._fortified) removeFortification(world, e); // Deckung/Sperre freigeben
       if (e.etype === 'building' && e._solid) removeSolidBlock(world, e);        // Kollisionssperre freigeben
       if (e.etype === 'building' && e._tunnelId != null) onTunnelMouthDestroyed(world, e); // Mündung tot → versiegeln/kollabieren
@@ -90,6 +93,10 @@ function cleanup(world) {
           y: e.y,
           etype: 'unit',
           kind: u.kind,
+          owner: u.owner,
+          category: u.category,
+          domain: u.domain,
+          facing: u.facing || 0,
           ...(waterDeath && e._deathMeta ? e._deathMeta : {}),
         });
         e.carried.length = 0;
@@ -103,6 +110,12 @@ function cleanup(world) {
     const ents = ownerEntities(world, p.id);
     if (ents.length === 0) { p.defeated = true; world.events.push({ type: 'defeat', player: p.id }); }
   }
+}
+
+function rememberDestroyedPipe(world, e) {
+  const sites = world.aiPipeRebuildSites || (world.aiPipeRebuildSites = []);
+  if (sites.some(s => s.owner === e.owner && s.tx === e.tx && s.ty === e.ty)) return;
+  sites.push({ owner: e.owner, tx: e.tx, ty: e.ty, resource: e._pipeResource || e.pipeResource || null, tick: world.tick });
 }
 
 // Anzahl lebender Einheiten eines Spielers (für Cap).
@@ -129,10 +142,12 @@ function moveGoalsForUnits(world, units, wx, wy) {
     if (units[0]) goals.set(units[0].id, { x: wx, y: wy });
     return goals;
   }
+  if (compactInfantryGroup(units)) return compactInfantryMoveGoals(world, units, wx, wy);
   const [gx, gy] = worldToTile(wx, wy);
   const spacing = formationSpacing(units);
   const radius = Math.max(5, Math.ceil(Math.sqrt(units.length)) + 5);
-  const candidates = formationOffsets(radius, spacing).map(([dx, dy]) => [gx + dx, gy + dy]);
+  const candidateLimit = Math.max(units.length + 4, Math.ceil(units.length * 1.2));
+  const candidates = formationOffsets(radius, spacing).slice(0, candidateLimit).map(([dx, dy]) => [gx + dx, gy + dy]);
   const used = new Set();
   const ordered = [...units].sort((a, b) => distSq(a.x, a.y, wx, wy) - distSq(b.x, b.y, wx, wy));
   for (const u of ordered) {
@@ -141,7 +156,7 @@ function moveGoalsForUnits(world, units, wx, wy) {
     for (const [tx, ty] of candidates) {
       const key = `${tx},${ty}`;
       if (used.has(key) || !unitCanStopOn(world, u, tx, ty)) continue;
-      const goalCost = Math.hypot(tx - gx, ty - gy) * 0.35;
+      const goalCost = Math.hypot(tx - gx, ty - gy) * 1.15;
       const travelCost = Math.hypot(tx - ux, ty - uy);
       const cost = travelCost + goalCost;
       if (cost < bestCost) { bestCost = cost; best = [tx, ty, key]; }
@@ -153,6 +168,36 @@ function moveGoalsForUnits(world, units, wx, wy) {
     used.add(best[2]);
     const [x, y] = tileToWorld(best[0], best[1]);
     goals.set(u.id, { x, y });
+  }
+  return goals;
+}
+
+function compactInfantryGroup(units) {
+  return units.every(u => u.domain === 'land' && u.category === 'infantry');
+}
+
+function compactInfantryMoveGoals(world, units, wx, wy) {
+  const goals = new Map();
+  const radius = Math.max(4, Math.ceil(Math.sqrt(units.length)) + 3);
+  const candidates = formationOffsets(radius, INFANTRY_FORMATION_SPACING)
+    .map(([dx, dy], key) => ({ x: wx + dx, y: wy + dy, key }));
+  const used = new Set();
+  const ordered = [...units].sort((a, b) => distSq(a.x, a.y, wx, wy) - distSq(b.x, b.y, wx, wy));
+  for (const u of ordered) {
+    let best = null;
+    for (const c of candidates) {
+      if (used.has(c.key)) continue;
+      const [tx, ty] = worldToTile(c.x, c.y);
+      if (!unitCanStopOn(world, u, tx, ty)) continue;
+      best = c;
+      break;
+    }
+    if (!best) {
+      goals.set(u.id, { x: wx, y: wy });
+      continue;
+    }
+    used.add(best.key);
+    goals.set(u.id, { x: best.x, y: best.y });
   }
   return goals;
 }
@@ -182,7 +227,7 @@ function unitCanStopOn(world, u, tx, ty) {
     && u.domain === 'land'
     && t.mud && t.mud[i] > 0.02
     && (t.water?.[i] || 0) <= FLOOD_DEPTH;
-  if (!isPassable(t, u.domain, tx, ty) && !muddyBuilder) return false;
+  if (!isPassable(t, u.domain, tx, ty, u.category) && !muddyBuilder) return false;
   if (forestBlocks(t, u.domain, tx, ty, { category: u.category, roughCrawler: u.kind === 'tractor' })) return false;
   if (u.heavy && u.domain === 'land' && t.mud && t.mud[i] >= MUD_IMPASSABLE) return false;
   return true;
@@ -331,7 +376,7 @@ export function applyCommand(world, cmd, playerId) {
             u.resourceRole = resource;
             u.order = { type: 'haul_pile', pile: tgt.id, state: 'toPile', resource };
             setMoveGoal(world, u, tgt.x, tgt.y);
-          } else if (tgt.buildProgress < 1 && u.kind === 'builder') {
+          } else if ((tgt.buildProgress < 1 || (tgt.def?.pipe && tgt.hp < tgt.maxHp)) && u.kind === 'builder') {
             u.resourceRole = 'build';   // Funktion automatisch anpassen
             u.order = { type: 'construct', site: tgt.id }; u.target = null;
             setMoveGoal(world, u, tgt.x, tgt.y);
@@ -357,20 +402,22 @@ export function applyCommand(world, cmd, playerId) {
       // Aufschütt-/Abgrab-Auftrag: ein freier Bagger fährt hin und übernimmt die Arbeit.
       if (!inBounds(world.terrain, cmd.tx, cmd.ty)) break;
       const dir = cmd.dir > 0 ? 1 : -1;
-      if (dir > 0) {
-        if ((player.resources.materials || 0) < TERRA_RAISE_COST) break;
-        player.resources.materials -= TERRA_RAISE_COST; // Aufschütten verbraucht Erde
-      }
+      if (dir > 0 && !hasTerraformRaiseSource(world, player.id, cmd.tx, cmd.ty)) break;
       addTerraJob(world, player.id, cmd.tx, cmd.ty, dir);
       break;
     }
     case 'setPile': {
-      const site = world.entities.get(cmd.site);
+      let site = cmd.site != null ? world.entities.get(cmd.site) : null;
+      if (cmd.job != null) {
+        const jid = cmd.job | 0;
+        site = (world.terraJobs || []).find(j => j.id === jid && j.owner === playerId) || null;
+      }
       if (!site || site.owner !== playerId || !site.earthPileId) break;
       const pile = world.entities.get(site.earthPileId);
       const def = world.data.buildings.earth_pile;
       if (!pile || pile.kind !== 'earth_pile' || !def) break;
-      if (Math.hypot((cmd.tx + 0.5) - (site.tx + site.size / 2), (cmd.ty + 0.5) - (site.ty + site.size / 2)) > 12) break;
+      const siteSize = site.size || 1;
+      if (Math.hypot((cmd.tx + 0.5) - (site.tx + siteSize / 2), (cmd.ty + 0.5) - (site.ty + siteSize / 2)) > 12) break;
       if (!canPlaceBuilding(world, cmd.tx, cmd.ty, 1, def)) break;
       removeSolidBlock(world, pile);
       pile.tx = cmd.tx; pile.ty = cmd.ty;
@@ -378,6 +425,7 @@ export function applyCommand(world, cmd, playerId) {
       const t = world.terrain, i = tIdx(t, cmd.tx, cmd.ty);
       if (inBounds(t, cmd.tx, cmd.ty)) { t.block[i]++; pile._solid = true; }
       site.pileTx = cmd.tx; site.pileTy = cmd.ty;
+      retargetEarthPileWorkers(world, site);
       break;
     }
     case 'destroy': {

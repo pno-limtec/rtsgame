@@ -1,7 +1,7 @@
 // 3D-Rendering mit Three.js: Gelände aus Höhenkarte, Einheiten/Gebäude-Meshes,
 // Kamera, Picking, einfache Effekte (Explosionen, Mündungsfeuer).
 import * as THREE from 'three';
-import { groundTexture, meadowTexture, oilSlickTexture, panelTexture, puffTexture } from './textures.js';
+import { groundTexture, meadowTexture, panelTexture, puffTexture } from './textures.js';
 import { ModelLibrary } from './models.js';
 import { makeBuildingMesh } from './buildings3d.js';
 import { createWaterV2, updateWaterV2 } from './waterV2.js';
@@ -24,6 +24,10 @@ const PRECIP_MAX_DIST = 520;
 const WEATHER_SNOW_LINE = 0.82;
 const SUB_DETECT_RANGE = 5;
 const FOREST_DETECT_RANGE = 6;   // Aufdeck-Reichweite für im Wald getarnte Infanterie
+const FOW_CIRCLE_LIMIT = 48;
+const FOW_FIRE_REVEAL_TIME = 4.5;
+const FOW_FIRE_REVEAL_RADIUS = TILE * 7;
+const FOW_FIRE_REVEAL_LIMIT = 12;
 const TERRA_PREVIEW_DELTA = 0.12;
 const TERRA_PREVIEW_MIN_HEIGHT = 0.02;
 const TERRA_PREVIEW_MAX_HEIGHT = 1.92;
@@ -57,8 +61,8 @@ const WATER_PLANE_FALL_SMOOTH = 0.045; // Abfluss trocknet langsamer aus als er 
 const FLOOD_CHANNEL_DEPTH = 0.012;  // dünne Abflussrinnen bekommen schon früh eine Wasseroberfläche
 const WATER_DARK_DEPTH_START = 0.085;
 const WATER_DARK_DEPTH_RANGE = 0.34;
-const WATER_EDGE_TUCK_Y = -0.012;  // Uferkante leicht ins Gelände eingraben, statt darüber zu schweben
-const WATER_EDGE_TUCK_COVER = 0.72; // Randband, in dem Wasser sanft unter die Böschung gezogen wird
+const WATER_EDGE_TUCK_Y = 0.006;   // Uferkante knapp über dem Gelände halten, damit sie nicht in den Depth-Test clippt
+const WATER_EDGE_TUCK_COVER = 0.72; // Randband, in dem Wasser sanft an die Böschung gezogen wird
 const WATER_NIGHT_COLOR_MIN = 0.26;
 const WATER_NIGHT_OPACITY_MIN = 0.30;   // Grund-Deckkraft (nachts); Wasser bleibt transparent genug, damit der Grund erkennbar ist
 const WATER_STANDING_FLOW_MAX = 0.13;
@@ -70,6 +74,9 @@ const WATER_FILM_ALPHA_MAX = 0.96;
 const WATER_EDGE_CLOSE_MAX_SLOPE = 0.060;
 const THIN_FILM_MAX_SLOPE = 0.032;
 const THIN_FILM_FAST_FLOW = 0.026;
+const STEEP_RUNOFF_SURFACE_MAX_SLOPE = 0.052;
+const STEEP_RUNOFF_SURFACE_MAX_DROP = 0.075;
+const STEEP_RUNOFF_SURFACE_MIN_DEPTH = 0.060;
 const STEEP_RUNOFF_PARTICLE_SLOPE = 0.040;
 const BEACH_SHORE_RADIUS = 5;
 const BEACH_DRY_HEIGHT = 0.145;
@@ -91,7 +98,7 @@ const WEATHER_FOG_NIGHT = new THREE.Color(0x111821);
 const WATER_KINDS = new Set(['patrol_boat', 'destroyer', 'amphib_transport', 'sea_builder', 'submarine', 'underwater_drone', 'tractor']);
 // Wasserbauten schwimmen auf der Oberfläche (Werft, Pumpwerk) statt auf dem Seegrund zu stehen.
 const WATER_BUILDINGS = new Set(['shipyard', 'water_pump', 'pontoon']);
-const GROUND_WIREFRAME_BUILD_KINDS = new Set(['road', 'pipe', 'bridge', 'pontoon', 'tunnel', 'wall', 'trench', 'dam', 'levee']);
+const GROUND_WIREFRAME_BUILD_KINDS = new Set(['road', 'pipe', 'pontoon', 'tunnel', 'wall', 'trench', 'levee']);
 const SURFACE_SHIP_KINDS = new Set(['patrol_boat', 'destroyer', 'amphib_transport', 'sea_builder']);
 // Bauten, die ans Pipeline-Netz andocken (für die optische Rohrverbindung).
 const PIPE_CONNECT = new Set(['pipe', 'water_pump', 'water_tower', 'oil_derrick', 'oil_depot']);
@@ -105,12 +112,18 @@ const PIPE_FLEX_RADIUS = 0.13;     // dünner als das starre Rohr (0.17) — wir
 const BRIDGE_DECK_WIDTH = TILE * 1.8; // zweispurig: zwei Fahrzeuge können sich sichtbar begegnen
 const BRIDGE_LANE_OFFSET = TILE * 0.36;
 const BRIDGE_DECK_LIFT = 0.55;     // leicht erhöht über Ufer/Wasser
-const BRIDGE_BANK_OVERLAP = TILE * 0.72;
+const BRIDGE_BANK_OVERLAP = TILE * 1.05;
 const BRIDGE_DECK_THICKNESS = TILE * 0.16;
 const BRIDGE_RAIL_WIDTH = TILE * 0.12;
 const BRIDGE_RAIL_HEIGHT = TILE * 0.18;
 const BRIDGE_RAMP_LENGTH = TILE * 1.25;
 const BRIDGE_RAMP_GROUND_LIFT = 0.08;
+const DAM_BASE_WIDTH = TILE * 2.35;
+const DAM_CREST_WIDTH = TILE * 0.95;
+const DAM_TOP_ABOVE_BANK = HEIGHT_SCALE * 0.18;
+const DAM_MIN_VISIBLE_HEIGHT = HEIGHT_SCALE * 0.18;
+const DAM_END_OVERLAP = TILE * 0.55;
+const DAM_BASE_SINK = 0.08;
 const ZERO_OFFSET = { x: 0, z: 0 }; // wiederverwendeter Null-Spurversatz (kein Garbage pro Frame)
 const INFANTRY_KINDS = new Set(['engineer', 'rifleman', 'at_soldier', 'aa_soldier']);
 const AIR_UNIT_KINDS = new Set(['recon_drone', 'gunship', 'bomber', 'cloud_seeder', 'transport_air']);
@@ -290,6 +303,7 @@ export class Renderer {
     this._fowCircles = [];
     this._fowHidden = new Set();
     this._fowEnemyMist = new Map();
+    this._fowFireReveal = new Map();
     this._mistDummy = new THREE.Object3D();
     this._tmpBuildingFxPos = new THREE.Vector3();
     this.jobGhosts = new Map();
@@ -302,7 +316,6 @@ export class Renderer {
     this._terraVisualIdx = new Set();
     this.oreMats = null;
     this.oreMeshes = [];
-    this.oilMesh = null;
     this.oilAmount = null;
     this._oilSet = new Set();
     this._currentFxAt = 0;
@@ -310,7 +323,7 @@ export class Renderer {
     this._modelPreviewRenderer = null;
 
     // Prozedurale Texturen (CC0/eigenerstellt): Boden-Detail + Partikel-Sprite; Material-Cache je Farbe.
-    this.tex = { ground: groundTexture(), meadow: meadowTexture(), oil: oilSlickTexture(), puff: puffTexture() };
+    this.tex = { ground: groundTexture(), meadow: meadowTexture(), puff: puffTexture() };
     this._matCache = new Map();
 
     // Geteilte neutrale Baumaterialien + EIN globales Fenster-Material (emissiv bei Nacht:
@@ -486,9 +499,10 @@ export class Renderer {
     this._terraVisualIdx?.clear?.();
     for (const mist of this._fowEnemyMist.values()) remove(mist);
     this._fowEnemyMist.clear();
+    this._fowFireReveal.clear();
     for (const obj of [
       this.terrainMesh, this.fowMesh, this.waterMesh, this.waterMeshV2, this.waterHorizonV2, this.skirtMesh, this.floodMesh,
-      this.wetGroundMesh, this.trackMesh, this.mudMesh, this.roadMesh, this.roadBuildMesh, this.bridgeMesh, this.pipeMesh, this.oilMesh, this.rockInst, this.grassInst,
+      this.wetGroundMesh, this.trackMesh, this.mudMesh, this.roadMesh, this.roadBuildMesh, this.bridgeMesh, this.bridgeBuildMesh, this.damMesh, this.damBuildMesh, this.pipeMesh, this.rockInst, this.grassInst,
       ...(this.oreMeshes || []),
       ...Object.values(this.treeInst || {}),
       ...(this.wildlife || []).map(a => a.group),
@@ -497,7 +511,7 @@ export class Renderer {
     ]) remove(obj);
     this.terrainMesh = this.fowMesh = this.waterMesh = this.waterMeshV2 = this.waterHorizonV2 = this.skirtMesh = this.floodMesh = null;
     this.wetGroundMesh = null;
-    this.trackMesh = this.mudMesh = this.roadMesh = this.roadBuildMesh = this.bridgeMesh = this.pipeMesh = this.oilMesh = null;
+    this.trackMesh = this.mudMesh = this.roadMesh = this.roadBuildMesh = this.bridgeMesh = this.bridgeBuildMesh = this.damMesh = this.damBuildMesh = this.pipeMesh = null;
     this.rockInst = this.grassInst = null;
     this.treeInst = null;
     this._treeAnim = null;
@@ -522,6 +536,7 @@ export class Renderer {
     this._bridgeCellSet = new Set();
     this._bridgeDeckYByIdx = new Map();
     this._bridgeSig = '';
+    this._damSig = '';
     this._roadBuildSig = '';
     this._pipeSig = '';
     this._waterSurfaceVisual = null;
@@ -759,9 +774,6 @@ export class Renderer {
     this._refreshFloodOverlay();
     this._up = new THREE.Vector3(0, 1, 0);
     this._normal = new THREE.Vector3();
-    this._oilDummy = new THREE.Object3D();
-    this._buildOilOverlay();
-
     // Fahrzeugspuren: zwei dunkle Rillen je betroffener Zelle. Matsch färbt die Terrainbasis
     // braun, statt als rundes Overlay über der Grastextur zu liegen.
     const rutGeo = new THREE.PlaneGeometry(TILE * 0.18, TILE * 0.78); rutGeo.rotateX(-Math.PI / 2);
@@ -830,6 +842,33 @@ export class Renderer {
     // Sichtbare Brücken kommen unten aus echten Bridge-Entities in `updateBridgeOverlay`.
     this._bridgeSig = '';
     this.updateBridgeOverlay();
+
+    this.infraBuildWireMat = new THREE.MeshBasicMaterial({
+      color: 0x5cc7ff,
+      transparent: true,
+      opacity: 0.72,
+      wireframe: true,
+      depthWrite: false,
+    });
+    this.bridgeBuildMesh = new THREE.Mesh(this._makeEmptyOverlayGeometry(), this.infraBuildWireMat);
+    this.bridgeBuildMesh.renderOrder = 6;
+    this.bridgeBuildMesh.visible = false;
+    this.scene.add(this.bridgeBuildMesh);
+    this._bridgeBuildSig = '';
+
+    this.damMat = new THREE.MeshStandardMaterial({ color: 0x4b4f53, roughness: 0.9, metalness: 0.02 });
+    this.damMesh = new THREE.Mesh(this._makeEmptyOverlayGeometry(), this.damMat);
+    this.damMesh.renderOrder = 3;
+    this.damMesh.castShadow = true;
+    this.damMesh.receiveShadow = true;
+    this.scene.add(this.damMesh);
+    this._damSig = '';
+
+    this.damBuildMesh = new THREE.Mesh(this._makeEmptyOverlayGeometry(), this.infraBuildWireMat);
+    this.damBuildMesh.renderOrder = 6;
+    this.damBuildMesh.visible = false;
+    this.scene.add(this.damBuildMesh);
+    this._damBuildSig = '';
 
     this.pipeMat = new THREE.MeshStandardMaterial({ color: 0xffffff, vertexColors: true, roughness: 0.42, metalness: 0.55, emissive: 0x18506e, emissiveIntensity: 0 });
     // Durchfluss-Visualisierung: helle Bänder wandern entlang der Bogenlänge (aFlow) durch die Leitung,
@@ -1573,6 +1612,14 @@ export class Renderer {
       && Math.max(depth, this.waterBase?.[idx] || 0) > 0.012;
   }
 
+  _waterCellsCanShareSurface(a, b, surface) {
+    if (!this.height) return true;
+    const lowestSurface = Math.min(surface[a] || 0, surface[b] || 0);
+    const bedA = this.height[a] * HEIGHT_SCALE + WATER_SURFACE_CLEAR;
+    const bedB = this.height[b] * HEIGHT_SCALE + WATER_SURFACE_CLEAR;
+    return Math.max(bedA, bedB) <= lowestSurface + WATER_EDGE_CLOSE_MAX_LIFT;
+  }
+
   _stabilizeWaterSurfaces(visible, surface, flowX = null, flowZ = null, seaVis = null) {
     const w = this.mapW, h = this.mapH, n = w * h;
     if (!this._waterSurfaceVisual || this._waterSurfaceVisual.length !== n) this._waterSurfaceVisual = new Float32Array(n);
@@ -1603,6 +1650,7 @@ export class Renderer {
           if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
           const j = ny * w + nx;
           if (broadSeen[j] || !visible[j]) continue;
+          if (!this._waterCellsCanShareSurface(cur, j, surface)) continue;
           broadSeen[j] = 1;
           stack.push(j);
         }
@@ -1647,6 +1695,7 @@ export class Renderer {
           const j = ny * w + nx;
           if (seen[j] || !visible[j]) continue;
           if (Math.abs(surface[j] - seedSurface) > WATER_PLANE_LINK_EPS) continue;
+          if (!this._waterCellsCanShareSurface(cur, j, surface)) continue;
           seen[j] = 1;
           stack.push(j);
         }
@@ -1753,15 +1802,19 @@ export class Renderer {
         }
         if (!count) continue;
         const avgSurf = surfSum / count;
-        if (this.height[i] * HEIGHT_SCALE + WATER_SURFACE_CLEAR > avgSurf + WATER_EDGE_CLOSE_MAX_LIFT) continue;
-        const avgDepth = depthSum / count;
+        const terrainY = this.height[i] * HEIGHT_SCALE;
+        const minSurface = terrainY + WATER_SURFACE_CLEAR;
+        if (minSurface > avgSurf + WATER_EDGE_CLOSE_MAX_LIFT) continue;
         const avgSea = seaSum / count;
+        const realDepth = this.waterDepth?.[i] || 0;
+        if (avgSea < 0.35 && !this._isPermanentWaterCell(i) && realDepth < FLOOD_SURFACE_DEPTH * 0.75) continue;
+        const avgDepth = depthSum / count;
         const localSlope = this._slopeAt(i);
         if (avgSea < 0.35 && localSlope > WATER_EDGE_CLOSE_MAX_SLOPE && avgDepth < 0.040) continue;
         visible[i] = 1;
         cellCov[i] = Math.max(0.24, Math.min(0.82, (covSum / count) * 0.72)); // weicher schließen statt neue harte Randzellen zu erzeugen
         visibleCount++;
-        surface[i] = Math.max(avgSurf, this.height[i] * HEIGHT_SCALE + WATER_SURFACE_CLEAR);
+        surface[i] = Math.max(avgSurf, minSurface);
         flowX[i] = flowSumX / count;
         flowZ[i] = flowSumZ / count;
         depthVis[i] = avgDepth;
@@ -1790,6 +1843,7 @@ export class Renderer {
     const cornerDepth = new Float32Array(fn);
     const cornerSea = new Float32Array(fn);
     const cornerSlope = new Float32Array(fn);
+    const cornerTerrainBlocked = new Uint8Array(fn);
     const cornerX = (cx) => Math.max(0, Math.min((w - 1) * TILE, (cx - 0.5) * TILE));
     const cornerZ = (cy) => Math.max(0, Math.min((h - 1) * TILE, (cy - 0.5) * TILE));
     const clamp01 = (v) => Math.max(0, Math.min(1, v));
@@ -1820,19 +1874,28 @@ export class Renderer {
       const nearestX = Math.max(0, Math.min(w - 1, Math.round(px)));
       const nearestY = Math.max(0, Math.min(h - 1, Math.round(py)));
       const nearest = nearestY * w + nearestX;
-      cover[key] = totalWeight > 0 ? waterWeight / totalWeight : 0;
+      const localSurface = waterWeight > 0 ? surfSum / waterWeight : 0;
+      let cornerHasWater = waterWeight > 0;
+      if (cornerHasWater) {
+        const groundY = this._terrainHeightSmoothAt(cornerX(cx), cornerZ(cy)) + WATER_SURFACE_CLEAR;
+        if (groundY > localSurface + WATER_EDGE_CLOSE_MAX_LIFT) {
+          cornerHasWater = false;
+          cornerTerrainBlocked[key] = 1;
+        }
+      }
+      cover[key] = cornerHasWater && totalWeight > 0 ? waterWeight / totalWeight : 0;
       // Eckpegel = reiner gewichteter Mittelwert der Zell-Oberflächen (die liegen bereits über
       // ihrem Bett). KEIN zusätzlicher Gelände-Boden mehr: ein solcher hob Randecken über höherem
       // Ufer leicht an und erzeugte eine sichtbare, hellere Stufe/Naht am Rand. Ohne ihn bleibt die
       // Seefläche durchgehend eben; wo das Ufergelände höher liegt, verdeckt es den Rand von selbst.
-      cornerSurface[key] = waterWeight > 0
-        ? surfSum / waterWeight
+      cornerSurface[key] = cornerHasWater
+        ? localSurface
         : (surface[nearest] || this.height[nearest] * HEIGHT_SCALE + WATER_SURFACE_CLEAR);
-      cornerFlowX[key] = waterWeight > 0 ? flowSumX / waterWeight : 0;
-      cornerFlowZ[key] = waterWeight > 0 ? flowSumZ / waterWeight : 0;
-      cornerDepth[key] = waterWeight > 0 ? depthSum / waterWeight : (depthVis[nearest] || 0);
-      cornerSea[key] = waterWeight > 0 ? seaSum / waterWeight : (seaVis[nearest] || 0);
-      cornerSlope[key] = waterWeight > 0 ? slopeSum / waterWeight : this._slopeAt(nearest);
+      cornerFlowX[key] = cornerHasWater ? flowSumX / waterWeight : 0;
+      cornerFlowZ[key] = cornerHasWater ? flowSumZ / waterWeight : 0;
+      cornerDepth[key] = cornerHasWater ? depthSum / waterWeight : (depthVis[nearest] || 0);
+      cornerSea[key] = cornerHasWater ? seaSum / waterWeight : (seaVis[nearest] || 0);
+      cornerSlope[key] = cornerHasWater ? slopeSum / waterWeight : this._slopeAt(nearest);
     }
 
     // Eckdeckung kräftig räumlich glätten, damit die Uferkontur über mehrere Zellen rundet (sonst
@@ -1863,6 +1926,7 @@ export class Renderer {
     // Wasser (hohe Dichte) wird NICHT geklemmt → seine konvexen Zacken runden voll aus.
     for (let k = 0; k < cover.length; k++) {
       if (coverPre[k] >= TH && wetFrac[k] < 0.34) cover[k] = Math.max(cover[k], TH);
+      if (cornerTerrainBlocked[k]) cover[k] = 0;
     }
 
     const corner = (cx, cy) => {
@@ -1879,15 +1943,20 @@ export class Renderer {
         slope: cornerSlope[key],
       };
     };
+    const terrainClipPoint = (p) => {
+      const groundY = this._terrainHeightSmoothAt(p.x, p.z) + WATER_SURFACE_CLEAR;
+      if (groundY <= p.y + WATER_EDGE_CLOSE_MAX_LIFT) return p;
+      return { ...p, v: 0, depth: 0, fx: 0, fz: 0 };
+    };
     const lerpPoint = (a, b) => {
       const span = b.v - a.v;
       const t = clamp01(Math.abs(span) > 1e-6 ? (WATER_EDGE_THRESHOLD - a.v) / span : 0.5);
       const waterSide = a.v >= WATER_EDGE_THRESHOLD ? a : b;
       const x = a.x + (b.x - a.x) * t;
       const z = a.z + (b.z - a.z) * t;
-      // Die Uferkante exakt auf das Gelände am Übergangspunkt setzen (leicht eingegraben statt
-      // schwebend), gedeckelt durch den Wasserpegel. Die glatte Terrainprobe vermeidet sichtbare
-      // Treppensprünge, wenn der Schnittpunkt knapp zwischen zwei Höhenzellen liegt.
+      // Die Uferkante exakt an das Gelände am Übergangspunkt setzen, gedeckelt durch den Wasserpegel.
+      // Die glatte Terrainprobe vermeidet sichtbare Treppensprünge, wenn der Schnittpunkt knapp
+      // zwischen zwei Höhenzellen liegt.
       const edgeGround = this._terrainHeightSmoothAt(x, z);
       return {
         x,
@@ -1903,8 +1972,9 @@ export class Renderer {
     };
     const clipWaterPoly = (poly) => {
       const out = [];
-      for (let k = 0; k < poly.length; k++) {
-        const a = poly[k], b = poly[(k + 1) % poly.length];
+      const pts = poly.map(terrainClipPoint);
+      for (let k = 0; k < pts.length; k++) {
+        const a = pts[k], b = pts[(k + 1) % pts.length];
         const ai = a.v >= WATER_EDGE_THRESHOLD, bi = b.v >= WATER_EDGE_THRESHOLD;
         if (ai && bi) out.push(b);
         else if (ai && !bi) out.push(lerpPoint(a, b));
@@ -1944,6 +2014,7 @@ export class Renderer {
     };
 
     const emitPoly = (poly) => {
+      poly = clipWaterPoly(poly);
       if (poly.length < 3) return;
       const base = positions.length / 3;
       for (const p of poly) pushWaterVertex(p);
@@ -1971,10 +2042,10 @@ export class Renderer {
         const rT = blendPt(c10, c11, vTop), rB = blendPt(c10, c11, vBot);
         for (let i = 0; i < SUB; i++) {
           const uL = i / SUB, uR = (i + 1) / SUB;
-          emitPoly(clipWaterPoly([
+          emitPoly([
             blendPt(lT, rT, uL), blendPt(lT, rT, uR),
             blendPt(lB, rB, uR), blendPt(lB, rB, uL),
-          ]));
+          ]);
         }
       }
     }
@@ -2060,11 +2131,18 @@ export class Renderer {
 
   _thinRunoffCanUseWaterSurface(idx, depth) {
     if (this._isPermanentWaterCell(idx)) return true;
-    if (depth >= WATER_SHOW_DEPTH) return true;
-    if (!this.height || depth < FLOOD_SURFACE_DEPTH) return false;
+    if (!this.height) return depth >= WATER_SHOW_DEPTH;
+    if (depth < FLOOD_SURFACE_DEPTH) return false;
     const slope = this._slopeAt(idx);
+    const drop = this._waterSurfaceDropAt(idx, depth);
+    if (slope >= STEEP_RUNOFF_SURFACE_MAX_SLOPE
+      && drop >= STEEP_RUNOFF_SURFACE_MAX_DROP
+      && depth < STEEP_RUNOFF_SURFACE_MIN_DEPTH) {
+      return false;
+    }
+    if (depth >= WATER_SHOW_DEPTH) return true;
     if (slope <= THIN_FILM_MAX_SLOPE) return true;
-    return this._waterSurfaceDropAt(idx, depth) >= THIN_FILM_FAST_FLOW;
+    return drop >= THIN_FILM_FAST_FLOW;
   }
 
   _waterSurfaceDropAt(idx, depth = this.waterDepth?.[idx] || 0, waterMap = this.waterDepth) {
@@ -2186,7 +2264,7 @@ export class Renderer {
   }
 
   _refreshWetGroundOverlay() {
-    if (!this.wetGroundMesh || !this.waterDepth || !this.height || !this._floodDummy) return;
+    if (!this.wetGroundMesh || !this.waterDepth || !this.height || !this._floodDummy) return false;
     if (this.wetGroundMesh.count !== 0) {
       this.wetGroundMesh.count = 0;
       this.wetGroundMesh.instanceMatrix.needsUpdate = true;
@@ -2228,6 +2306,7 @@ export class Renderer {
       wet.set(scratch);
       this._rebuildTerrainBaseColors();
     }
+    return changed;
   }
 
   _waterFlowAt(idx) {
@@ -2548,7 +2627,8 @@ export class Renderer {
     if (depthChanged || maskChanged || this._covAnimating) {
       this._rebuildWaterMesh();   // setzt _covAnimating neu (läuft, bis alle Deckungen ausgeglichen sind)
       this._updateRockWaterTint();
-      this._refreshWetGroundOverlay();
+      const wetChanged = this._refreshWetGroundOverlay();
+      if (!wetChanged && this._oilSet?.size) this._rebuildTerrainBaseColors();
       this._refreshFloodOverlay();
     }
   }
@@ -2765,15 +2845,12 @@ export class Renderer {
     return geo;
   }
 
-  // Brücken-Deckhöhen: Eine Brücke ist eine DURCHGEHENDE GERADE FLÄCHE, deren Höhe von ihren beiden
-  // Endpunkten (den Ufern) bestimmt wird. Je zusammenhängender Brücke werden die zwei am weitesten
-  // entfernten Zellen als Spannweiten-Enden gewählt; ihre Uferhöhe (rim) bildet Start-/Endhöhe. Jede
-  // Deckzelle erhält die LINEAR interpolierte Höhe entlang dieser Achse. Schneidet Wasser/Boden die
-  // Ebene, wird die ganze Gruppe angehoben statt lokal verbeult.
+  // Brücken-Deckhöhen: pro zusammenhängender Brücke ein horizontaler Spannkörper. Die zwei am weitesten
+  // entfernten Zellen bilden Start/Ende; die gesamte Spannweite liegt auf der höchsten nötigen Clearance,
+  // statt lokal dem Relief zu folgen.
   _bridgeDeckHeights(cells, offset) {
     const set = new Set(cells);
     const N8 = [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [1, -1], [-1, 1], [-1, -1]];
-    const N4 = [[1, 0], [-1, 0], [0, 1], [0, -1]];
     // Uferhöhe je Zelle: höchster Boden einer angrenzenden Nicht-Brückenzelle (= Ufer/Rand).
     const rim = new Map();
     for (const idx of cells) {
@@ -2787,7 +2864,7 @@ export class Renderer {
       }
       rim.set(idx, r);
     }
-    // Zusammenhangskomponenten für Fahrzeuge: nur Kantenkontakt zählt, keine diagonalen Treppen.
+    // Diagonale Linien gehören sichtbar zu derselben Brücke; die Wegprüfung bleibt weiterhin zellbasiert.
     const comp = new Map(); let cid = 0; const groups = [];
     for (const idx of cells) {
       if (comp.has(idx)) continue;
@@ -2795,8 +2872,10 @@ export class Renderer {
       while (stack.length) {
         const c = stack.pop(); group.push(c);
         const gx = c % this.mapW, gy = (c / this.mapW) | 0;
-        for (const [dx, dy] of N4) {
-          const ni = (gy + dy) * this.mapW + (gx + dx);
+        for (const [dx, dy] of N8) {
+          const nx = gx + dx, ny = gy + dy;
+          if (nx < 0 || ny < 0 || nx >= this.mapW || ny >= this.mapH) continue;
+          const ni = ny * this.mapW + nx;
           if (set.has(ni) && !comp.has(ni)) { comp.set(ni, cid); stack.push(ni); }
         }
       }
@@ -2821,21 +2900,17 @@ export class Renderer {
       const ha = endHeight(A), hb = endHeight(B);
       const vx = bx - ax, vy = by - ay; const vlen2 = vx * vx + vy * vy || 1;
       const rows = [];
-      let lift = 0;
+      let top = Math.max(ha + offset, hb + offset);
       for (const idx of group) {
         const gx = idx % this.mapW, gy = (idx / this.mapW) | 0;
         let t = ((gx - ax) * vx + (gy - ay) * vy) / vlen2;
         t = t < 0 ? 0 : t > 1 ? 1 : t;
         const x = gx * TILE, z = gy * TILE;
-        const y = ha + (hb - ha) * t + offset; // gerade Fläche zwischen den Endpunkten
-        const ground = this.heightAt(x, z);
-        const base = this._overlayY(x, z, offset, true);
-        rows.push({ idx, x, z, y, ground });
-        lift = Math.max(lift, base - y);
+        top = Math.max(top, this._overlayY(x, z, offset, true));
+        rows.push({ idx, x, z, t });
       }
-      lift = Math.max(0, lift);
       for (const row of rows) {
-        row.top = row.y + lift;
+        row.top = top;
         deck.set(row.idx, row);
       }
       if (A !== B) spans.push({ a: deck.get(A), b: deck.get(B) });
@@ -2923,6 +2998,139 @@ export class Renderer {
     return geo;
   }
 
+  _height0At(wx, wz) {
+    const src = this.height0 || this.height;
+    if (!src) return this.heightAt(wx, wz);
+    const gx = Math.max(0, Math.min(this.mapW - 1, Math.round(wx / TILE)));
+    const gy = Math.max(0, Math.min(this.mapH - 1, Math.round(wz / TILE)));
+    return src[gy * this.mapW + gx] * HEIGHT_SCALE;
+  }
+
+  _damRecordsFromLineCells(cells, size = 2) {
+    return (cells || []).map(([tx, ty]) => ({
+      tx, ty, size,
+      x: (tx + size / 2) * TILE,
+      z: (ty + size / 2) * TILE,
+    }));
+  }
+
+  _damRecordCells(r) {
+    const cells = [];
+    for (let y = 0; y < r.size; y++) for (let x = 0; x < r.size; x++) {
+      const gx = r.tx + x, gy = r.ty + y;
+      if (gx >= 0 && gy >= 0 && gx < this.mapW && gy < this.mapH) cells.push(gy * this.mapW + gx);
+    }
+    return cells;
+  }
+
+  _makeDamGeometry(records) {
+    if (!records?.length) return this._makeEmptyOverlayGeometry();
+    const positions = [], indices = [];
+    const addQuad = (a, b, c, d) => {
+      const n = positions.length / 3;
+      positions.push(a[0], a[1], a[2], b[0], b[1], b[2], c[0], c[1], c[2], d[0], d[1], d[2]);
+      indices.push(n, n + 1, n + 2, n, n + 2, n + 3);
+    };
+    const connected = (a, b) => {
+      const ax1 = a.tx, ax2 = a.tx + a.size - 1, ay1 = a.ty, ay2 = a.ty + a.size - 1;
+      const bx1 = b.tx, bx2 = b.tx + b.size - 1, by1 = b.ty, by2 = b.ty + b.size - 1;
+      return ax1 <= bx2 + 1 && bx1 <= ax2 + 1 && ay1 <= by2 + 1 && by1 <= ay2 + 1;
+    };
+    const seen = new Set();
+    const groups = [];
+    for (let i = 0; i < records.length; i++) {
+      if (seen.has(i)) continue;
+      const stack = [i], group = [];
+      seen.add(i);
+      while (stack.length) {
+        const cur = stack.pop();
+        group.push(records[cur]);
+        for (let j = 0; j < records.length; j++) {
+          if (!seen.has(j) && connected(records[cur], records[j])) { seen.add(j); stack.push(j); }
+        }
+      }
+      groups.push(group);
+    }
+    for (const group of groups) {
+      let A = group[0], B = group[0], bestD = -1;
+      for (let i = 0; i < group.length; i++) for (let j = i + 1; j < group.length; j++) {
+        const d = (group[i].x - group[j].x) ** 2 + (group[i].z - group[j].z) ** 2;
+        if (d > bestD) { bestD = d; A = group[i]; B = group[j]; }
+      }
+      let dx = B.x - A.x, dz = B.z - A.z;
+      let len = Math.hypot(dx, dz);
+      if (len <= 0.001) { dx = TILE; dz = 0; len = TILE; }
+      const ux = dx / len, uz = dz / len;
+      const px = -uz, pz = ux;
+      const endExt = (Math.max(A.size, B.size) * TILE) * 0.5 + DAM_END_OVERLAP;
+      const sx = A.x - ux * endExt, sz = A.z - uz * endExt;
+      const ex = B.x + ux * endExt, ez = B.z + uz * endExt;
+      const footprint = new Set();
+      for (const r of group) for (const idx of this._damRecordCells(r)) footprint.add(idx);
+      let baseY = Infinity, bankY = -Infinity;
+      for (const idx of footprint) {
+        const gx = idx % this.mapW, gy = (idx / this.mapW) | 0;
+        const x = gx * TILE, z = gy * TILE;
+        baseY = Math.min(baseY, this._height0At(x, z));
+        for (let yy = -1; yy <= 1; yy++) for (let xx = -1; xx <= 1; xx++) {
+          if (!xx && !yy) continue;
+          const nx = gx + xx, ny = gy + yy;
+          if (nx < 0 || ny < 0 || nx >= this.mapW || ny >= this.mapH) continue;
+          const ni = ny * this.mapW + nx;
+          if (footprint.has(ni)) continue;
+          bankY = Math.max(bankY, this._height0At(nx * TILE, ny * TILE));
+        }
+      }
+      if (!Number.isFinite(baseY)) baseY = this._height0At(A.x, A.z);
+      if (!Number.isFinite(bankY)) bankY = Math.max(this._height0At(A.x, A.z), this._height0At(B.x, B.z));
+      baseY -= DAM_BASE_SINK;
+      const topY = Math.max(bankY + DAM_TOP_ABOVE_BANK, baseY + DAM_MIN_VISIBLE_HEIGHT);
+      const baseHalf = DAM_BASE_WIDTH * 0.5;
+      const crestHalf = DAM_CREST_WIDTH * 0.5;
+      const sLB = [sx + px * baseHalf, baseY, sz + pz * baseHalf];
+      const eLB = [ex + px * baseHalf, baseY, ez + pz * baseHalf];
+      const eRB = [ex - px * baseHalf, baseY, ez - pz * baseHalf];
+      const sRB = [sx - px * baseHalf, baseY, sz - pz * baseHalf];
+      const sLT = [sx + px * crestHalf, topY, sz + pz * crestHalf];
+      const eLT = [ex + px * crestHalf, topY, ez + pz * crestHalf];
+      const eRT = [ex - px * crestHalf, topY, ez - pz * crestHalf];
+      const sRT = [sx - px * crestHalf, topY, sz - pz * crestHalf];
+      addQuad(sLT, eLT, eRT, sRT);
+      addQuad(sLB, eLB, eLT, sLT);
+      addQuad(sRT, eRT, eRB, sRB);
+      addQuad(sRB, eRB, eLB, sLB);
+      addQuad(sLB, sLT, sRT, sRB);
+      addQuad(eRB, eRT, eLT, eLB);
+    }
+    const geo = positions.length ? new THREE.BufferGeometry() : this._makeEmptyOverlayGeometry();
+    if (positions.length) {
+      geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+      geo.setIndex(indices);
+      geo.computeVertexNormals();
+      geo.computeBoundingSphere();
+    }
+    return geo;
+  }
+
+  updateDamOverlay(records) {
+    if (!this.damMesh || !this.height) return;
+    const list = (records || []).slice().sort((a, b) => a.ty - b.ty || a.tx - b.tx || a.size - b.size);
+    const sig = list.map(r => `${r.tx},${r.ty},${r.size}`).join(';') + this._fogSig();
+    if (sig === this._damSig) return;
+    this._damSig = sig;
+    this._replaceMeshGeometry(this.damMesh, this._makeDamGeometry(list));
+  }
+
+  updateDamConstructionOverlay(records) {
+    if (!this.damBuildMesh || !this.height) return;
+    const list = (records || []).slice().sort((a, b) => a.ty - b.ty || a.tx - b.tx || a.size - b.size);
+    const sig = list.map(r => `${r.tx},${r.ty},${r.size}`).join(';') + this._fogSig();
+    this.damBuildMesh.visible = list.length > 0;
+    if (sig === this._damBuildSig) return;
+    this._damBuildSig = sig;
+    this._replaceMeshGeometry(this.damBuildMesh, this._makeDamGeometry(list));
+  }
+
   // Straßennetz aus dem Snapshot: Indexliste → durchgehendes Fahrbahn-Ribbon knapp über dem Boden.
   updateRoads(list) {
     if (!this.roadMesh || !this.height || !list) return;
@@ -2993,6 +3201,16 @@ export class Renderer {
     const geo = this._makeBridgeGeometry(list, { width: BRIDGE_DECK_WIDTH, offset: BRIDGE_DECK_LIFT });
     this._bridgeDeckYByIdx = geo.userData.bridgeDeckYByIdx || new Map();
     this._replaceMeshGeometry(this.bridgeMesh, geo);
+  }
+
+  updateBridgeConstructionOverlay(cells) {
+    if (!this.bridgeBuildMesh || !this.height) return;
+    const list = Array.from(cells || []).sort((a, b) => a - b);
+    const sig = this._cellListSig(list) + this._fogSig();
+    this.bridgeBuildMesh.visible = list.length > 0;
+    if (sig === this._bridgeBuildSig) return;
+    this._bridgeBuildSig = sig;
+    this._replaceMeshGeometry(this.bridgeBuildMesh, this._makeBridgeGeometry(list, { width: BRIDGE_DECK_WIDTH, offset: BRIDGE_DECK_LIFT }));
   }
 
   // Schneedecke: Vertex-Farben Richtung Weiß mischen; geschmolzene Zellen kehren zur Basisfarbe zurück.
@@ -3067,7 +3285,6 @@ export class Renderer {
       if (q > 0) this._oilSet.add(idx); else this._oilSet.delete(idx);
     }
     this._rebuildTerrainBaseColors();
-    this._refreshOilOverlay();
   }
 
   _rebuildTerrainBaseColors() {
@@ -3139,64 +3356,6 @@ export class Renderer {
     }
   }
 
-  _buildOilOverlay() {
-    if (!this.scene || !this.height || !this.oilAmount) return;
-    if (this.oilMesh?.parent) this.oilMesh.parent.remove(this.oilMesh);
-    const cap = Math.max(1, this._oilSet?.size || 0);
-    const geo = new THREE.CircleGeometry(TILE * 0.96, 28);
-    geo.rotateX(-Math.PI / 2);
-    const mat = new THREE.MeshStandardMaterial({
-      color: 0x050403,
-      map: this.tex.oil,
-      transparent: true,
-      opacity: 0.98,
-      alphaTest: 0.02,
-      roughness: 0.14,
-      metalness: 0.72,
-      depthWrite: false,
-      polygonOffset: true,
-      polygonOffsetFactor: -2,
-      polygonOffsetUnits: -2,
-    });
-    const mesh = new THREE.InstancedMesh(geo, mat, cap);
-    mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
-    mesh.renderOrder = 3;
-    mesh.receiveShadow = false;
-    this.scene.add(mesh);
-    this.oilMesh = mesh;
-    this._oilOverlayCap = cap;
-    this._refreshOilOverlay();
-  }
-
-  _refreshOilOverlay() {
-    if (!this.oilMesh || !this.oilAmount || !this._oilSet || !this.height) return;
-    if (this._oilSet.size > (this._oilOverlayCap || 0)) {
-      this._buildOilOverlay();
-      return;
-    }
-    const d = this._oilDummy || this._floodDummy || new THREE.Object3D();
-    let k = 0;
-    for (const idx of this._oilSet) {
-      const q = this.oilAmount[idx] || 0;
-      if (q <= 0) continue;
-      const gx = idx % this.mapW, gy = (idx / this.mapW) | 0;
-      if (this._visibleWaterDepth?.(idx) > 0.012) continue;
-      const f = Math.max(0.08, Math.min(1, q / 255));
-      const sx = 0.70 + f * (1.25 + hash01(gx, gy, 401) * 0.45);
-      const sz = 0.62 + f * (1.12 + hash01(gx, gy, 411) * 0.42);
-      d.position.set(gx * TILE, this.heightAt(gx * TILE, gy * TILE) + 0.085, gy * TILE);
-      d.rotation.set(0, 0, 0);
-      d.scale.set(1, 1, 1);
-      this._alignToTerrain(d, idx);
-      d.rotateY(hash01(gx, gy, 421) * Math.PI * 2);
-      d.scale.set(sx, 1, sz);
-      d.updateMatrix();
-      this.oilMesh.setMatrixAt(k++, d.matrix);
-    }
-    this.oilMesh.count = k;
-    this.oilMesh.instanceMatrix.needsUpdate = true;
-  }
-
   // Terraforming aus dem Snapshot ins Geländemesh übernehmen: nur veränderte Vertices anheben/absenken.
   // delta = flaches Array [idx, h*1000, …]. Normalen werden nur bei tatsächlicher Änderung neu berechnet.
   updateTerraform(delta) {
@@ -3265,7 +3424,6 @@ export class Renderer {
     pos.needsUpdate = true;
     if (fowPos) { fowPos.needsUpdate = true; this.fowMesh.geometry.computeVertexNormals(); }
     this.terrainMesh.geometry.computeVertexNormals();
-    if (refreshWater && this.oilMesh) this._refreshOilOverlay();
     this._markShadowsDirty(false);
   }
 
@@ -3383,6 +3541,7 @@ export class Renderer {
     if (!this.fowEnabled) {
       this._fowCircles = [];
       this._fowHidden.clear();
+      this._fowFireReveal.clear();
       this._clearEnemyMist();
     }
   }
@@ -3393,14 +3552,17 @@ export class Renderer {
       if (this.fowMesh) this.fowMesh.visible = false;
       this._fowCircles = [];
       this._fowHidden.clear();
+      this._fowFireReveal.clear();
       this._clearEnemyMist();
       return;
     }
     this._fowSeat = seat;
+    this._pruneFireReveals();
     const night = (env?.d ?? 1) < 0.25;
     this._fowNight = night;
     this._fowWeatherFog = env?.w === 'fog' ? 1 : 0;
     const circles = [];
+    const fireCircles = [];
     for (const e of entities) {
       if (e.owner !== seat) continue;
       const def = e.etype === 'unit' ? this._fowData?.units?.[e.kind] : this._fowData?.buildings?.[e.kind];
@@ -3416,12 +3578,43 @@ export class Renderer {
       circles.push({ x: e.x, y: e.y, r });
     }
     circles.sort((a, b) => b.r - a.r);
-    this._fowCircles = circles.slice(0, 48);
+    for (const e of entities) {
+      if (!this._isFireRevealed(e, seat)) continue;
+      fireCircles.push({ x: e.x, y: e.y, r: FOW_FIRE_REVEAL_RADIUS, until: this._fireRevealUntil(e, seat) });
+    }
+    fireCircles.sort((a, b) => b.until - a.until);
+    const revealed = fireCircles.slice(0, FOW_FIRE_REVEAL_LIMIT).map(({ x, y, r }) => ({ x, y, r }));
+    this._fowCircles = circles.slice(0, Math.max(0, FOW_CIRCLE_LIMIT - revealed.length)).concat(revealed);
     this._updateFogOverlay(night);
+  }
+
+  _fireRevealKey(seat, id) {
+    return `${seat}:${id}`;
+  }
+
+  _fireRevealUntil(e, seat) {
+    return this._fowFireReveal.get(this._fireRevealKey(seat, e.id)) || 0;
+  }
+
+  _isFireRevealed(e, seat) {
+    if (!this.fowEnabled || seat == null || !e || e.etype !== 'unit' || e.owner === seat || e.id == null) return false;
+    return this._fireRevealUntil(e, seat) > this.time;
+  }
+
+  _pruneFireReveals() {
+    for (const [key, until] of this._fowFireReveal) {
+      if (until <= this.time) this._fowFireReveal.delete(key);
+    }
+  }
+
+  _rememberFireReveal(ev, seat) {
+    if (!this.fowEnabled || seat == null || ev.etype !== 'unit' || ev.owner === seat || ev.id == null) return;
+    this._fowFireReveal.set(this._fireRevealKey(seat, ev.id), this.time + FOW_FIRE_REVEAL_TIME);
   }
 
   isHiddenByFog(e, seat) {
     if (!this.fowEnabled || seat == null || e.owner === seat) return false;
+    if (this._isFireRevealed(e, seat)) return false;
     return !this._inOwnSight(e.x, e.y);
   }
 
@@ -3450,6 +3643,7 @@ export class Renderer {
 
   isHiddenForest(e, seat) {
     if (seat == null || e.owner === seat || e.etype !== 'unit') return false;
+    if (this._isFireRevealed(e, seat)) return false;
     if (!INFANTRY_KINDS.has(e.kind)) return false;
     if (this._coverAt(e.x, e.y) < 0.2) return false;     // nicht im Wald → keine Tarnung
     const ents = this._lastEntities || [];
@@ -3537,6 +3731,9 @@ export class Renderer {
     // durchgehende Leitung mit Kurven/T-Stücken/Kreuzungen aufgebaut werden.
     this._pipeAnchors = [];
     const bridgeCells = new Set(this._baseBridgeCells || []);
+    const bridgeBuildCells = new Set();
+    const damRecords = [];
+    const damBuildRecords = [];
     const roadBuildCells = new Set();
     // Im Nebel: fremde Pipelines/Brücken nur sichtbar, wenn im eigenen Sichtfeld (eigene immer).
     const infraVisible = (e) => !this.fowEnabled || e.owner === seat || this._inOwnSight(e.x, e.y);
@@ -3546,13 +3743,25 @@ export class Renderer {
         const tx = e.x / TILE - 0.5, ty = e.y / TILE - 0.5;
         this._pipeAnchors.push({ id: e.id, owner: e.owner, kind: e.kind, x: e.x, z: e.y, tx, ty, size: e.size || 1, pipeResource: e.pipeResource || null });
       }
-      if (e.kind === 'bridge' && (e.buildProgress ?? 1) >= 1 && infraVisible(e)) {
+      if (e.kind === 'bridge' && infraVisible(e)) {
         const tx = Math.round(e.x / TILE - 0.5), ty = Math.round(e.y / TILE - 0.5);
         const size = Math.max(1, e.size || 1);
         for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) {
           const gx = tx + x, gy = ty + y;
-          if (gx >= 0 && gy >= 0 && gx < this.mapW && gy < this.mapH) bridgeCells.add(gy * this.mapW + gx);
+          if (gx < 0 || gy < 0 || gx >= this.mapW || gy >= this.mapH) continue;
+          if ((e.buildProgress ?? 1) >= 1) bridgeCells.add(gy * this.mapW + gx);
+          else bridgeBuildCells.add(gy * this.mapW + gx);
         }
+      }
+      if (e.kind === 'dam' && infraVisible(e)) {
+        const size = Math.max(1, e.size || 1);
+        const rec = {
+          tx: Math.round(e.x / TILE - size / 2),
+          ty: Math.round(e.y / TILE - size / 2),
+          size, x: e.x, z: e.y,
+        };
+        if ((e.buildProgress ?? 1) >= 1) damRecords.push(rec);
+        else damBuildRecords.push(rec);
       }
       if (e.kind === 'road' && (e.buildProgress ?? 1) < 1 && infraVisible(e)) {
         const tx = Math.round(e.x / TILE - 0.5), ty = Math.round(e.y / TILE - 0.5);
@@ -3565,13 +3774,19 @@ export class Renderer {
     }
     this.updatePipelineOverlay();
     this.updateBridgeOverlay(null, bridgeCells);
+    this.updateBridgeConstructionOverlay(bridgeBuildCells);
+    this.updateDamOverlay(damRecords);
+    this.updateDamConstructionOverlay(damBuildRecords);
     this.updateRoadConstructionOverlay(roadBuildCells);
     const seen = new Set();
     const tunnelGhostSeen = new Set();
     const mistBuckets = new Map();
     const washouts = new Map();
+    const deaths = new Map();
     for (const ev of events || []) if (ev.type === 'washout' && ev.id != null) washouts.set(ev.id, ev);
+    for (const ev of events || []) if (ev.type === 'death' && ev.id != null) deaths.set(ev.id, ev);
     this._handledWashouts = new Set();
+    this._handledDeaths = new Set();
     this._lampSpots.length = 0;
     let movedShadowCaster = false;
     for (const e of entities) {
@@ -3826,10 +4041,10 @@ export class Renderer {
         g.userData.bar.visible = showHp;
         if (g.userData.barBack) g.userData.barBack.visible = showHp;
       }
-      // Lineare Infrastruktur im Bau bleibt ein flaches blaues Wireframe auf dem Boden.
+      // Lineare Boden-Infrastruktur im Bau bleibt ein flaches blaues Wireframe.
       const groundWireBuild = e.etype === 'building' && g.userData.groundBuildWire && e.buildProgress < 1;
       if (g.userData.build && e.etype === 'building') {
-        g.userData.build.visible = e.kind !== 'road' && e.buildProgress < 1;
+        g.userData.build.visible = e.kind !== 'road' && e.kind !== 'bridge' && e.kind !== 'dam' && e.buildProgress < 1;
         if (g.userData.groundBuildWire && g.userData.build.material) {
           g.userData.build.material.opacity = 0.62 + 0.24 * Math.sin(this.time * 5 + e.id) ** 2;
         }
@@ -3850,7 +4065,7 @@ export class Renderer {
           if (g.userData.build) g.userData.build.visible = false;
         } else if (groundWireBuild) {
           g.userData.body.visible = false;
-        } else if (e.kind === 'bridge') {
+        } else if (e.kind === 'bridge' || e.kind === 'dam') {
           g.userData.body.visible = false;
           if (g.userData.build) g.userData.build.visible = false;
         } else if (p < 1) {
@@ -3868,7 +4083,12 @@ export class Renderer {
           }
         } else {
           g.userData.body.visible = true;
-          g.userData.body.scale.set(1, 1, 1);
+          if (e.kind === 'earth_pile' || e.kind === 'ore_pile') {
+            const s = this._pileBodyScale(e);
+            g.userData.body.scale.set(s.x, s.y, s.z);
+          } else {
+            g.userData.body.scale.set(1, 1, 1);
+          }
           if (g.userData.build) g.userData.build.scale.set(1, 1, 1);
         }
       }
@@ -3889,13 +4109,17 @@ export class Renderer {
     if (this._tunnelGhosts) for (const [id, m] of this._tunnelGhosts) {
       if (!tunnelGhostSeen.has(id)) { m.visible = false; if (!seen.has(id)) { this.scene.remove(m); this._tunnelGhosts.delete(id); } }
     }
-    // Entfernte Entities: normale Verluste explodieren, Wasserverluste sinken/treiben weg.
+    // Entfernte Entities: Wasserverluste treiben weg, Infanterie fällt, Fahrzeuge bleiben kurz als Wrack liegen.
     for (const [id, g] of this.meshes) {
       if (!seen.has(id)) {
         const wash = washouts.get(id);
+        const death = deaths.get(id);
         if (wash) {
           this.spawnWashout(wash, g);
           this._handledWashouts.add(id);
+        } else if (death) {
+          this.spawnDeathEffect(death, g);
+          this._handledDeaths.add(id);
         } else {
           this.spawnExplosion(g.position.x, g.position.y, g.position.z, g.userData.big ? 3 : 1.2);
           this.scene.remove(g);
@@ -4123,7 +4347,7 @@ export class Renderer {
     return g;
   }
 
-  updateConstructionJobs(jobs) {
+  updateConstructionJobs(jobs, selectedJob = null) {
     const live = new Set();
     const terraPreview = [];
     for (const j of jobs || []) {
@@ -4139,6 +4363,12 @@ export class Renderer {
         }
         const pxw = (px + 0.5) * TILE, pzw = (py + 0.5) * TILE;
         pile.position.set(pxw, this.heightAt(pxw, pzw) + 0.35, pzw);
+        const selected = id === selectedJob;
+        pile.scale.setScalar(selected ? 1.28 : 1);
+        if (pile.material) {
+          pile.material.color.setHex(selected ? 0xffd35a : 0x3da9ff);
+          pile.material.opacity = selected ? 0.55 : 0.3;
+        }
         pile.visible = true;
       }
     }
@@ -4158,6 +4388,16 @@ export class Renderer {
     const m = new THREE.Mesh(geo, mat);
     m.renderOrder = 6;
     return m;
+  }
+
+  _pileBodyScale(e) {
+    const amount = Math.max(0, e.pile || 0);
+    const f = Math.min(1.9, Math.sqrt(amount / (e.kind === 'ore_pile' ? 80 : 24)));
+    return {
+      x: 0.55 + f * 0.62,
+      y: 0.42 + f * 0.86,
+      z: 0.55 + f * 0.62,
+    };
   }
 
   _makeCargoLoad(kind) {
@@ -5497,6 +5737,191 @@ export class Renderer {
     }
   }
 
+  spawnDeathEffect(ev, sourceGroup = null) {
+    if (ev.etype === 'building') {
+      const sc = 3;
+      this.spawnExplosion(ev.x, this.heightAt(ev.x, ev.y), ev.y, sc);
+      if (sourceGroup) this.scene.remove(sourceGroup);
+      return 'explosion';
+    }
+    if (ev.etype !== 'unit') return 'none';
+    if (ev.category === 'infantry' || INFANTRY_KINDS.has(ev.kind)) {
+      if (this._waterInfoAt(ev.x, ev.y).depth > 0.018) {
+        this.spawnInfantryWashout(ev, sourceGroup);
+        return 'washout';
+      }
+      this.spawnInfantryFall(ev, sourceGroup);
+      return 'infantry';
+    }
+    this.spawnVehicleWreck(ev, sourceGroup);
+    return 'wreck';
+  }
+
+  spawnInfantryFall(ev, sourceGroup = null) {
+    const g = sourceGroup || this._makeFallbackInfantryCorpse(ev);
+    if (!sourceGroup) this.scene.add(g);
+    this._hideStatusOverlays(g);
+    this._prepareFadingGroup(g, 0.72, 0x302a24, 0.22);
+    const groundY = this.heightAt(ev.x, ev.y) + 0.035;
+    g.visible = true;
+    g.position.set(ev.x, groundY, ev.y);
+    if (!sourceGroup) g.rotation.y = -(ev.facing || 0) + Math.PI / 2;
+    const body = g.userData.body || g;
+    const side = (hash01(ev.id || ev.x, ev.y || 0, 913) < 0.5 ? -1 : 1);
+    this._addEffect({
+      mesh: g,
+      life: 0,
+      max: 8.5,
+      opacity: 0.72,
+      fadeGroup: true,
+      fadeStart: 0.50,
+      fallBody: body,
+      fallStartX: body.rotation.x,
+      fallTargetX: body.rotation.x + Math.PI / 2,
+      fallStartZ: body.rotation.z,
+      fallTargetZ: body.rotation.z + side * (0.18 + hash01(ev.id || 0, ev.x || 0, 914) * 0.28),
+      fallDuration: 0.34,
+    });
+  }
+
+  spawnInfantryWashout(ev, sourceGroup = null) {
+    const g = sourceGroup || this._makeFallbackInfantryCorpse(ev);
+    if (!sourceGroup) this.scene.add(g);
+    this._hideStatusOverlays(g);
+    this._prepareFadingGroup(g, 0.68, 0x263842, 0.36);
+    const x = ev.x, z = ev.y;
+    const info = this._waterInfoAt(x, z);
+    const surface = Math.max(info.surface, this.heightAt(x, z)) + 0.035;
+    let vx = ev.vx || 0, vz = ev.vy || 0;
+    let mag = Math.hypot(vx, vz);
+    if (mag < 0.05) {
+      const downhill = this._downhillVectorAt(x, z);
+      vx = downhill.x * 0.7;
+      vz = downhill.z * 0.7;
+      mag = Math.hypot(vx, vz);
+    }
+    const inv = 1 / Math.max(0.001, mag);
+    const dx = vx * inv, dz = vz * inv;
+    g.visible = true;
+    g.position.set(x, surface, z);
+    if (!sourceGroup) g.rotation.y = -(ev.facing || 0) + Math.PI / 2;
+    const body = g.userData.body || g;
+    const side = (hash01(ev.id || x, z || 0, 917) < 0.5 ? -1 : 1);
+    this._addEffect({
+      mesh: g,
+      life: 0,
+      max: 4.8,
+      opacity: 0.68,
+      fadeGroup: true,
+      fadeStart: 0.62,
+      fallBody: body,
+      fallStartX: body.rotation.x,
+      fallTargetX: body.rotation.x + Math.PI / 2,
+      fallStartZ: body.rotation.z,
+      fallTargetZ: body.rotation.z + side * 0.34,
+      fallDuration: 0.24,
+      vx: dx * (1.05 + Math.min(0.9, mag * 0.45)),
+      vz: dz * (1.05 + Math.min(0.9, mag * 0.45)),
+      vy: -0.035,
+      sinkPart: true,
+      floatDepth: 0.014,
+      spin: 0.18,
+    });
+  }
+
+  spawnVehicleWreck(ev, sourceGroup = null) {
+    const g = sourceGroup || this._makeFallbackVehicleWreck(ev);
+    if (!sourceGroup) this.scene.add(g);
+    this._hideStatusOverlays(g);
+    this._prepareFadingGroup(g, 0.84, 0x181716, 0.58);
+    const groundY = this.heightAt(ev.x, ev.y) + 0.06;
+    g.visible = true;
+    g.position.set(ev.x, groundY, ev.y);
+    if (!sourceGroup) g.rotation.y = -(ev.facing || 0) + Math.PI / 2;
+    const body = g.userData.body || g;
+    body.rotation.x += 0.04 + hash01(ev.id || 0, ev.x || 0, 921) * 0.08;
+    body.rotation.z += (hash01(ev.id || 0, ev.y || 0, 922) < 0.5 ? -1 : 1) * (0.12 + hash01(ev.x || 0, ev.y || 0, 923) * 0.12);
+    this._addEffect({
+      mesh: g,
+      life: 0,
+      max: 16,
+      opacity: 0.84,
+      fadeGroup: true,
+      fadeStart: 0.56,
+      wreck: true,
+      smokeCd: 0,
+    });
+  }
+
+  _hideStatusOverlays(g) {
+    if (!g) return;
+    for (const key of ['ring', 'bar', 'barBack']) if (g.userData?.[key]) g.userData[key].visible = false;
+    if (g.userData?.chevrons) for (const ch of g.userData.chevrons) ch.visible = false;
+    if (g.userData?.vehicleLight) g.userData.vehicleLight = false;
+    if (g.userData?.cargoMesh) g.userData.cargoMesh.visible = false;
+    if (g.userData?.cargoMeshes) for (const m of Object.values(g.userData.cargoMeshes)) m.visible = false;
+  }
+
+  _prepareFadingGroup(g, opacity = 0.8, tint = 0x222222, tintAmt = 0.4) {
+    const tintColor = new THREE.Color(tint);
+    g.traverse((m) => {
+      if (!m.isMesh || !m.material) return;
+      const mats = Array.isArray(m.material) ? m.material : [m.material];
+      const clones = mats.map((mat) => {
+        const c = mat.clone();
+        c.transparent = true;
+        c.depthWrite = false;
+        c.opacity = Math.min(opacity, c.opacity ?? opacity);
+        if (c.color) c.color.lerp(tintColor, tintAmt);
+        return c;
+      });
+      m.material = Array.isArray(m.material) ? clones : clones[0];
+      m.castShadow = true;
+      m.receiveShadow = true;
+    });
+  }
+
+  _setGroupOpacity(g, opacity) {
+    g.traverse((m) => {
+      if (!m.isMesh || !m.material) return;
+      const mats = Array.isArray(m.material) ? m.material : [m.material];
+      for (const mat of mats) {
+        mat.transparent = true;
+        mat.opacity = Math.max(0, opacity);
+      }
+    });
+  }
+
+  _makeFallbackInfantryCorpse(ev) {
+    const g = new THREE.Group();
+    const body = new THREE.Group();
+    const cloth = this.unitMat('#7f6f52');
+    const dark = this.envMats.dark;
+    body.add(boxMesh(0.48, 0.72, 0.34, cloth, 0, 0.95, 0));
+    body.add(boxMesh(0.28, 0.24, 0.28, dark, 0, 1.45, 0));
+    body.add(boxMesh(0.13, 0.58, 0.16, dark, -0.13, 0.32, 0));
+    body.add(boxMesh(0.13, 0.58, 0.16, dark, 0.13, 0.32, 0));
+    body.add(boxMesh(0.07, 0.07, 0.85, this.envMats.metal, 0.28, 1.06, 0.22));
+    g.add(body);
+    g.userData.body = body;
+    return g;
+  }
+
+  _makeFallbackVehicleWreck(ev) {
+    const g = new THREE.Group();
+    const body = new THREE.Group();
+    const dark = this.envMats.dark;
+    const metal = this.envMats.metal;
+    const big = ev.domain === 'air' ? 1.15 : ev.domain === 'water' ? 1.35 : 1;
+    body.add(boxMesh(1.55 * big, 0.48 * big, 2.25 * big, dark, 0, 0.42 * big, 0));
+    body.add(boxMesh(0.92 * big, 0.36 * big, 0.95 * big, metal, -0.18 * big, 0.84 * big, -0.18 * big));
+    body.add(boxMesh(0.22 * big, 0.18 * big, 1.35 * big, dark, 0.46 * big, 0.38 * big, 0.04 * big));
+    body.add(boxMesh(0.22 * big, 0.18 * big, 1.18 * big, dark, -0.58 * big, 0.34 * big, -0.08 * big));
+    g.add(body);
+    g.userData.body = body;
+    return g;
+  }
+
   spawnWashout(ev, sourceGroup = null) {
     const x = ev.x, z = ev.y;
     const info = this._waterInfoAt(x, z);
@@ -5510,9 +5935,12 @@ export class Renderer {
     const inv = 1 / Math.max(0.001, Math.hypot(vx, vz));
     const dx = vx * inv, dz = vz * inv;
     const big = ev.etype === 'building';
+    const infantry = ev.etype === 'unit' && (ev.category === 'infantry' || INFANTRY_KINDS.has(ev.kind));
     const scale = big ? Math.max(1.6, (ev.size || 2) * 0.9) : 0.9;
 
-    if (sourceGroup) {
+    if (infantry) {
+      this.spawnInfantryWashout(ev, sourceGroup);
+    } else if (sourceGroup) {
       sourceGroup.traverse((m) => {
         if (!m.material) return;
         m.material = m.material.clone();
@@ -5533,7 +5961,7 @@ export class Renderer {
       });
     }
 
-    const foam = big ? 16 : 9;
+    const foam = big ? 16 : infantry ? 6 : 9;
     for (let i = 0; i < foam && this._canSpawnEffect(); i++) {
       const side = (Math.random() - 0.5) * scale * 1.6;
       this._sprite(i % 3 ? 0xd8f4ff : 0x8fc7d8,
@@ -5544,6 +5972,7 @@ export class Renderer {
         0.8 + Math.random() * 0.7,
         { additive: true, grow: 1.1, vx: dx * (2.0 + Math.random() * 1.8), vz: dz * (2.0 + Math.random() * 1.8), vy: 0.08, opacity: 0.66 });
     }
+    if (infantry) return;
 
     const chunks = big ? 12 : 5;
     for (let i = 0; i < chunks && this._canSpawnEffect(); i++) {
@@ -5889,14 +6318,19 @@ export class Renderer {
 
   // Bau-Linienvorschau (Wall/Graben/Straße/Leitung/Damm per Start→Endpunkt ziehen).
   showBuildLine(cells, kind = null) {
-    if (kind === 'road') {
+    if (kind === 'road' || kind === 'bridge' || kind === 'dam') {
       if (this.lineGhost) { this.lineGhost.count = 0; this.lineGhost.instanceMatrix.needsUpdate = true; }
       const mesh = this._ensureRoadLineGhost();
       const indices = this._lineCellsToIndices(cells);
-      const sig = this._cellListSig(indices);
+      const sig = kind + ':' + this._cellListSig(indices);
       if (sig !== this._roadLineSig) {
         this._roadLineSig = sig;
-        this._replaceMeshGeometry(mesh, this._makeRibbonGeometry(indices, { width: TILE * 1.5, offset: 0.18 }));
+        const geo = kind === 'bridge'
+          ? this._makeBridgeGeometry(indices, { width: BRIDGE_DECK_WIDTH, offset: BRIDGE_DECK_LIFT })
+          : kind === 'dam'
+            ? this._makeDamGeometry(this._damRecordsFromLineCells(cells, 2))
+            : this._makeRibbonGeometry(indices, { width: TILE * 1.5, offset: 0.18 });
+        this._replaceMeshGeometry(mesh, geo);
       }
       mesh.visible = indices.length > 0;
       return;
@@ -6230,7 +6664,7 @@ export class Renderer {
           const sc = 1 + splash * 0.6;
           this.spawnExplosion(ev.x, this.heightAt(ev.x, ev.y), ev.y, sc);
           // Große Waffen (ordentlicher Splash) hinterlassen einen bleibenden Krater am Boden.
-          if (splash >= 1.4 && !this._isSeaWorldPoint(ev.x, ev.y)) this.spawnCrater(ev.x, ev.y, 0.7 + splash * 0.35);
+          if (!ev.noCrater && splash >= 1.4 && !this._isSeaWorldPoint(ev.x, ev.y)) this.spawnCrater(ev.x, ev.y, 0.7 + splash * 0.35);
           if (audio) audio.explosion(sc, vol);
         } else {
           // Direkter Treffer ohne Sprengwirkung: scharfer Funken-/Staubeinschlag statt Rauchpilz.
@@ -6238,15 +6672,19 @@ export class Renderer {
           this.spawnImpact(ev.x, this.heightAt(ev.x, ev.y), ev.y, 1);
         }
       } else if (ev.type === 'fire') {
+        this._rememberFireReveal(ev, seat);
         this.spawnTracer(ev.x, this.heightAt(ev.x, ev.y), ev.y, ev.tx, this.heightAt(ev.tx, ev.ty), ev.ty, ev.kind);
         this.spawnShotParticles(ev.x, ev.y, ev.tx, ev.ty, ev.kind);
         if (audio) audio.fire(ev.kind, vol);
       } else if (ev.type === 'rain_cloud') {
         this.spawnRainCloud(ev.x, ev.y, ev.r || 13, ev.duration || 22);
       } else if (ev.type === 'death') {
-        const sc = ev.etype === 'building' ? 3 : 1.2;
-        this.spawnExplosion(ev.x, this.heightAt(ev.x, ev.y), ev.y, sc);
-        if (audio) audio.explosion(sc, vol);
+        if (this._handledDeaths?.has(ev.id)) {
+          if (audio && ev.etype === 'building') audio.explosion(3, vol);
+          continue;
+        }
+        const effect = this.spawnDeathEffect(ev);
+        if (audio && effect === 'explosion') audio.explosion(3, vol);
       } else if (ev.type === 'washout') {
         if (!this._handledWashouts?.has(ev.id)) this.spawnWashout(ev);
       } else if (ev.type === 'build') {
@@ -6287,7 +6725,7 @@ export class Renderer {
         if (audio) audio.rumble();
       } else if (ev.type === 'landslide') {
         this.spawnLandslide(ev.path || [ev.x, ev.y], ev.branches || null);
-        if (audio && vol > 0.05) audio.rocks(vol);
+        if (audio && vol > 0.05) audio.landslide(vol);
       } else if (ev.type === 'mine') {
         this.spawnMining(ev.x, ev.y);
         if (audio && vol > 0.05) audio.excavate(vol);
@@ -6333,6 +6771,23 @@ export class Renderer {
       const effectVisible = f.alwaysVisible || visible;
       if (f.mesh.visible !== effectVisible) f.mesh.visible = effectVisible;
       const t = f.life / f.max;
+      if (f.fallBody) {
+        const p = smoothstep(0, 1, Math.min(1, f.life / (f.fallDuration || 0.35)));
+        f.fallBody.rotation.x = f.fallStartX + (f.fallTargetX - f.fallStartX) * p;
+        f.fallBody.rotation.z = f.fallStartZ + (f.fallTargetZ - f.fallStartZ) * p;
+      }
+      if (f.wreck && this._particlesVisible()) {
+        f.smokeCd = (f.smokeCd || 0) - dt;
+        if (f.smokeCd <= 0 && t < 0.72 && this._canSpawnEffect(1)) {
+          f.smokeCd = 0.55 + Math.random() * 0.45;
+          this._sprite(0x2c2925, f.mesh.position.x + (Math.random() - 0.5) * 0.9,
+            f.mesh.position.y + 0.9 + Math.random() * 0.5,
+            f.mesh.position.z + (Math.random() - 0.5) * 0.9,
+            0.75 + Math.random() * 0.45, 1.4 + Math.random() * 0.8,
+            { grow: 1.8, vy: 0.85, vx: (Math.random() - 0.5) * 0.16, vz: (Math.random() - 0.5) * 0.16, opacity: 0.32 });
+        }
+        if (t > 0.72) f.mesh.position.y -= dt * 0.035;
+      }
       if (f.sink) {
         f.mesh.position.x += (f.vx || 0) * dt;
         f.mesh.position.y += (f.vy || 0) * dt;
@@ -6433,7 +6888,11 @@ export class Renderer {
         if (f.grow) { const s = 1 + t * f.grow; f.mesh.scale.set(s, s, s); }
         if (f.sinkPart) f.mesh.position.y -= (blockedByShore ? 0.38 : 0.16) * dt;
       }
-      if (!f.noFade && !f.sink && f.mesh.material) {
+      if (!f.noFade && !f.sink && f.fadeGroup) {
+        const start = f.fadeStart ?? 0;
+        const fade = t <= start ? 1 : 1 - (t - start) / Math.max(0.001, 1 - start);
+        this._setGroupOpacity(f.mesh, (f.opacity ?? 0.9) * Math.max(0, fade));
+      } else if (!f.noFade && !f.sink && f.mesh.material) {
         // fadeIn (Anteil der Lebenszeit) → das Partikel blendet langsam EIN statt plötzlich aufzutauchen,
         // danach normales Ausblenden über (1 - t). Ohne fadeIn unverändert (sofort voll sichtbar).
         const fin = f.fadeIn > 0 ? Math.min(1, t / f.fadeIn) : 1;
@@ -6466,11 +6925,12 @@ export class Renderer {
       const idx = gy * this.mapW + gx;
       const depth = this.waterDepth[idx] || 0;
       const slope = this._slopeAt(idx);
+      const surfaceRunoff = this._thinRunoffCanUseWaterSurface(idx, depth);
       const steepThinRunoff = depth >= FLOOD_RUNOFF_DEPTH
-        && depth < WATER_SHOW_DEPTH
+        && depth < STEEP_RUNOFF_SURFACE_MIN_DEPTH
         && slope >= STEEP_RUNOFF_PARTICLE_SLOPE
-        && !this._thinRunoffCanUseWaterSurface(idx, depth);
-      // Dünner Abfluss auf steilen Hängen bekommt Partikel statt Wasserhaut. Flache oder schnelle
+        && !surfaceRunoff;
+      // Flacher Abfluss auf steilen Hängen bekommt Partikel statt Wasserhaut. Flachere oder tiefere
       // Filme bleiben Mesh-Wasser; dort sind die Shader-Ripples aussagekräftiger.
       if (depth < (steepThinRunoff ? FLOOD_RUNOFF_DEPTH : 0.020)) continue;
       const flow = this._waterFlowAt(idx);

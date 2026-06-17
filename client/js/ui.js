@@ -192,6 +192,12 @@ function iconSvg(name, cls = '') {
   }
 }
 
+function setHtmlOnce(el, key, html) {
+  if (!el || el.dataset.uiKey === key) return;
+  el.innerHTML = html;
+  el.dataset.uiKey = key;
+}
+
 function resIcon(resource, cls = 'ricon') {
   const color = RES_COLOR[resource] || '#eaf6ff';
   return iconSvg(RES_ICONS[resource] || 'ore', cls).replace('<svg ', `<svg style="color:${color}" `);
@@ -323,8 +329,8 @@ function techStatRows(type, def, weapon) {
 }
 
 export class UI {
-  constructor(net, input, data) {
-    this.net = net; this.input = input; this.data = data;
+  constructor(net, input, data, renderer = null) {
+    this.net = net; this.input = input; this.data = data; this.renderer = renderer;
     this.techSelected = { type: 'building', kind: 'hq' };
     this.techTreeOpen = false;
     try { this.helpOpen = localStorage.getItem('if_help_open') === '1'; } catch { this.helpOpen = false; }
@@ -338,6 +344,7 @@ export class UI {
     this.minimap = document.getElementById('minimap');
     this.mctx = this.minimap.getContext('2d');
     this._releasePending = false;
+    this._topSig = '';
     input.onSelectionChange = () => this.renderSelection();
     input.onBuildPlaced = () => this.renderBuildbar();
   }
@@ -804,7 +811,7 @@ export class UI {
     bar.style.display = 'flex';
     const tab = bar.querySelector('.spec-tab');
     if (tab) {
-      tab.innerHTML = `${iconSvg('eye', 'tinyicon')}<span>Zuschauer</span>`;
+      setHtmlOnce(tab, 'spectator-tab', `${iconSvg('eye', 'tinyicon')}<span>Zuschauer</span>`);
       tab.setAttribute('aria-selected', 'true');
     }
     const controls = this.net.controls || {};
@@ -816,12 +823,10 @@ export class UI {
       for (const btn of eventWrap.querySelectorAll('[data-spectatorevent]')) {
         const [icon, label] = SPECTATOR_EVENT_META[btn.dataset.spectatorevent] || ['storm', btn.textContent || 'Event'];
         btn.classList.add('spec-iconbtn');
-        btn.innerHTML = `${iconSvg(icon, 'tinyicon')}<span>${label}</span>`;
-      }
-      if (!this._spectatorEventBound) {
-        this._spectatorEventBound = true;
-        for (const btn of eventWrap.querySelectorAll('[data-spectatorevent]')) {
-          btn.onclick = () => this.net.setSpectatorControls({ event: btn.dataset.spectatorevent });
+        setHtmlOnce(btn, `event:${btn.dataset.spectatorevent}:${label}`, `${iconSvg(icon, 'tinyicon')}<span>${label}</span>`);
+        if (!btn.dataset.boundSpectatorEvent) {
+          btn.dataset.boundSpectatorEvent = '1';
+          btn.addEventListener('click', () => this.setSpectatorControls({ event: btn.dataset.spectatorevent }));
         }
       }
     }
@@ -830,13 +835,17 @@ export class UI {
       speedBtn.hidden = false;
       speedBtn.disabled = false;
       speedBtn.classList.add('spec-iconbtn');
-      speedBtn.innerHTML = `${iconSvg('speed', 'tinyicon')}<span>x${speed}</span>`;
+      setHtmlOnce(speedBtn, `speed:${speed}`, `${iconSvg('speed', 'tinyicon')}<span>x${speed}</span>`);
       speedBtn.title = 'Simulationsgeschwindigkeit setzen';
-      speedBtn.onclick = () => {
-        const idx = SPECTATOR_SPEEDS.indexOf(speed);
-        const next = SPECTATOR_SPEEDS[(idx + 1) % SPECTATOR_SPEEDS.length];
-        this.net.setSpectatorControls({ speed: next });
-      };
+      if (!speedBtn.dataset.boundSpectatorSpeed) {
+        speedBtn.dataset.boundSpectatorSpeed = '1';
+        speedBtn.addEventListener('click', () => {
+          const cur = SPECTATOR_SPEEDS.includes(this.net.controls?.speed) ? this.net.controls.speed : 1;
+          const idx = SPECTATOR_SPEEDS.indexOf(cur);
+          const next = SPECTATOR_SPEEDS[(idx + 1) % SPECTATOR_SPEEDS.length];
+          this.setSpectatorControls({ speed: next });
+        });
+      }
     }
     if (timeWrap) {
       const mode = SPECTATOR_TIME_MODES.includes(controls.timeMode) ? controls.timeMode : 'auto';
@@ -846,12 +855,31 @@ export class UI {
         const label = SPECTATOR_TIME_LABEL[btnMode] || btnMode;
         btn.disabled = false;
         btn.classList.add('spec-iconbtn');
-        btn.innerHTML = `${iconSvg(SPECTATOR_TIME_ICON[btnMode] || 'clock', 'tinyicon')}<span>${label}</span>`;
+        setHtmlOnce(btn, `time:${btnMode}:${label}`, `${iconSvg(SPECTATOR_TIME_ICON[btnMode] || 'clock', 'tinyicon')}<span>${label}</span>`);
         btn.setAttribute('aria-pressed', btnMode === mode ? 'true' : 'false');
         btn.title = `${label} setzen`;
-        btn.onclick = () => this.net.setSpectatorControls({ timeMode: btnMode });
+        if (!btn.dataset.boundSpectatorTime) {
+          btn.dataset.boundSpectatorTime = '1';
+          btn.addEventListener('click', () => this.setSpectatorControls({ timeMode: btn.dataset.spectatortime }));
+        }
       }
     }
+  }
+
+  setSpectatorControls(patch = {}) {
+    let changed = false;
+    const controls = { ...(this.net.controls || {}) };
+    if (Object.prototype.hasOwnProperty.call(patch, 'speed') && SPECTATOR_SPEEDS.includes(patch.speed)) {
+      controls.speed = patch.speed;
+      changed = true;
+    }
+    if (Object.prototype.hasOwnProperty.call(patch, 'timeMode') && SPECTATOR_TIME_MODES.includes(patch.timeMode)) {
+      controls.timeMode = patch.timeMode;
+      changed = true;
+    }
+    if (changed) this.net.controls = controls;
+    this.net.setSpectatorControls(patch);
+    if (changed) this.renderSpectatorbar();
   }
 
   // --- Ressourcenleiste (mit Uhr & Wetter) ---
@@ -860,6 +888,8 @@ export class UI {
     if (!bar) return;
     if (!this.net.room && !this.net.spectator && this.net.seat == null && !this.net.players.length) {
       bar.innerHTML = '';
+      this._topSig = '';
+      delete bar.dataset.topSig;
       return;
     }
     const me = this.net.players.find(p => p.id === (this.net.spectator ? this.net.viewSeat : this.net.seat));
@@ -883,14 +913,15 @@ export class UI {
     }
     const helpHtml = `<span class="sep"></span>${this.helpButtonHtml()}`;
     if (!me || !me.res) {
+      if (this.net.spectator) { this.renderSpectatorTop(bar, envHtml); return; }
       const spectatorControls = this.net.spectator ? this.spectatorTopControlsHtml() : '';
       bar.innerHTML = `<span class="res">Zuschauer</span>${spectatorControls}${envHtml}${helpHtml}`;
+      this._topSig = '';
       this.bindTopActions();
       return;
     }
     if (this.net.spectator) {
-      bar.innerHTML = `<span class="res">Zuschauer</span>${this.spectatorTopControlsHtml()}${envHtml}${helpHtml}`;
-      this.bindTopActions();
+      this.renderSpectatorTop(bar, envHtml);
       return;
     }
     let html = `<span class="res"><span class="dot" style="background:${me.color}"></span><b>${this.data.factions[me.faction].label}</b></span><span class="sep"></span>`;
@@ -911,7 +942,34 @@ export class UI {
     const releaseTitle = releaseBusy ? 'Wechsel in den Zuschauermodus laeuft' : 'Sitz an die KI zurückgeben und weiter zuschauen';
     html += `<span class="sep"></span>${this.helpButtonHtml()}<button id="releasecontrol" class="topaction" type="button" ${releaseBusy ? 'disabled aria-busy="true"' : ''} title="${escAttr(releaseTitle)}">${releaseBusy ? 'Wechsle...' : 'Ausklinken'}</button>`;
     bar.innerHTML = html;
+    this._topSig = '';
+    delete bar.dataset.topSig;
     this.bindTopActions();
+  }
+
+  renderSpectatorTop(bar, envHtml) {
+    const sig = [
+      'spectator',
+      this.helpOpen ? 'help' : 'nohelp',
+      this.net.viewSeat ?? '',
+      this.renderer?.fowEnabled ? 'fow1' : 'fow0',
+      ...this.net.players.map(p => [p.id, p.faction, p.name, p.controller, p.defeated ? 1 : 0].join(':')),
+    ].join('|');
+    if (this._topSig !== sig || bar.dataset.topSig !== sig) {
+      bar.innerHTML = `<span class="res">Zuschauer</span>${this.spectatorTopControlsHtml()}<span data-top-env></span><span class="sep"></span>${this.helpButtonHtml()}`;
+      this._topSig = sig;
+      bar.dataset.topSig = sig;
+      this.bindTopActions();
+    } else {
+      const topView = document.getElementById('topviewsel');
+      if (topView && String(topView.value) !== String(this.net.viewSeat ?? '')) topView.value = String(this.net.viewSeat ?? '');
+    }
+    const envSlot = bar.querySelector('[data-top-env]');
+    if (envSlot && envSlot.dataset.envHtml !== envHtml) {
+      envSlot.innerHTML = envHtml;
+      envSlot.dataset.envHtml = envHtml;
+    }
+    this.renderAdvisor();
   }
 
   spectatorTopControlsHtml() {
@@ -927,7 +985,9 @@ export class UI {
     const title = canTake
       ? `${this.data.factions[viewed.faction]?.label || 'KI-Spieler'} übernehmen`
       : 'Nur freie KI-Sitze können übernommen werden';
+    const fow = !!this.renderer?.fowEnabled;
     return `<span class="sep"></span><select id="topviewsel" class="topselect" title="Fraktion beobachten">${options}</select>`
+      + `<button id="topfowtoggle" class="topaction ${fow ? '' : 'active'}" type="button" aria-pressed="${fow ? 'false' : 'true'}" title="Nebel des Krieges">${iconSvg('eye', 'tinyicon')}<span>${fow ? 'Nebel an' : 'Nebel aus'}</span></button>`
       + `<button id="toptakeover" class="topaction" type="button" ${canTake ? '' : 'disabled'} title="${escAttr(title)}">Steuerung übernehmen</button>`;
   }
 
@@ -941,6 +1001,12 @@ export class UI {
     };
     const topView = document.getElementById('topviewsel');
     if (topView) topView.onchange = () => this.net.setViewSeat(parseInt(topView.value, 10));
+    const topFow = document.getElementById('topfowtoggle');
+    if (topFow) topFow.onclick = () => {
+      if (!this.net.spectator || !this.renderer) return;
+      this.renderer.setFogOfWar(!this.renderer.fowEnabled, this.data);
+      this.renderTop();
+    };
     const topTake = document.getElementById('toptakeover');
     if (topTake) topTake.onclick = () => {
       if (topTake.disabled) return;
@@ -1175,6 +1241,7 @@ export class UI {
       && (me.res?.water ?? 0) >= (cost.water || 0)
       && (me.res?.fuel ?? 0) >= (cost.fuel || 0);
     if (!BUILD_TABS.some(([id]) => id === this.buildTab)) this.buildTab = 'terrain';
+    const hasEarthForRaise = this.net.entities(1).some(e => e.etype === 'building' && e.owner === owner && e.kind === 'earth_pile' && !e.dead && (e.pile || 0) >= 8);
     const buildButtonHtml = (kind) => {
       const def = this.data.buildings[kind];
       if (!def || def.hidden) return '';
@@ -1191,9 +1258,9 @@ export class UI {
       });
     };
     // Terraforming-Aufträge: Zelle markieren, ein freier Bagger fährt hin und arbeitet.
-    const canRaise = (me.res?.materials ?? 0) >= 8;
+    const canRaise = (me.res?.materials ?? 0) >= 8 || hasEarthForRaise;
     const terrainHtml = BUILD_TERRAIN_KINDS.map(buildButtonHtml).join('')
-      + buttonHtml({ cls: this.input.buildMode === '_terra_up' ? 'armed' : '', attrs: `data-terra="up" ${canRaise ? '' : 'disabled'}`, icon: 'up', label: 'Aufschütten', cost: `<span class="costitem">${resIcon('materials', 'costicon')}8</span> Bagger`, title: 'Aufschütten\nGelände anheben, Rampen bauen und Wasser stauen.\nKosten: Baumaterial: 8\nBenötigt: freier Bagger.' })
+      + buttonHtml({ cls: this.input.buildMode === '_terra_up' ? 'armed' : '', attrs: `data-terra="up" ${canRaise ? '' : 'disabled'}`, icon: 'up', label: 'Aufschütten', cost: `<span class="costitem">${resIcon('materials', 'costicon')}8</span> Bagger`, title: 'Aufschütten\nGelände anheben, Rampen bauen und Wasser stauen.\nQuelle: nächster Erdhügel oder Baumateriallager.\nBenötigt: freier Bagger.' })
       + buttonHtml({ cls: this.input.buildMode === '_terra_down' ? 'armed' : '', attrs: 'data-terra="down"', icon: 'down', label: 'Abgraben', cost: `<span class="costitem">+${resIcon('materials', 'costicon')}</span> Bagger`, title: 'Abgraben\nGelände absenken, Wasser ableiten oder Hochseen anstechen.\nErtrag: Erde/Baumaterial.\nBenötigt: freier Bagger.' });
     const buildingsHtml = BUILDING_KINDS.map(buildButtonHtml).join('');
     let unitsHtml = '';
@@ -1272,6 +1339,17 @@ export class UI {
     const grid = document.getElementById('selgrid');
     const title = this.selPanel.querySelector('.title');
     if (!ents.length) {
+      const job = this.input.selectedTerraJob == null ? null
+        : (this.net.jobs || []).find(j => j[0] === this.input.selectedTerraJob);
+      if (job) {
+        this.selPanel.classList.remove('empty');
+        title.textContent = job[4] < 0 ? 'Abgrab-Baustelle' : 'Aufschütt-Baustelle';
+        const progress = Math.min(100, Math.round(Math.abs(job[7] || 0) / 1.2));
+        const pile = job[5] >= 0 && job[6] >= 0 ? `Erdhaufen ${job[5]}/${job[6]}` : 'ohne Erdhaufen';
+        grid.innerHTML = `<span class="chip" title="Abschnitt">${job[2]}/${job[3]}</span><span class="chip" title="Erdhaufen">${pile}</span><span class="chip" title="Fortschritt">${progress}%</span>`;
+        this.renderBuildbar();
+        return;
+      }
       // Kein Objekt gewählt: zeigt das angeklickte Öl-/Erzfeld die Vorkommensmenge.
       const fi = this.input.fieldInfo;
       if (fi && (fi.ore > 0 || fi.oil > 0)) {

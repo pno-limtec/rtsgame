@@ -1,5 +1,5 @@
 // Weltzustand + gemeinsame Hilfsfunktionen (Spawning, Abfragen, Spatial-Hash, Schaden).
-import { generateTerrain, worldToTile, tileToWorld, TT, tIdx, inBounds, stampOre, coverAt, stampFortification, unstampFortification, hasWaterNear, isNavigableWater, isFreshWater, isPassable, softenRiverBanks, stabilizeWaterTerrain, enforceDrainageToSea } from './terrain.js';
+import { generateTerrain, worldToTile, tileToWorld, TT, tIdx, inBounds, stampOre, coverAt, stampFortification, unstampFortification, applyHeightDelta, wakeWaterAround, hasWaterNear, isNavigableWater, isFreshWater, isPassable, softenRiverBanks, stabilizeWaterTerrain, enforceDrainageToSea } from './terrain.js';
 import { makeRng } from './rng.js';
 import {
   TILE, DEFAULT_MAP, SUB_DETECT_RANGE, GARRISON_DAMAGE_MULT,
@@ -11,9 +11,18 @@ import { findPath } from './pathfinding.js';
 let _gid = 1;
 const START_RIVER_CLEARANCE = 26;
 const START_SUPPORT_RIVER_CLEARANCE = 10;
+const START_ORE_CLEAR_RADIUS = 17;
+const START_ORE_DISTANCE = 12;
+const START_ORE_RADIUS = 2;
+const START_ORE_AMOUNT = 300;
+const START_ORE_BASE_AMOUNT = 40;
 const BUILD_ANCHOR_RANGE = 7;
 const ANCHORED_BUILD_ROLES = new Set(['logistics', 'defense', 'production']);
 const VIADUCT_HALF_WIDTH = 2; // 5 Zellen: genug Raum für zwei Fahrzeuge auf der Querung
+const ROAD_BED_RAISE = 0.024; // leichte Aufschüttung: Schutz vor flachem Hochwasser, kein Damm/Brücke
+const ROAD_BUILDING_CLEARANCE = 2.5;
+const DAM_CREST_ABOVE_BANK = 0.18;
+const DAM_MIN_TERRAFORM = 0.16;
 
 export function setNextEntityId(id) {
   const n = Math.max(1, Math.floor(Number(id) || 1));
@@ -398,7 +407,7 @@ function placeStartBases(world) {
     [tx, ty] = tryBuildableNear(world, tx, ty, 3, { minRiverDist: startRiverClearance })
       || forceDryBuildableNear(world, tx, ty, 3, { minRiverDist: startRiverClearance });
     protectStartTerrace(terrain, tx, ty, 3, { large: easyStart });
-    clearOreAround(terrain, tx + 1.5, ty + 1.5, 8);
+    clearOreAround(terrain, tx + 1.5, ty + 1.5, START_ORE_CLEAR_RADIUS);
     spawnBuilding(world, p.id, 'hq', tx, ty);
     for (const [kind, ox, oy] of [
       ['oil_depot', 6, -2],
@@ -407,14 +416,16 @@ function placeStartBases(world) {
       if (spot) {
         const dep = spawnBuilding(world, p.id, kind, spot[0], spot[1]);
         dep.buildProgress = 1;
+        dep.hp = dep.maxHp;
       }
     }
 
-    // Garantiertes Erzfeld in Basisnähe (Richtung Kartenmitte) für sofortige Wirtschaft.
+    // Kleines garantiertes Erzfeld in Basisnähe (Richtung Kartenmitte): früher Anschub,
+    // aber schnell erschöpft, damit Expansion zu entfernten Erzadern wichtig bleibt.
     const towardCenter = Math.atan2(cy - ty, cx - tx);
-    const orx = Math.round(tx + Math.cos(towardCenter) * 12);
-    const ory = Math.round(ty + Math.sin(towardCenter) * 12);
-    stampOre(terrain, orx, ory, 4, 1400);
+    const orx = Math.round(tx + Math.cos(towardCenter) * START_ORE_DISTANCE);
+    const ory = Math.round(ty + Math.sin(towardCenter) * START_ORE_DISTANCE);
+    stampStartOre(terrain, orx, ory);
 
     // Start-Raffinerie zwischen Basis und Erzfeld.
     const refSpot = tryBuildableNear(world, Math.round(tx + Math.cos(towardCenter) * 6), Math.round(ty + Math.sin(towardCenter) * 6), 3, { minRiverDist: supportRiverClearance });
@@ -572,13 +583,14 @@ function protectStartTerrace(t, tx, ty, size, opts = {}) {
 }
 
 function stampPlateauResources(t, cx, cy, angle) {
-  const oreX = Math.round(cx + Math.cos(angle) * 12);
-  const oreY = Math.round(cy + Math.sin(angle) * 12);
-  stampOre(t, oreX, oreY, 3, 1500);
   const oilAngle = angle + Math.PI * 0.55;
   const oilX = Math.round(cx + Math.cos(oilAngle) * 11);
   const oilY = Math.round(cy + Math.sin(oilAngle) * 11);
   stampOil(t, oilX, oilY, 3, 760);
+}
+
+function stampStartOre(t, tx, ty) {
+  stampOre(t, tx, ty, START_ORE_RADIUS, START_ORE_AMOUNT, { baseAmount: START_ORE_BASE_AMOUNT });
 }
 
 function stampOil(t, cx, cy, radius, amount) {
@@ -624,11 +636,12 @@ function clearOreAround(t, cx, cy, radius) {
   }
 }
 
-function infrastructureCanOverlap(newDef, oldDef) {
+export function infrastructureCanOverlap(newDef, oldDef) {
   if (!newDef || !oldDef) return false;
   const newPass = !!(newDef.roadBuilt || newDef.bridges || newDef.tunnels);
   const oldPass = !!(oldDef.roadBuilt || oldDef.bridges || oldDef.tunnels);
-  return (!!newDef.pipe && oldPass) || (!!oldDef.pipe && newPass);
+  const bridgeOverGap = !!newDef.bridges && oldDef.role === 'fortification' && !!oldDef.blocks;
+  return bridgeOverGap || (!!newDef.pipe && oldPass) || (!!oldDef.pipe && newPass);
 }
 
 function overlapsBuilding(world, tx, ty, size, def = null) {
@@ -674,13 +687,14 @@ export function canPlaceBuilding(world, tx, ty, size, def, owner = null) {
     const tt = terrain.type[i];
     const realWater = isNavigableWater(terrain, nx, ny);
     const wetCell = tt === TT.WATER || terrain.water[i] > WET_DEPTH;
+    const bridgeGap = bridges && terrain.block && terrain.block[i] > 0;
     const pipeOnBridge = !!(def && def.pipe && terrain.bridge && terrain.bridge[i] > 0);
     if (tt === TT.CLIFF && !(def && def.buildOnCliff)) return false; // Tunnel dürfen in den Berg
     if (tt === TT.WATER && !onWater && !waterOptional && !pipeOnBridge) return false;
     if (!onWater && !waterOptional && !pipeOnBridge && terrain.water[i] > WET_DEPTH) return false;
     // Reine Wasserbauten (Pumpe/Werft) brauchen schiffbares Wasser; Brücken überspannen jedes Wasser.
     if (onWater && !waterOptional && !bridges && !realWater) return false;
-    if (bridges && !wetCell) return false; // Brücke nur übers Wasser, nicht auf Trockenland
+    if (bridges && !wetCell && !bridgeGap) return false; // Brücke nur übers Wasser/Gräben, nicht auf Trockenland
     if (def && def.mustStandInWater && !realWater) return false;
     // Pumpwerk nur in Süßwasser (Fluss/See), nicht im Meer.
     if (def && def.freshWater && !isFreshWater(terrain, nx, ny)) return false;
@@ -776,11 +790,14 @@ export function spawnBuilding(world, owner, kind, tx, ty) {
   const [x, y] = tileToWorld(tx + (size - 1) / 2, ty + (size - 1) / 2);
   const player = world.players.find(p => p.id === owner);
   const w = def.weapon ? { ...world.data.weapons[def.weapon], name: def.weapon } : null;
+  const buildProgress = def.buildTime ? 0 : 1;
+  const maxHp = def.hp;
+  const hp = buildProgress < 1 ? Math.max(1, Math.round(maxHp * 0.5)) : maxHp;
   const e = {
     id: _gid++, etype: 'building', kind, owner, faction: player?.faction,
-    tx, ty, size, x, y, hp: def.hp, maxHp: def.hp, power: def.power || 0,
+    tx, ty, size, x, y, hp, maxHp, power: def.power || 0,
     sight: def.sight || 4, weapon: w, cd: 0,
-    queue: [], rally: null, buildProgress: def.buildTime ? 0 : 1,
+    queue: [], rally: null, buildProgress,
     turret: !!def.turret, aim: 0, facing: 0,  // Geschützturm dreht sich zum Ziel (aim)
     def,
   };
@@ -826,10 +843,67 @@ export function removeSolidBlock(world, e) {
 export function removeEntity(world, id) { world.entities.delete(id); }
 
 // Befestigungen (Wall/Graben) wirken über die Geländekarten: Deckung + Bewegungssperre.
+function damCrestTarget(world, e) {
+  const t = world.terrain;
+  let bank = -Infinity;
+  for (let y = -1; y <= e.size; y++) for (let x = -1; x <= e.size; x++) {
+    if (x >= 0 && x < e.size && y >= 0 && y < e.size) continue;
+    const nx = e.tx + x, ny = e.ty + y;
+    if (!inBounds(t, nx, ny)) continue;
+    bank = Math.max(bank, t.height[tIdx(t, nx, ny)]);
+  }
+  if (bank === -Infinity) bank = t.height[tIdx(t, e.tx, e.ty)] || 0;
+  return Math.min(1.92, bank + DAM_CREST_ABOVE_BANK);
+}
+
+function stampDam(world, e) {
+  const def = e.def;
+  const t = world.terrain;
+  const target = damCrestTarget(world, e);
+  const deltas = [];
+  for (let y = 0; y < e.size; y++) for (let x = 0; x < e.size; x++) {
+    const nx = e.tx + x, ny = e.ty + y;
+    if (!inBounds(t, nx, ny)) continue;
+    const i = tIdx(t, nx, ny);
+    if (def.blocks && t.block[i] < 255) t.block[i]++;
+    if (def.waterBlocks && t.waterBlock[i] < 255) t.waterBlock[i]++;
+    const delta = Math.max(DAM_MIN_TERRAFORM, target - t.height[i]);
+    const before = t.height[i];
+    applyHeightDelta(t, i, delta, true);
+    deltas.push(i, Math.max(0, t.height[i] - before));
+  }
+  e._damTerraform = deltas;
+  wakeWaterAround(t, e.tx, e.ty, e.size);
+}
+
+function unstampDam(world, e) {
+  const def = e.def || world.data.buildings[e.kind];
+  const t = world.terrain;
+  for (let y = 0; y < e.size; y++) for (let x = 0; x < e.size; x++) {
+    const nx = e.tx + x, ny = e.ty + y;
+    if (!inBounds(t, nx, ny)) continue;
+    const i = tIdx(t, nx, ny);
+    if (def.blocks && t.block[i] > 0) t.block[i]--;
+    if (def.waterBlocks && t.waterBlock[i] > 0) t.waterBlock[i]--;
+  }
+  const deltas = e._damTerraform || [];
+  for (let n = 0; n + 1 < deltas.length; n += 2) applyHeightDelta(t, deltas[n], deltas[n + 1], false);
+  e._damTerraform = null;
+  wakeWaterAround(t, e.tx, e.ty, e.size);
+}
+
 export function applyFortification(world, e) {
   const def = e.def;
   if (!def || (!def.cover && !def.blocks && !def.waterBlocks && !def.terraform && !def.bridges && !def.tunnels && !def.roadBuilt) || e._fortified) return;
-  stampFortification(world.terrain, e.tx, e.ty, e.size, def.cover || 0, !!def.blocks, !!def.waterBlocks, def.terraform || 0,
+  if (e.kind === 'dam') {
+    stampDam(world, e);
+    e._fortified = true;
+    grantEarthYield(world, e);
+    return;
+  }
+  const terraform = def.roadBuilt ? roadBedRaiseFor(world, e) : (def.terraform || 0);
+  if (def.roadBuilt) e._roadTerraform = terraform;
+  stampFortification(world.terrain, e.tx, e.ty, e.size, def.cover || 0, !!def.blocks, !!def.waterBlocks, terraform,
     { bridge: !!def.bridges, pontoon: !!def.pontoon, tunnel: !!def.tunnels, road: !!def.roadBuilt });
   e._fortified = true;
   grantEarthYield(world, e);
@@ -837,9 +911,30 @@ export function applyFortification(world, e) {
 export function removeFortification(world, e) {
   if (!e._fortified) return;
   const def = e.def || world.data.buildings[e.kind];
-  unstampFortification(world.terrain, e.tx, e.ty, e.size, def.cover || 0, !!def.blocks, !!def.waterBlocks, def.terraform || 0,
+  if (e.kind === 'dam') {
+    unstampDam(world, e);
+    e._fortified = false;
+    return;
+  }
+  const terraform = def.roadBuilt ? (e._roadTerraform || 0) : (def.terraform || 0);
+  unstampFortification(world.terrain, e.tx, e.ty, e.size, def.cover || 0, !!def.blocks, !!def.waterBlocks, terraform,
     { bridge: !!def.bridges, pontoon: !!def.pontoon, tunnel: !!def.tunnels, road: !!def.roadBuilt });
   e._fortified = false;
+  if (def.roadBuilt) e._roadTerraform = 0;
+}
+
+function roadBedRaiseFor(world, e) {
+  const t = world.terrain;
+  if (!e || !e.def?.roadBuilt || e.size !== 1 || !inBounds(t, e.tx, e.ty)) return 0;
+  const i = tIdx(t, e.tx, e.ty);
+  if (t.type[i] === TT.WATER || (t.baseWater?.[i] || 0) > WET_DEPTH || (t.water?.[i] || 0) >= NAVIGABLE_DEPTH) return 0;
+  const cx = e.tx + 0.5, cy = e.ty + 0.5;
+  for (const other of world.entities.values()) {
+    if (other === e || !isBuildAnchor(other)) continue;
+    const ox = other.tx + other.size / 2, oy = other.ty + other.size / 2;
+    if (Math.hypot(cx - ox, cy - oy) <= other.size / 2 + ROAD_BUILDING_CLEARANCE) return 0;
+  }
+  return ROAD_BED_RAISE;
 }
 
 export function grantEarthYield(world, e) {
@@ -900,6 +995,16 @@ export function ownerEntities(world, owner, etype) {
   return out;
 }
 
+export function isRoadBuilding(e) {
+  return e?.etype === 'building' && (e.kind === 'road' || !!e.def?.roadBuilt);
+}
+
+export function shouldAiIgnoreTarget(world, attackerOrOwner, target) {
+  const owner = typeof attackerOrOwner === 'object' ? attackerOrOwner?.owner : attackerOrOwner;
+  if (owner == null) return false;
+  return world.players.find(p => p.id === owner)?.controller === 'ai' && isRoadBuilding(target);
+}
+
 // --- Spatial-Hash für schnelle Zielerfassung in großen Schlachten ---
 export function buildSpatial(world, cell = 8) {
   const grid = new Map();
@@ -937,6 +1042,7 @@ export function nearestEnemy(world, ent, range, opts = {}) {
       if (o.owner === ent.owner || o.dead) continue;
       if (o.abandoned) continue;
       if (o.hp <= 0) continue;
+      if (shouldAiIgnoreTarget(world, ent, o)) continue;
       if (o.inTunnel) continue; // Einheiten in der Tunnelröhre sind verborgen → nicht anvisierbar
       if (o.submerged && !isDetectable(world, ent, o)) continue; // getauchtes U-Boot unsichtbar
       if (opts.groundOnly && o.domain === 'air') continue;
@@ -987,8 +1093,30 @@ function highGroundDamageMult(world, attacker, target) {
   return Math.max(0.82, Math.min(1.28, 1 + dh * 0.9));
 }
 
+function isUnderwaterPipe(world, e) {
+  if (!e?.def?.pipe || !world?.terrain) return false;
+  const t = world.terrain;
+  for (let yy = 0; yy < (e.size || 1); yy++) for (let xx = 0; xx < (e.size || 1); xx++) {
+    const tx = e.tx + xx, ty = e.ty + yy;
+    if (!inBounds(t, tx, ty)) continue;
+    const i = tIdx(t, tx, ty);
+    if ((t.water?.[i] || 0) > WET_DEPTH || (t.baseWater?.[i] || 0) > WET_DEPTH || t.height[i] <= SEA_LEVEL + 0.002) return true;
+  }
+  return false;
+}
+
+function ignoresEnvironmentalDamage(world, target, attacker, cause) {
+  if (attacker) return false;
+  if (cause === 'water' && target?.etype === 'building' && target.buildProgress < 1) return true;
+  if (cause === 'water' && (target?.def?.roadBuilt || target?.kind === 'road')) return true;
+  if (!target?.def?.pipe || !['water', 'landslide', 'avalanche', 'rockfall'].includes(cause)) return false;
+  return isUnderwaterPipe(world, target);
+}
+
 export function applyDamage(world, target, dmg, attacker, cause = null, meta = null) {
   if (target.dead || target.hp <= 0) return;
+  if (shouldAiIgnoreTarget(world, attacker, target)) return;
+  if (ignoresEnvironmentalDamage(world, target, attacker, cause)) return;
   // Deckung mindert Schaden — nur Einheiten profitieren (Infanterie am stärksten).
   let mult = 1;
   if (target.etype === 'unit') {
@@ -1013,6 +1141,10 @@ export function applyDamage(world, target, dmg, attacker, cause = null, meta = n
       y: target.y,
       etype: target.etype,
       kind: target.kind,
+      owner: target.owner,
+      category: target.category,
+      domain: target.domain,
+      facing: target.facing || 0,
       size: target.size || 1,
       ...(meta || {}),
     });

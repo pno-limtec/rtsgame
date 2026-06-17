@@ -114,27 +114,3 @@ export function meadowTexture(size = 128) {
   t.anisotropy = 2;
   return t;
 }
-
-export function oilSlickTexture(size = 128) {
-  const c = makeCanvas(size), g = c.getContext('2d');
-  const img = g.createImageData(size, size);
-  for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) {
-    const nx = (x / (size - 1)) * 2 - 1, ny = (y / (size - 1)) * 2 - 1;
-    const r = Math.hypot(nx * 0.86, ny * 1.12);
-    const edge = 0.90 + (fbm(x / size * 3.0, y / size * 3.4, 71) - 0.5) * 0.30;
-    const fade = Math.max(0, Math.min(1, (edge - r) / 0.18));
-    const streak = fbm(x / size * 18, y / size * 5, 73);
-    const gloss = Math.pow(fbm(x / size * 4, y / size * 13, 79), 2.4);
-    const highlight = Math.max(0, Math.sin((x + y * 0.42) * 0.18 + gloss * 4.2)) * gloss;
-    const i = (y * size + x) * 4;
-    const l = 0.020 + streak * 0.020 + highlight * 0.070;
-    img.data[i] = 3 + l * 96;
-    img.data[i + 1] = 3 + l * 86;
-    img.data[i + 2] = 4 + l * 72;
-    img.data[i + 3] = Math.round(248 * fade * fade);
-  }
-  g.putImageData(img, 0, 0);
-  const t = new THREE.CanvasTexture(c);
-  t.anisotropy = 2;
-  return t;
-}
