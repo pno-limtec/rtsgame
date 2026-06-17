@@ -46,6 +46,24 @@ function freezeEnv(world) {
   world.env.forecast = [];
 }
 
+// Die Mess-Fläche trocken halten (jeden Tick). Begründung: Die Wasser-Sim speist landumschlossene
+// Senken aus permanenten Quellen, und seit dem `startSafeHasDrainPath`-Gate in water.js wird dieses
+// Quellwasser auf abflusslosen Flächen NICHT mehr weggesickert → es erreicht nach ~440 Ticks auch eine
+// bei Spawn trockene Ebene. Ein stehendes Fahrzeug erkennt dann die steigende Pfütze als Hazard und
+// FLIEHT (movement.js updateStuckState → order:'move' aufs Trockene) — ein korrektes Verhalten, das
+// hier aber NICHTS mit Separations-Physik zu tun hat: der kurze Flucht-Ruck rammt einen Nachbarn und
+// verfälscht die Overlap-Messung (gemessen: 8 % → 43 % genau im Moment der Flucht). Wir isolieren also
+// die Separation, indem wir Wasser auf der Test-Insel wegnehmen — gleiche Absicht wie das Einfrieren des
+// Wetters (Umweltdynamik neutralisieren, um nur die Physik zu messen, die der Harness messen soll).
+function keepPatchDry(world, ptx, pty) {
+  const t = world.terrain;
+  if (!t || !t.water) return;
+  for (let yy = -5; yy <= 5; yy++) for (let xx = -5; xx <= 5; xx++) {
+    const ax = ptx + xx, ay = pty + yy;
+    if (inBounds(t, ax, ay)) t.water[tIdx(t, ax, ay)] = 0;
+  }
+}
+
 // Eine möglichst FLACHE, trockene Land-Fläche nahe der Kartenmitte finden (eine 5×5-Kachel-Insel
 // gleicher Höhe), damit Hangneigung/Wasser die Jitter-Messung nicht verfälschen.
 function findFlatPatch(world) {
@@ -109,13 +127,14 @@ for (let s = 0; s < N; s++) {
   }
 
   freezeEnv(world);
-  for (let i = 0; i < SETTLE; i++) { step(world); freezeEnv(world); }
+  keepPatchDry(world, ptx, pty);
+  for (let i = 0; i < SETTLE; i++) { step(world); freezeEnv(world); keepPatchDry(world, ptx, pty); }
 
   // Mess-Fenster: pro Einheit die gesamte Restbewegung (Summe der Tick-Verschiebungen) aufsummieren.
   const moved = units.map(() => 0);
   let prev = units.map(u => ({ x: u.x, y: u.y }));
   for (let i = 0; i < WINDOW; i++) {
-    step(world); freezeEnv(world);
+    step(world); freezeEnv(world); keepPatchDry(world, ptx, pty);
     for (let k = 0; k < units.length; k++) {
       const u = units[k];
       if (u.dead) continue;
