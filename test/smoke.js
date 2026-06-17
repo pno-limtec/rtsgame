@@ -2,13 +2,14 @@
 // KI-Übernahme, Befehle, Reconnect-Timeout. Verifiziert die Server-Kernlogik headless.
 import { loadData } from '../shared/data-node.js';
 import { Match } from '../server/match.js';
-import { createWorld, ownerEntities, spawnBuilding, spawnUnit, applyFortification, removeFortification, applyDamage, canPlaceBuilding, isDetectable, nearestEnemy, buildSpatial, effectiveCost, buildSpeedMult } from '../shared/world.js';
+import { createWorld, ownerEntities, spawnBuilding, spawnUnit, applyFortification, removeFortification, applyDamage, canPlaceBuilding, isDetectable, nearestEnemy, buildSpatial, effectiveCost, buildSpeedMult, resourceCapacity } from '../shared/world.js';
 import { coverAt, isBlocked, isNavigableWater, isPassable, isWet, worldToTile, tileToWorld, TT, tIdx, hasWaterNear, stampFortification, unstampFortification, inBounds } from '../shared/terrain.js';
 import { stepWater } from '../shared/systems/water.js';
 import { step, applyCommand } from '../shared/sim.js';
 import { placeTunnel, activateTunnelIfReady, validateTunnel } from '../shared/systems/tunnel.js';
 import { stepConstruction } from '../shared/systems/construction.js';
 import { stepEconomy } from '../shared/systems/economy.js';
+import { stepSupport } from '../shared/systems/support.js';
 import { stepProduction } from '../shared/systems/production.js';
 import { serializeSnapshot } from '../server/snapshot.js';
 import { stepMovement, setMoveGoal } from '../shared/systems/movement.js';
@@ -434,7 +435,15 @@ if (myUnit) {
     t.type[i] = TT.LAND; t.height[i] = 0.55; t.height0[i] = 0.55;
     t.water[i] = 0; t.baseWater[i] = 0; t.block[i] = 0; t.cover[i] = 0; t.ore[i] = 0;
   }
-  for (const [x, y] of [[10, 6], [11, 6], [10, 7], [11, 7]]) t.oil[tIdx(t, x, y)] = 2;
+  const oilCells = [];
+  if (t.oilList) t.oilList.length = 0;
+  if (t.oilDirty) t.oilDirty.clear();
+  for (const [x, y] of [[10, 6], [11, 6], [10, 7], [11, 7]]) {
+    const idx = tIdx(t, x, y);
+    t.oil[idx] = 2;
+    oilCells.push(idx);
+    if (t.oilList) t.oilList.push(idx);
+  }
   ok(canPlaceBuilding(w, 10, 6, 2, data.buildings.oil_derrick), 'Bohrturm darf auf sichtbarem Ölfleck gebaut werden');
   ok(!canPlaceBuilding(w, 20, 20, 2, data.buildings.oil_derrick), 'Bohrturm braucht einen Ölfleck');
   const plant = spawnBuilding(w, 0, 'power_plant', 6, 6); plant.buildProgress = 1;
@@ -449,6 +458,88 @@ if (myUnit) {
   ok(t.oil.reduce((a, b) => a + b, 0) < oilBefore, 'Ölfleck wird bei Förderung kleiner');
   for (let k = 0; k < 160; k++) { stepEconomy(w); w.tick++; }
   ok(t.oil.reduce((a, b) => a + b, 0) <= 0.001, 'Ölvorrat ist nach Förderung erschöpft');
+  ok((t.oilList?.length || 0) === 0 && oilCells.some(i => t.oilDirty?.has(i)),
+    'Aufgebrauchtes Öl verschwindet aus Suchliste und Client-Delta');
+}
+
+{
+  const w = createWorld({ data, seed: 161, map: { w: 36, h: 36 }, players: [
+    { id: 0, faction: 'KBN', controller: 'human' },
+    { id: 1, faction: 'HLX', controller: 'human' },
+  ], controls: { insanity: 2 } });
+  const t = w.terrain;
+  for (let i = 0; i < t.ore.length; i++) t.ore[i] = 0;
+  if (t.oreList) t.oreList.length = 0;
+  if (t.oil) for (let i = 0; i < t.oil.length; i++) t.oil[i] = 0;
+  if (t.oilList) t.oilList.length = 0;
+  for (const p of w.players) { p.resources.ore = 0; p.resources.oil = 0; }
+  for (const p of w.players) {
+    const hq = ownerEntities(w, p.id, 'building').find(b => b.kind === 'hq');
+    const depot = spawnBuilding(w, p.id, 'oil_depot', hq.tx + 5, hq.ty);
+    depot.buildProgress = 1; depot.hp = depot.maxHp;
+  }
+  const aidTargets = new Map(w.players.map(p => [p.id, {
+    ore: Math.floor(resourceCapacity(w, p.id, 'ore') * 0.5),
+    oil: Math.floor(resourceCapacity(w, p.id, 'oil') * 0.5),
+  }]));
+  w.events.length = 0;
+  stepSupport(w);
+  ok(w.players.every(p => p.resources.ore === aidTargets.get(p.id).ore && p.resources.oil === aidTargets.get(p.id).oil),
+    'Aufbauhilfe füllt erschöpfte Erz- und Öllager auf 50 Prozent');
+  ok(w.events.filter(e => e.type === 'build_aid').length === 2
+    && w.events.every(e => e.type !== 'build_aid' || e.drops.length >= 2),
+    'Aufbauhilfe erzeugt Drop-Events über den Lagern');
+  w.events.length = 0;
+  for (const p of w.players) { p.resources.ore = 0; p.resources.oil = 0; }
+  stepSupport(w);
+  ok(w.events.every(e => e.type !== 'build_aid'), 'Aufbauhilfe feuert nicht jeden Tick erneut');
+
+  const hard = createWorld({ data, seed: 162, map: { w: 36, h: 36 }, players: [
+    { id: 0, faction: 'KBN', controller: 'human' },
+    { id: 1, faction: 'HLX', controller: 'human' },
+  ], controls: { insanity: 3 } });
+  for (let i = 0; i < hard.terrain.ore.length; i++) hard.terrain.ore[i] = 0;
+  if (hard.terrain.oreList) hard.terrain.oreList.length = 0;
+  for (const p of hard.players) p.resources.ore = 0;
+  stepSupport(hard);
+  ok(hard.players.every(p => p.resources.ore === 0), 'Aufbauhilfe bleibt ab Insanity 3 aus');
+}
+
+{
+  const w = createWorld({ data, seed: 163, map: { w: 36, h: 36 }, players: [
+    { id: 0, faction: 'KBN', controller: 'human' },
+    { id: 1, faction: 'HLX', controller: 'human' },
+  ], controls: { insanity: 2 } });
+  for (const u of ownerEntities(w, 0, 'unit').filter(u => u.kind === 'builder')) u.dead = true;
+  step(w);
+  ok(ownerEntities(w, 0, 'unit').filter(u => u.kind === 'builder').length === 1,
+    'Letzter verlorener Bagger erscheint automatisch wieder am Bauhof');
+  for (const u of ownerEntities(w, 0, 'unit').filter(u => u.kind === 'truck')) u.dead = true;
+  step(w);
+  ok(ownerEntities(w, 0, 'unit').filter(u => u.kind === 'truck').length === 1,
+    'Letzter verlorener LKW erscheint automatisch wieder am Bauhof');
+}
+
+{
+  const easy = createWorld({ data, seed: 164, map: { w: 36, h: 36 }, players: [
+    { id: 0, faction: 'KBN', controller: 'human' },
+    { id: 1, faction: 'HLX', controller: 'human' },
+  ], controls: { insanity: 2 } });
+  const hq = ownerEntities(easy, 0, 'building').find(b => b.kind === 'hq');
+  const hp0 = hq.hp;
+  applyDamage(easy, hq, hq.hp + 5000, null, 'rockfall');
+  ok(!hq.dead && hq.hp === hp0, 'Bauhof ignoriert Naturschäden auf den unteren Insanity-Stufen');
+  const enemy = spawnUnit(easy, 1, 'tank', hq.x + 8, hq.y);
+  applyDamage(easy, hq, hq.hp + 5000, enemy);
+  ok(hq.dead, 'Bauhof kann weiterhin vom Gegner zerstört werden');
+
+  const hard = createWorld({ data, seed: 165, map: { w: 36, h: 36 }, players: [
+    { id: 0, faction: 'KBN', controller: 'human' },
+    { id: 1, faction: 'HLX', controller: 'human' },
+  ], controls: { insanity: 3 } });
+  const hardHq = ownerEntities(hard, 0, 'building').find(b => b.kind === 'hq');
+  applyDamage(hard, hardHq, hardHq.hp + 5000, null, 'rockfall');
+  ok(hardHq.dead, 'Bauhof nimmt auf höheren Insanity-Stufen Naturschaden');
 }
 
 {
@@ -2058,12 +2149,15 @@ ok(match.player(0).controller === 'ai', 'Sitz fällt nach Disconnect-Timeout an 
   // (e) Gewitter: Blitz schlägt ein und beschädigt das höchstgelegene Objekt der Stichprobe.
   we.events = [];
   we.env.weather = 'storm'; we.env._lightningCd = 0;
+  const previousInsanity = we.controls.insanity;
+  we.controls.insanity = 3; we.env.insanity = 3;
   const hpBefore = new Map([...we.entities.values()].map(e => [e.id, e.hp]));
   stepEnvironment(we);
   const bolt = we.events.find(ev => ev.type === 'lightning');
   ok(bolt, 'Gewitter erzeugt Blitzeinschlag-Event');
   const struck = [...we.entities.values()].some(e => e.hp < hpBefore.get(e.id));
   ok(!bolt || !bolt.hit || struck, 'Blitz beschädigt das getroffene Objekt');
+  we.controls.insanity = previousInsanity; we.env.insanity = previousInsanity;
   we.env.weather = 'clear';
 
   // (f) Erdbeben: an steilen Hängen rutscht Material ab (Höhen ändern sich, terra wird gestreamt).

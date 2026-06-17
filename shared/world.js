@@ -1120,10 +1120,18 @@ function isUnderwaterPipe(world, e) {
 
 function ignoresEnvironmentalDamage(world, target, attacker, cause) {
   if (attacker) return false;
+  if (target?.etype === 'building' && target.kind === 'hq' && supportInsanityLevel(world) <= 2
+    && ['water', 'landslide', 'avalanche', 'rockfall', 'lightning'].includes(cause)) return true;
   if (cause === 'water' && target?.etype === 'building' && target.buildProgress < 1) return true;
   if (cause === 'water' && (target?.def?.roadBuilt || target?.kind === 'road')) return true;
   if (!target?.def?.pipe || !['water', 'landslide', 'avalanche', 'rockfall'].includes(cause)) return false;
   return isUnderwaterPipe(world, target);
+}
+
+function supportInsanityLevel(world) {
+  const raw = world?.env?.insanity ?? world?.controls?.insanity ?? 2;
+  const n = Math.round(Number(raw));
+  return Number.isFinite(n) ? Math.max(1, Math.min(4, n)) : 2;
 }
 
 const NATURAL_INFANTRY_DAMAGE_CAUSES = new Set(['landslide', 'avalanche', 'rockfall', 'lightning']);

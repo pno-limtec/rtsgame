@@ -36,6 +36,15 @@ function exhaustOreCell(t, idx) {
   }
 }
 
+function exhaustOilCell(t, idx) {
+  t.oil[idx] = 0;
+  (t.oilDirty || (t.oilDirty = new Set())).add(idx);
+  if (t.oilList) {
+    const p = t.oilList.indexOf(idx);
+    if (p >= 0) t.oilList.splice(p, 1);
+  }
+}
+
 export function stepEconomy(world) {
   if ((world.tick % 10) === 0) stepPipes(world); // Pipeline-Konnektivität (günstig, alle 1s)
   if (world.tick > 0 && (world.tick % ORE_REGEN_INTERVAL) === 0) regenOre(world);
@@ -179,7 +188,8 @@ function extractOil(world, derrick, want) {
     const take = Math.min(avail, left);
     t.oil[i] -= take;
     left -= take;
-    if (t.oilDirty) t.oilDirty.add(i);
+    if (t.oil[i] <= 1e-6) exhaustOilCell(t, i);
+    else (t.oilDirty || (t.oilDirty = new Set())).add(i);
   }
   return want - left;
 }

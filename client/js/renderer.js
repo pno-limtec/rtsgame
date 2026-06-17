@@ -5670,6 +5670,87 @@ export class Renderer {
     return true;
   }
 
+  spawnBuildAidDrop(ev) {
+    const drops = (ev.drops || []).filter(d => Number.isFinite(d?.[0]) && Number.isFinite(d?.[1])).slice(0, 10);
+    if (!drops.length || !this._canSpawnEffect(1 + drops.length)) return;
+    const mapW = Math.max(32, (this.mapW || 64) * TILE);
+    const mapH = Math.max(32, (this.mapH || 64) * TILE);
+    const avg = drops.reduce((a, d) => { a.x += d[0]; a.z += d[1]; return a; }, { x: 0, z: 0 });
+    avg.x /= drops.length;
+    avg.z /= drops.length;
+    const startX = -mapW * 0.08;
+    const endX = mapW * 1.08;
+    const startZ = Math.max(0, Math.min(mapH, avg.z - mapH * 0.16));
+    const endZ = Math.max(0, Math.min(mapH, avg.z + mapH * 0.16));
+    const duration = 6.2;
+    const y = 18 + Math.min(10, Math.max(mapW, mapH) * 0.025);
+    const plane = this._makeSupportPlane(ev.resource);
+    plane.position.set(startX, y, startZ);
+    plane.rotation.y = Math.atan2(endX - startX, endZ - startZ);
+    this.scene.add(plane);
+    const dx = endX - startX, dz = endZ - startZ, len2 = dx * dx + dz * dz || 1;
+    const queued = drops.map((d, i) => {
+      const proj = ((d[0] - startX) * dx + (d[1] - startZ) * dz) / len2;
+      return { x: d[0], z: d[1], resource: d[3] || ev.resource, at: Math.max(0.18, Math.min(0.82, proj + i * 0.018)), done: false };
+    });
+    this._addEffect({
+      mesh: plane, life: 0, max: duration + 1.1, supportPlane: true, drops: queued,
+      vx: dx / duration, vz: dz / duration, opacity: 1, alwaysVisible: true, fadeGroup: true, fadeStart: 0.80,
+    });
+  }
+
+  _makeSupportPlane(resource = 'ore') {
+    const g = new THREE.Group();
+    const bodyMat = new THREE.MeshStandardMaterial({ color: resource === 'oil' ? 0x30343b : 0x596372, roughness: 0.6, metalness: 0.25 });
+    const wingMat = new THREE.MeshStandardMaterial({ color: 0x8996a3, roughness: 0.54, metalness: 0.35 });
+    const stripeMat = new THREE.MeshStandardMaterial({ color: resource === 'oil' ? 0x332315 : 0xb88735, roughness: 0.7 });
+    g.add(boxMesh(0.9, 0.7, 4.2, bodyMat, 0, 0, 0));
+    g.add(boxMesh(5.4, 0.12, 1.1, wingMat, 0, 0.05, 0.2));
+    g.add(boxMesh(1.9, 0.10, 0.72, wingMat, 0, 0.35, -1.82));
+    g.add(boxMesh(0.12, 0.82, 0.6, wingMat, 0, 0.58, -1.92));
+    g.add(boxMesh(0.98, 0.08, 0.18, stripeMat, 0, 0.42, 1.0));
+    for (const sx of [-1.55, 1.55]) {
+      g.add(boxMesh(0.42, 0.28, 0.34, this.envMats.dark, sx, -0.08, 0.18));
+      g.add(boxMesh(0.12, 0.12, 0.78, wingMat, sx, -0.08, 0.18));
+    }
+    g.scale.setScalar(1.15);
+    return g;
+  }
+
+  spawnSupportCrateDrop(x, z, resource = 'ore') {
+    if (!this._canSpawnEffect()) return;
+    const info = this._waterInfoAt?.(x, z);
+    const groundY = Math.max(this.heightAt(x, z), info?.surface ?? -Infinity) + 0.18;
+    const g = new THREE.Group();
+    const canopyMat = new THREE.MeshBasicMaterial({
+      color: resource === 'oil' ? 0xd8d2c4 : 0xf1ead8,
+      transparent: true,
+      opacity: 0.76,
+      side: THREE.DoubleSide,
+      depthWrite: false,
+    });
+    const crateMat = new THREE.MeshStandardMaterial({ color: resource === 'oil' ? 0x2d261c : 0x9a6d38, roughness: 0.82, metalness: 0.05 });
+    const strapMat = new THREE.MeshStandardMaterial({ color: 0x3b332a, roughness: 0.85 });
+    const canopy = new THREE.Mesh(new THREE.SphereGeometry(0.82, 16, 6, 0, Math.PI * 2, 0, Math.PI / 2), canopyMat);
+    canopy.position.y = 1.35;
+    canopy.scale.y = 0.34;
+    g.add(canopy);
+    g.add(boxMesh(0.72, 0.48, 0.72, crateMat, 0, 0, 0));
+    g.add(boxMesh(0.78, 0.05, 0.08, strapMat, 0, 0.18, 0));
+    g.add(boxMesh(0.08, 0.05, 0.78, strapMat, 0, 0.18, 0));
+    for (const sx of [-0.32, 0.32]) for (const sz of [-0.32, 0.32]) {
+      g.add(cylMesh(0.012, 0.012, 1.18, strapMat, sx, 0.68, sz, 6));
+    }
+    g.position.set(x, groundY + 16 + Math.random() * 5, z);
+    this.scene.add(g);
+    this._addEffect({
+      mesh: g, life: 0, max: 8.5, supportDrop: true, groundY, canopy,
+      vx: (Math.random() - 0.5) * 0.45, vz: (Math.random() - 0.5) * 0.45,
+      vy: -4.9 - Math.random() * 0.8, spin: (Math.random() - 0.5) * 0.55,
+      opacity: 0.94, fadeGroup: true, fadeStart: 0.66, alwaysVisible: true,
+    });
+  }
+
   _waterInfoAt(wx, wz) {
     if (!this.waterDepth || !this.height) return { depth: 0, surface: this.heightAt(wx, wz) };
     const gx = Math.max(0, Math.min(this.mapW - 1, Math.round(wx / TILE)));
@@ -6806,6 +6887,8 @@ export class Renderer {
         if (audio && ev.owner === seat) audio.ready_(1);
         this._pulseProductionDoorNear(ev.x, ev.y);
         this.spawnProduceFx(ev.x, ev.y);
+      } else if (ev.type === 'build_aid') {
+        this.spawnBuildAidDrop(ev);
       } else if (ev.type === 'recover') {
         if (audio && ev.owner === seat) audio.ready_(1);
         this._sprite(0xd8f4ff, ev.x, this.heightAt(ev.x, ev.y) + 1.0, ev.y, 0.8, 0.45, { opacity: 0.55, grow: 0.8 });
@@ -6876,6 +6959,46 @@ export class Renderer {
         const p = smoothstep(0, 1, Math.min(1, f.life / (f.fallDuration || 0.35)));
         f.fallBody.rotation.x = f.fallStartX + (f.fallTargetX - f.fallStartX) * p;
         f.fallBody.rotation.z = f.fallStartZ + (f.fallTargetZ - f.fallStartZ) * p;
+      }
+      if (f.supportPlane) {
+        f.mesh.position.x += (f.vx || 0) * dt;
+        f.mesh.position.z += (f.vz || 0) * dt;
+        for (const d of f.drops || []) {
+          if (!d.done && t >= d.at) {
+            d.done = true;
+            this.spawnSupportCrateDrop(d.x, d.z, d.resource);
+          }
+        }
+        const fade = t <= (f.fadeStart ?? 0.8) ? 1 : 1 - (t - (f.fadeStart ?? 0.8)) / Math.max(0.001, 1 - (f.fadeStart ?? 0.8));
+        this._setGroupOpacity(f.mesh, (f.opacity ?? 1) * Math.max(0, fade));
+        if (f.life >= f.max) {
+          this._disposeEffectMesh(f);
+          this.effects.splice(i, 1);
+        }
+        continue;
+      }
+      if (f.supportDrop) {
+        if (!f.landed) {
+          f.mesh.position.x += (f.vx || 0) * dt;
+          f.mesh.position.z += (f.vz || 0) * dt;
+          f.mesh.position.y += (f.vy || 0) * dt;
+          f.mesh.rotation.y += (f.spin || 0) * dt;
+          if (f.mesh.position.y <= f.groundY + 0.12) {
+            f.mesh.position.y = f.groundY + 0.12;
+            f.vx = 0; f.vz = 0; f.vy = 0; f.spin = 0;
+            f.landed = true;
+            if (this._particlesVisible()) this.spawnConstructionDust(f.mesh.position.x, f.mesh.position.z, true);
+          }
+        } else if (f.canopy) {
+          f.canopy.scale.y = Math.max(0.08, f.canopy.scale.y - dt * 0.18);
+        }
+        const fade = t <= (f.fadeStart ?? 0.66) ? 1 : 1 - (t - (f.fadeStart ?? 0.66)) / Math.max(0.001, 1 - (f.fadeStart ?? 0.66));
+        this._setGroupOpacity(f.mesh, (f.opacity ?? 0.94) * Math.max(0, fade));
+        if (f.life >= f.max) {
+          this._disposeEffectMesh(f);
+          this.effects.splice(i, 1);
+        }
+        continue;
       }
       if (f.wreck && this._particlesVisible()) {
         f.smokeCd = (f.smokeCd || 0) - dt;

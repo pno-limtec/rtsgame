@@ -19,6 +19,7 @@ import { stepEnvironment } from './systems/environment.js';
 import { stepRoads } from './systems/roads.js';
 import { stepConstruction, addTerraJob, assignEarthPile, hasTerraformRaiseSource, retargetEarthPileWorkers } from './systems/construction.js';
 import { stepRecovery } from './systems/recovery.js';
+import { markSupportUnitLoss, stepSupport } from './systems/support.js';
 import { placeTunnel, onTunnelMouthDestroyed, stepTunnels } from './systems/tunnel.js';
 import { stepCanal, canalLineTiles } from './systems/canal.js';
 import { forestBlocks, inBounds, isPassable, tIdx, worldToTile, tileToWorld } from './terrain.js';
@@ -67,6 +68,7 @@ export function step(world) {
 
   // 5) Tote entfernen, Niederlage prüfen
   cleanup(world);
+  stepSupport(world);
 
   world.tick++;
   world.time += DT;
@@ -79,6 +81,7 @@ export function enqueueCommand(world, cmd, playerId) {
 function cleanup(world) {
   for (const [id, e] of world.entities) {
     if (e.dead || e.hp <= 0) {
+      if (e.etype === 'unit') markSupportUnitLoss(world, e);
       if (e.etype === 'building' && e.kind === 'pipe' && e.buildProgress >= 1 && e._deathCause !== 'sold') rememberDestroyedPipe(world, e);
       if (e.etype === 'building' && e._fortified) removeFortification(world, e); // Deckung/Sperre freigeben
       if (e.etype === 'building' && e._solid) removeSolidBlock(world, e);        // Kollisionssperre freigeben
@@ -99,6 +102,7 @@ function cleanup(world) {
           facing: u.facing || 0,
           ...(waterDeath && e._deathMeta ? e._deathMeta : {}),
         });
+        for (const u of e.carried) markSupportUnitLoss(world, u);
         e.carried.length = 0;
       }
       world.entities.delete(id);
