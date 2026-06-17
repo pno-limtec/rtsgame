@@ -417,7 +417,10 @@ if (myUnit) {
   ok(t.height[oreIdx] < before.get(oreIdx), 'Erzabbau senkt die Abbauzelle sichtbar ab');
   ok(lowered.length >= 4, 'Erzabbau schneidet Gräben und Furchen in benachbarte Geländezellen');
   ok(t.tracks[oreIdx] > 0, 'Erzabbau hinterlässt dunkle Furchenspuren am Abbauort');
-  ok(t.ore[oreIdx] < 120, 'Erzvorrat verschwindet beim Abbau');
+  ok(t.ore[oreIdx] < 120, 'Erzvorkommen wird beim Abbau kleiner');
+  for (let k = 0; k < 90 && t.ore[oreIdx] > 0; k++) stepEconomy(w);
+  ok(t.ore[oreIdx] === 0 && !t.oreList.includes(oreIdx) && t.oreDirty?.has(oreIdx),
+    'Aufgebrauchtes Erz verschwindet aus Vorkommen, Suchliste und Client-Delta');
 }
 
 {
@@ -2698,6 +2701,23 @@ ok(match.player(0).controller === 'ai', 'Sitz fällt nach Disconnect-Timeout an 
   }
   ok(maxWetBedStep <= 0.078,
     `Wasserbetten bleiben glatt genug für clippingfreie Wasserflächen (maxStufe=${maxWetBedStep.toFixed(3)})`);
+  let waterBankSamples = 0, hardWaterBanks = 0, maxWaterBank = 0;
+  for (let y = 1; y < H - 1; y++) for (let x = 1; x < W - 1; x++) {
+    const i = y * W + x;
+    if (t.water[i] <= WET_DEPTH && t.height[i] >= SEA_LEVEL) continue;
+    const surface = Math.max(SEA_LEVEL, t.height[i] + (t.water[i] || 0));
+    for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+      const j = (y + dy) * W + x + dx;
+      if (t.water[j] > WET_DEPTH || t.height[j] < SEA_LEVEL) continue;
+      const bank = t.height[j] - surface;
+      if (bank <= 0) continue;
+      waterBankSamples++;
+      maxWaterBank = Math.max(maxWaterBank, bank);
+      if (bank > 0.16) hardWaterBanks++;
+    }
+  }
+  ok(waterBankSamples > 500 && hardWaterBanks === 0 && maxWaterBank <= 0.16,
+    `Generierte Wasserufer bleiben rund statt gezackt/steil (samples=${waterBankSamples}, hart=${hardWaterBanks}, maxUfer=${maxWaterBank.toFixed(3)})`);
   {
     const normalMask = new Uint8Array(W * H);
     const mark = (i, radius) => {

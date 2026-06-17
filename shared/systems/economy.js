@@ -11,9 +11,8 @@ import { addResource, hasResourceDepot } from '../world.js';
 import { setMoveGoal, stopMove } from './movement.js';
 import { assignOrePile, fillOrePile } from './construction.js';
 
-// Erz-Vorkommen regenerieren sich langsam (Erz wächst geologisch nach) bis zur Ausgangsmenge ore0 —
-// pro Sekunde und Zelle. Bewusst gemächlich: füllt erschöpfte Felder über ~15–20 min wieder auf, ohne
-// die Wirtschaft beim aktiven Abbau (20/s) zu überholen.
+// Noch nicht vollständig erschöpfte Erzvorkommen regenerieren sich langsam bis zur Ausgangsmenge ore0.
+// Aufgebrauchte Zellen werden aus oreList entfernt und tauchen nicht wieder auf.
 const ORE_REGEN_PER_SEC = 1.0;
 const ORE_REGEN_INTERVAL = 50; // alle 5 s
 
@@ -25,6 +24,15 @@ function regenOre(world) {
     const cap0 = t.ore0[idx] || 0;
     if (cap0 <= 0 || t.ore[idx] >= cap0) continue;
     t.ore[idx] = Math.min(cap0, t.ore[idx] + add);
+  }
+}
+
+function exhaustOreCell(t, idx) {
+  t.ore[idx] = 0;
+  (t.oreDirty || (t.oreDirty = new Set())).add(idx);
+  if (t.oreList) {
+    const p = t.oreList.indexOf(idx);
+    if (p >= 0) t.oreList.splice(p, 1);
   }
 }
 
@@ -369,7 +377,8 @@ function stepBuilderOre(world) {
     const pile = assignOrePile(world, e, e.harvestNode[0], e.harvestNode[1]);
     if (!pile) { e._mineIdle = 24; continue; }
     terrain.ore[idx] -= amt;
-    (terrain.oreDirty || (terrain.oreDirty = new Set())).add(idx); // Restmenge an den Client streamen
+    if (terrain.ore[idx] <= 1e-6) exhaustOreCell(terrain, idx);
+    else (terrain.oreDirty || (terrain.oreDirty = new Set())).add(idx); // Restmenge an den Client streamen
     fillOrePile(world, e, amt);
     carveMiningFurrows(world, e.harvestNode[0], e.harvestNode[1], amt, 0.65);
     if (((world.tick + e.id) % 10) === 0) world.events.push({ type: 'mine', x: e.harvestNode[0] * 2 + 1, y: e.harvestNode[1] * 2 + 1 });

@@ -106,6 +106,8 @@
     background:#0b121b; border:1px solid #243244; border-radius:6px; }
   .modelpreview { display:block; width:100%; height:100%; object-fit:contain; image-rendering:auto; }
   .techthumb { width:88px; height:74px; }
+  .techthumb .modelpreview, .detailpreview .modelpreview { transform:translate(-4px, -6px); }
+  .techthumb .modelpreview[data-preview-kind="power_plant"], .detailpreview .modelpreview[data-preview-kind="power_plant"] { transform:translateX(-4px); }
   .techthumb .techicon.mini, .bthumb .bicon.mini, .detailpreview .detailicon.mini {
     position:absolute; right:2px; bottom:2px; width:16px; height:16px; min-width:0; border-radius:4px;
     background:#08111acc; border:1px solid #314258; color:#dff5ff; padding:0; display:grid; place-items:center; }

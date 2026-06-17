@@ -63,6 +63,7 @@ const WATER_DARK_DEPTH_START = 0.085;
 const WATER_DARK_DEPTH_RANGE = 0.34;
 const WATER_EDGE_TUCK_Y = 0.006;   // Uferkante knapp über dem Gelände halten, damit sie nicht in den Depth-Test clippt
 const WATER_EDGE_TUCK_COVER = 0.72; // Randband, in dem Wasser sanft an die Böschung gezogen wird
+const WATER_EDGE_TUCK_MAX_DROP = 0.10; // bei tiefen Steilwänden Wasser nicht als blaue Wand nach unten ziehen
 const WATER_NIGHT_COLOR_MIN = 0.26;
 const WATER_NIGHT_OPACITY_MIN = 0.30;   // Grund-Deckkraft (nachts); Wasser bleibt transparent genug, damit der Grund erkennbar ist
 const WATER_STANDING_FLOW_MAX = 0.13;
@@ -316,6 +317,8 @@ export class Renderer {
     this._terraVisualIdx = new Set();
     this.oreMats = null;
     this.oreMeshes = [];
+    this._oreVisual = null;
+    this._oreMax = null;
     this.oilAmount = null;
     this._oilSet = new Set();
     this._currentFxAt = 0;
@@ -518,6 +521,8 @@ export class Renderer {
     this._treeSwayAccum = 0;
     this.oreMats = null;
     this.oreMeshes = [];
+    this._oreVisual = null;
+    this._oreMax = null;
     this.oilAmount = null;
     this._oilSet = new Set();
     this._oilSig = null;
@@ -899,7 +904,8 @@ export class Renderer {
     const oreRockMat = new THREE.MeshStandardMaterial({ color: 0x3d3a34, roughness: 0.98, metalness: 0.0, transparent: true, opacity: 0.7 });
     const oreVeinMat = new THREE.MeshStandardMaterial({ color: 0x6a5140, roughness: 0.88, metalness: 0.08, transparent: true, opacity: 0.28 });
     const oreGlintMat = new THREE.MeshStandardMaterial({ color: 0x857058, roughness: 0.78, metalness: 0.12, transparent: true, opacity: 0.08 });
-    this._oreInit = ore;   // Erzmengen (Startwerte) für die Feld-Ressourcenanzeige beim Anklicken
+    this._oreInit = ore;   // aktuelle Restwerte für die Feld-Ressourcenanzeige beim Anklicken
+    this._oreMax = Float32Array.from(ore, v => Math.max(0, v || 0));
     const dummy = new THREE.Object3D();
     let count = 0; for (let i = 0; i < ore.length; i++) if (ore[i]) count++;
     if (count) {
@@ -910,6 +916,7 @@ export class Renderer {
       veinInst.castShadow = true; veinInst.receiveShadow = true;
       glintInst.castShadow = false;
       let rk = 0, vk = 0, gk = 0;
+      const byIdx = new Map();
       const tint = new THREE.Color();
       for (let i = 0; i < ore.length; i++) {
         if (!ore[i]) continue;
@@ -918,6 +925,7 @@ export class Renderer {
         const h = (gx * 73856093 ^ gy * 19349663) >>> 0;
         const ang = ((h % 628) / 100);
         const sc = 0.62 + ((h >>> 4) % 11) / 18;
+        const rock = rk, vein = vk;
         dummy.position.set(wx, baseY + 0.20, wz);
         dummy.scale.set(sc * 1.18, sc * 0.62, sc * 0.95);
         dummy.rotation.set((h & 7) * 0.17, ang, ((h >>> 3) & 7) * 0.12);
@@ -937,7 +945,9 @@ export class Renderer {
           tint.setHex(v ? 0x765a43 : 0x604b3c); veinInst.setColorAt(vk++, tint);
         }
 
+        let glint = -1;
         if ((h & 3) !== 0) {
+          glint = gk;
           dummy.position.set(wx + Math.cos(ang) * 0.2, baseY + 0.78, wz + Math.sin(ang) * 0.2);
           const gs = 0.75 + ((h >>> 11) & 3) * 0.12;
           dummy.scale.set(gs, gs * 0.9, gs);
@@ -945,14 +955,19 @@ export class Renderer {
           dummy.updateMatrix(); glintInst.setMatrixAt(gk, dummy.matrix);
           tint.setHex((h & 8) ? 0x8c7351 : 0x73563f); glintInst.setColorAt(gk++, tint);
         }
+        byIdx.set(i, { rock, vein, glint });
       }
       rockInst.count = rk; veinInst.count = vk; glintInst.count = gk;
+      rockInst.instanceMatrix.needsUpdate = true;
+      veinInst.instanceMatrix.needsUpdate = true;
+      glintInst.instanceMatrix.needsUpdate = true;
       rockInst.instanceColor.needsUpdate = true;
       veinInst.instanceColor.needsUpdate = true;
       if (gk) glintInst.instanceColor.needsUpdate = true;
       this.scene.add(rockInst); this.scene.add(veinInst); this.scene.add(glintInst);
       this.oreMats = { rock: oreRockMat, vein: oreVeinMat, glint: oreGlintMat };
       this.oreMeshes = [rockInst, veinInst, glintInst];
+      this._oreVisual = { rock: rockInst, vein: veinInst, glint: glintInst, byIdx };
     }
 
     // Natürliche Deckung (Wald) als mehrteilige Baum-Instanzen — taktische Verstecke sichtbar machen.
@@ -1954,15 +1969,16 @@ export class Renderer {
       const waterSide = a.v >= WATER_EDGE_THRESHOLD ? a : b;
       const x = a.x + (b.x - a.x) * t;
       const z = a.z + (b.z - a.z) * t;
-      // Die Uferkante exakt an das Gelände am Übergangspunkt setzen, gedeckelt durch den Wasserpegel.
-      // Die glatte Terrainprobe vermeidet sichtbare Treppensprünge, wenn der Schnittpunkt knapp
-      // zwischen zwei Höhenzellen liegt.
+      // Nur flache Ufer an das Gelände legen. Bei sehr tiefen Löchern würde ein hartes
+      // Tucking lange senkrechte Wasser-Dreiecke an der Wand erzeugen.
       const edgeGround = this._terrainHeightSmoothAt(x, z);
+      const edgeY = edgeGround + WATER_EDGE_TUCK_Y;
+      const edgeDrop = waterSide.y - edgeY;
       return {
         x,
         z,
         v: WATER_EDGE_THRESHOLD,
-        y: Math.min(waterSide.y, edgeGround + WATER_EDGE_TUCK_Y),
+        y: edgeDrop > 0 && edgeDrop <= WATER_EDGE_TUCK_MAX_DROP ? edgeY : waterSide.y,
         fx: a.fx + (b.fx - a.fx) * t,
         fz: a.fz + (b.fz - a.fz) * t,
         depth: a.depth + (b.depth - a.depth) * t,
@@ -1989,9 +2005,12 @@ export class Renderer {
       const vx = positions.length / 3;
       let py = p.y;
       if (p.v < WATER_EDGE_TUCK_COVER) {
-        const tuck = Math.min(py, this._terrainHeightSmoothAt(p.x, p.z) + WATER_EDGE_TUCK_Y);
-        const t = 1 - smoothstep(WATER_EDGE_THRESHOLD, WATER_EDGE_TUCK_COVER, p.v);
-        py += (tuck - py) * t;
+        const tuck = this._terrainHeightSmoothAt(p.x, p.z) + WATER_EDGE_TUCK_Y;
+        const tuckDrop = py - tuck;
+        if (tuckDrop > 0 && tuckDrop <= WATER_EDGE_TUCK_MAX_DROP) {
+          const t = 1 - smoothstep(WATER_EDGE_THRESHOLD, WATER_EDGE_TUCK_COVER, p.v);
+          py += (tuck - py) * t;
+        }
       }
       positions.push(p.x, py, p.z);
       const fl = Math.hypot(p.fx, p.fz);
@@ -3275,7 +3294,63 @@ export class Renderer {
     if (!delta || !this._oreInit) return;
     if (delta === this._oreDeltaSeen) return;   // dasselbe Delta nicht doppelt anwenden
     this._oreDeltaSeen = delta;
-    for (let n = 0; n < delta.length; n += 2) this._oreInit[delta[n]] = delta[n + 1] || 0;
+    for (let n = 0; n < delta.length; n += 2) {
+      const idx = delta[n], amount = delta[n + 1] || 0;
+      this._oreInit[idx] = amount;
+      this._setOreCellVisual(idx, amount);
+    }
+    if (this._oreVisual) {
+      this._oreVisual.rock.instanceMatrix.needsUpdate = true;
+      this._oreVisual.vein.instanceMatrix.needsUpdate = true;
+      this._oreVisual.glint.instanceMatrix.needsUpdate = true;
+    }
+  }
+
+  _oreVisualScale(idx, amount) {
+    const max = this._oreMax?.[idx] || amount || 1;
+    const r = Math.max(0, Math.min(1, amount / max));
+    return r <= 0 ? 0 : Math.pow(r, 0.55);
+  }
+
+  _setOreCellVisual(idx, amount) {
+    const vis = this._oreVisual;
+    const ref = vis?.byIdx?.get(idx);
+    if (!ref || !this.mapW) return;
+    const gx = idx % this.mapW, gy = (idx / this.mapW) | 0;
+    const wx = gx * TILE, wz = gy * TILE, baseY = this.heightAt(wx, wz);
+    const hash = (gx * 73856093 ^ gy * 19349663) >>> 0;
+    const ang = ((hash % 628) / 100);
+    const sc = 0.62 + ((hash >>> 4) % 11) / 18;
+    const s = this._oreVisualScale(idx, amount);
+    const dummy = this._oreDummy || (this._oreDummy = new THREE.Object3D());
+
+    dummy.position.set(wx, baseY + 0.20 * s, wz);
+    dummy.scale.set(sc * 1.18 * s, sc * 0.62 * s, sc * 0.95 * s);
+    dummy.rotation.set((hash & 7) * 0.17, ang, ((hash >>> 3) & 7) * 0.12);
+    dummy.updateMatrix();
+    vis.rock.setMatrixAt(ref.rock, dummy.matrix);
+
+    for (let v = 0; v < 2; v++) {
+      const side = v ? 1 : -1;
+      dummy.position.set(
+        wx + Math.cos(ang + Math.PI / 2) * side * 0.22 * s,
+        baseY + (0.48 + v * 0.04) * s,
+        wz + Math.sin(ang + Math.PI / 2) * side * 0.22 * s,
+      );
+      dummy.scale.set((0.75 + ((hash >>> (v + 6)) & 3) * 0.12) * s, s, (0.72 + ((hash >>> (v + 9)) & 3) * 0.14) * s);
+      dummy.rotation.set(0.16 * side, ang + v * 0.35, 0.25 * side);
+      dummy.updateMatrix();
+      vis.vein.setMatrixAt(ref.vein + v, dummy.matrix);
+    }
+
+    if (ref.glint >= 0) {
+      dummy.position.set(wx + Math.cos(ang) * 0.2 * s, baseY + 0.78 * s, wz + Math.sin(ang) * 0.2 * s);
+      const gs = (0.75 + ((hash >>> 11) & 3) * 0.12) * s;
+      dummy.scale.set(gs, gs * 0.9, gs);
+      dummy.rotation.set(ang * 0.4, ang, 0.7);
+      dummy.updateMatrix();
+      vis.glint.setMatrixAt(ref.glint, dummy.matrix);
+    }
   }
 
   _applyOilDelta(delta) {

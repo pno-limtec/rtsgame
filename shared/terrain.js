@@ -71,6 +71,48 @@ function slopeAtHeight(height, w, h, i) {
   return s;
 }
 
+function pathToPoints(path, w) {
+  if (!path || path.length < 2) return [];
+  const den = Math.max(1, path.length - 1);
+  return path.map((i, n) => ({ x: i % w, y: (i / w) | 0, along: n / den }));
+}
+
+function samplePathHeight(height, path, along) {
+  if (!path || !path.length) return 0;
+  const p = Math.max(0, Math.min(path.length - 1, along * (path.length - 1)));
+  const a = Math.floor(p), b = Math.min(path.length - 1, a + 1);
+  const t = p - a;
+  return height[path[a]] + (height[path[b]] - height[path[a]]) * t;
+}
+
+function visitContinuousPathCorridor(w, h, path, width, visit) {
+  const points = pathToPoints(path, w);
+  if (points.length < 2) return;
+  const cells = new Map();
+  const pad = Math.ceil(width + 1.5);
+  for (let n = 1; n < points.length; n++) {
+    const a = points[n - 1], b = points[n];
+    const vx = b.x - a.x, vy = b.y - a.y;
+    const len2 = vx * vx + vy * vy;
+    if (len2 < 1e-5) continue;
+    const minX = Math.max(1, Math.floor(Math.min(a.x, b.x) - pad));
+    const maxX = Math.min(w - 2, Math.ceil(Math.max(a.x, b.x) + pad));
+    const minY = Math.max(1, Math.floor(Math.min(a.y, b.y) - pad));
+    const maxY = Math.min(h - 2, Math.ceil(Math.max(a.y, b.y) + pad));
+    for (let y = minY; y <= maxY; y++) for (let x = minX; x <= maxX; x++) {
+      const segT = Math.max(0, Math.min(1, ((x - a.x) * vx + (y - a.y) * vy) / len2));
+      const px = a.x + vx * segT, py = a.y + vy * segT;
+      const dist = Math.hypot(x - px, y - py);
+      if (dist > width) continue;
+      const i = y * w + x;
+      const along = (a.along ?? 0) + ((b.along ?? 1) - (a.along ?? 0)) * segT;
+      const prev = cells.get(i);
+      if (!prev || dist < prev.dist) cells.set(i, { i, x, y, dist, along });
+    }
+  }
+  for (const cell of cells.values()) visit(cell);
+}
+
 function hashVolume(x, y, z, seed) {
   const n = Math.sin(x * 127.1 + y * 311.7 + z * 74.7 + seed * 19.19) * 43758.5453123;
   return (n - Math.floor(n)) * 2 - 1;
@@ -326,19 +368,12 @@ function carveDryValley(height, w, h, cx, cy, angle, startR, length, width, floo
 }
 
 function smoothRiverCorridors(height, w, h, paths, protectedRadius = 0) {
-  for (const path of paths || []) for (const i of path) {
-    const x = i % w, y = (i / w) | 0;
-    if (protectedRadius && inCenterMountainCore(w, h, x, y, protectedRadius)) continue;
-    const base = height[i];
-    for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) {
-      const nx = x + dx, ny = y + dy;
-      if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
-      if (protectedRadius && inCenterMountainCore(w, h, nx, ny, protectedRadius)) continue;
-      const d = Math.hypot(dx, dy);
-      if (d > 2.25) continue;
-      const j = ny * w + nx;
-      height[j] = Math.min(height[j], base + 0.018 + d * 0.026);
-    }
+  for (const path of paths || []) {
+    visitContinuousPathCorridor(w, h, path, 2.45, ({ i, x, y, dist, along }) => {
+      if (protectedRadius && inCenterMountainCore(w, h, x, y, protectedRadius)) return;
+      const base = samplePathHeight(height, path, along);
+      height[i] = Math.min(height[i], base + 0.018 + dist * 0.026);
+    });
   }
 }
 
@@ -418,20 +453,13 @@ export function enforceDrainageToSea(t) {
 }
 
 function deepenRiverChannels(height, w, h, paths, protectedRadius = 0) {
-  for (const path of paths || []) for (const i of path) {
-    const x = i % w, y = (i / w) | 0;
-    if (protectedRadius && inCenterMountainCore(w, h, x, y, protectedRadius)) continue;
-    const bed = height[i];
-    for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) {
-      const nx = x + dx, ny = y + dy;
-      if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
-      if (protectedRadius && inCenterMountainCore(w, h, nx, ny, protectedRadius)) continue;
-      const d = Math.hypot(dx, dy);
-      if (d > 2.25) continue;
-      const j = ny * w + nx;
-      const cut = d <= 0.1 ? 0.090 : d <= 1.45 ? 0.070 : 0.038;
-      height[j] = Math.min(height[j], Math.max(SEA_LEVEL - 0.085, bed - cut));
-    }
+  for (const path of paths || []) {
+    visitContinuousPathCorridor(w, h, path, 2.45, ({ i, x, y, dist, along }) => {
+      if (protectedRadius && inCenterMountainCore(w, h, x, y, protectedRadius)) return;
+      const bed = samplePathHeight(height, path, along);
+      const cut = dist <= 0.35 ? 0.090 : dist <= 1.55 ? 0.070 : 0.038;
+      height[i] = Math.min(height[i], Math.max(SEA_LEVEL - 0.085, bed - cut));
+    });
   }
 }
 
@@ -494,6 +522,42 @@ export function softenRiverBanks(t, maxBank = 0.065) {
       if (t.terra) t.terra[j] = 0;
     }
   }
+}
+
+function classifyGeneratedTerrain(height, w, h, type, cover, water = null) {
+  cover.fill(0);
+  for (let i = 0; i < height.length; i++) {
+    const e = height[i];
+    const slope = slopeAtHeight(height, w, h, i);
+    let t = TT.LAND;
+    if (e < SEA_LEVEL || (water && water[i] >= NAVIGABLE_DEPTH)) t = TT.WATER;
+    else if (e > 0.86 || (e > 0.66 && slope > 0.044) || slope > 0.105) t = TT.CLIFF;
+    else if (e > 0.50 || slope > 0.036) t = TT.HILL;
+    type[i] = t;
+    if (t === TT.HILL) cover[i] = 0.15;
+  }
+}
+
+function softenGeneratedWaterBanks(height, w, h, water, protectedRadius = 0) {
+  const limit = Float32Array.from(height);
+  for (let y = 1; y < h - 1; y++) for (let x = 1; x < w - 1; x++) {
+    const i = y * w + x;
+    if ((water[i] || 0) <= WET_DEPTH && height[i] >= SEA_LEVEL) continue;
+    const surface = Math.max(SEA_LEVEL, height[i] + (water[i] || 0));
+    for (let yy = -3; yy <= 3; yy++) for (let xx = -3; xx <= 3; xx++) {
+      if (!xx && !yy) continue;
+      const nx = x + xx, ny = y + yy;
+      if (nx < 1 || ny < 1 || nx >= w - 1 || ny >= h - 1) continue;
+      if (protectedRadius && inCenterMountainCore(w, h, nx, ny, protectedRadius)) continue;
+      const j = ny * w + nx;
+      if ((water[j] || 0) > WET_DEPTH || height[j] < SEA_LEVEL) continue;
+      const d = Math.hypot(xx, yy);
+      if (d > 3.25) continue;
+      const bank = Math.max(SEA_LEVEL + 0.035, surface + 0.105 + Math.max(0, d - 1) * 0.052);
+      if (limit[j] > bank) limit[j] = bank;
+    }
+  }
+  for (let i = 0; i < height.length; i++) if (limit[i] < height[i]) height[i] = limit[i];
 }
 
 function addLocalRelief(height, w, h, rng, cx, cy) {
@@ -884,29 +948,24 @@ export function generateTerrain({ w, h, seed = 1 }) {
 
   // Bergflüsse initialisieren: breite Kerne sind echtes, beschiffbares Fahrwasser; die äußeren
   // Randzellen bleiben nur feucht/matschig und zählen nicht als Wasserstraße.
-  for (const path of riverPaths) for (const i of path) {
-    const x = i % w, y = (i / w) | 0;
-    if (inCenterMountainCore(w, h, x, y, centerProtectRadius)) continue;
-    for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) {
-      const nx = x + dx, ny = y + dy;
-      if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
-      if (inCenterMountainCore(w, h, nx, ny, centerProtectRadius)) continue;
-      const d = Math.hypot(dx, dy);
-      if (d > 2.25) continue;
-      const j = ny * w + nx;
-      const core = d <= 1.55;
+  for (const path of riverPaths) {
+    visitContinuousPathCorridor(w, h, path, 2.25, ({ i: j, x: nx, y: ny, dist }) => {
+      if (inCenterMountainCore(w, h, nx, ny, centerProtectRadius)) return;
+      const core = dist <= 1.55;
       const localDepth = core
         ? Math.max(NAVIGABLE_DEPTH * 1.22, SEA_LEVEL + 0.13 - height[j])
         : Math.max(WET_DEPTH * 0.66, NAVIGABLE_DEPTH * 0.38);
       water[j] = Math.max(water[j], localDepth);
       baseWater[j] = Math.max(baseWater[j], core ? localDepth * 0.96 : Math.min(localDepth, WET_DEPTH * 0.82));
       if (core) type[j] = TT.WATER;
-    }
+    });
   }
 
   stabilizeWaterTerrain(height, w, h, water, baseWater);
   enforceSeaSlopePaths(height, w, h, dryDrainPaths, 0.0025, SEA_LEVEL + 0.025);
   enforceSeaSlopePaths(height, w, h, valleyPaths, 0.0035, SEA_LEVEL + 0.04);
+  softenGeneratedWaterBanks(height, w, h, water, centerProtectRadius);
+  classifyGeneratedTerrain(height, w, h, type, cover, water);
 
   // Schnee auf dem Zentralberg (und hohen Graten): schmilzt bei Sonne → Schmelzwasser speist Flüsse.
   // snowIdx   = dauerhafte Gipfelkappe (über SNOW_LINE), startet mit Schnee.
