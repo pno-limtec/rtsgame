@@ -1163,6 +1163,26 @@ function manageRecovery(world, player, s, applyCommand) {
     if (fac) { applyCommand(world, { type: 'produce', building: fac.id, kind: 'tractor' }, player.id); return; }
   }
 
+  // Wirtschafts-/Bau-Stützfahrzeuge: harvester (Erz-LKW, ability harvest) und bridgelayer
+  // (Brückenleger, ability construct). Beide haben KEIN weapon → zählen nicht gegen VEHICLE_TARGET,
+  // verdrängen also keine Kampffahrzeuge. Sie kamen organisch NIE vor (kein Produktionspfad) und waren
+  // damit tote Bauoptionen (coverage.js Ziel C: Einheiten-Abdeckung map-fragil, weil auf Nicht-Küsten-
+  // karten die ganze Marine fehlt → land-baubare Lücken wiegen schwerer; gemessen seed6000 48 %).
+  // Wie tractor: erst NACH der Hauptarmee (freier Factory-Slot, vehicleArmy-Gate) und je EINS pro Partie,
+  // mit plain can() (KEIN tankOre-Puffer — der hat sie wie die teuren Defensiv-Filler nie bezahlbar
+  // gemacht: covprobe seed6000 = 158/158 harvester-Versuche an Affordability gescheitert). Ein
+  // Einmal-Bau bei freiem Slot greift den Erz-knappen Siegpfad nicht spürbar an; harvester zahlt sich
+  // übers Erz-Einkommen sogar zurück. KEIN world.rng() → deterministisch.
+  if (!hasKind('harvester') && s.vehicleArmy >= 3 && can('harvester')) {
+    const fac = free('factory');
+    if (fac) { applyCommand(world, { type: 'produce', building: fac.id, kind: 'harvester' }, player.id); return; }
+  }
+  // bridgelayer: mobiler Brückenleger (zweiter Konstrukteur). Etwas später, damit die Kampfarmee Vorrang hat.
+  if (!hasKind('bridgelayer') && s.vehicleArmy >= 4 && can('bridgelayer')) {
+    const fac = free('factory');
+    if (fac) { applyCommand(world, { type: 'produce', building: fac.id, kind: 'bridgelayer' }, player.id); return; }
+  }
+
   // Vorhandene Bergefahrzeuge auf nahe verlassene Fahrzeuge ansetzen (nur im Umkreis der eigenen Basis,
   // kein Selbstmord-Trip ins Feindgebiet). Verlassene Fahrzeuge sind owner -1 (neutral) → frei bergbar.
   const tractors = s.units.filter(u => u.kind === 'tractor' && u.abilities?.includes('tow') && !u.abandoned);
