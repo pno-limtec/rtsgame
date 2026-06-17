@@ -1086,7 +1086,13 @@ function manageProduction(world, player, s, applyCommand) {
 // Typen sind in der regulären Liste DEADLOCKED und kamen real nie vor. Der proaktive Filler übernimmt
 // sie (billige Luftabwehr/Sensorik ist realistische Doktrin — der Gegner KANN Luft bauen). solar/depot/
 // turret kann die reguläre Liste selbst erreichen → niedrigere Priorität.
-const COVERAGE_FILL_BUILDINGS = ['flak_turret', 'sam_site', 'sonar', 'solar_plant', 'depot', 'turret'];
+// Wall/Graben zuerst: billigste Befestigungen (60–80 Erz), klare Defensiv-Silhouetten (Ziel F) und
+// in der regulären Liste praktisch tot — `wall` hat nur ein enges Vor-Fabrik-Fenster bzw. ein
+// vehicleArmy≥5-Gate, `trench` fehlt komplett in BUILD_ORDER. Über den flachen Festungs-Puffer
+// (FORTIFICATION_ORE_FLOOR) sind sie auch im erz-knappen KI-Spiel bezahlbar und verdrängen den
+// Fahrzeugkern nicht. Danach die teuren Türme/Sensorik (≥300 Erz, voller Tank-Puffer).
+const FORTIFICATION_ORE_FLOOR = 120;                    // billige Befestigung braucht nur diesen Erz-Rest
+const COVERAGE_FILL_BUILDINGS = ['trench', 'wall', 'flak_turret', 'sam_site', 'sonar', 'solar_plant', 'depot', 'turret'];
 function manageDefensiveCoverage(world, player, s, applyCommand) {
   if (!s.hq) return;
   const pressure = world.aiDirector?.pressure || 0;
@@ -1107,11 +1113,16 @@ function manageDefensiveCoverage(world, player, s, applyCommand) {
     if (kind === 'sonar' && !(s.coastal && s.shipyards >= 1)) continue;  // Sonar nur am Wasser sinnvoll
     const cost = effectiveCost(world, player.id, def);
     if (!canAfford(player, cost)) continue;
-    // Armee-Puffer wahren: nach dem Bau müssen noch die Kosten EINES Kampffahrzeugs übrig bleiben, damit
-    // der Filler den Fahrzeugnachschub nicht abwürgt (jeder Typ wird ohnehin nur EINMAL gebaut → die
-    // gesamte Lebenszeit-Umleitung ist auf wenige Gebäude begrenzt).
+    // Armee-Puffer wahren: ein TEURES Verteidigungsgebäude (Türme/Sensorik, ≥300 Erz) darf den
+    // Fahrzeugnachschub nicht abwürgen → nach dem Bau muss noch ein Kampffahrzeug bezahlbar sein.
+    // Billige Befestigungen (Wall/Graben, 60–80 Erz) sind hingegen vernachlässigbar — ein flacher
+    // Festungs-Puffer reicht; GEMESSEN (covprobe.mjs 2026-06-17): bei offenem Gate (vehicleArmy≥3,
+    // pressure<2) war das Erz fast immer UNTER den Turmkosten → die teuren Filler bauten NIE (built=0),
+    // die billigen Befestigungen blieben tote Bauoptionen (Coverage-Ziel C). Mit dem flachen Puffer
+    // erscheinen wall/trench organisch, ohne den Fahrzeugkern zu verdrängen.
     const tankOre = effectiveCost(world, player.id, world.data.units.tank).ore || 0;
-    if ((player.resources.ore - (cost.ore || 0)) < tankOre) continue;
+    const buffer = def.role === 'fortification' ? FORTIFICATION_ORE_FLOOR : tankOre;
+    if ((player.resources.ore - (cost.ore || 0)) < buffer) continue;
     let spot;
     if (def.requiresWater) spot = pickCoastalSpot(world, player, s, def.size || 1, def);
     else if (def.role === 'fortification') spot = pickDefensiveSpot(world, player, s, def);
