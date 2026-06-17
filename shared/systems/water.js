@@ -8,7 +8,7 @@
 // Zellen fallen aus der Menge. Determinismus: aktive Menge wird je Schritt sortiert abgearbeitet.
 import {
   BUILDER_WADE_DEPTH, BUILDER_WADE_TIME, DT, WATER_STEP_TICKS, WATER_FLOW, WATER_SOURCE_RATE,
-  WET_DEPTH, FLOOD_DEPTH, NAVIGABLE_DEPTH, WATER_MAX_DEPTH, FLOOD_DPS, SEA_LEVEL,
+  WET_DEPTH, FLOOD_DEPTH, NAVIGABLE_DEPTH, WATER_MAX_DEPTH, WATER_STORAGE_MAX_DEPTH, FLOOD_DPS, SEA_LEVEL,
   RAIN_FRAC, RAIN_DEPTH, STORM_RAIN_MULT,
   DROUGHT_RIVER_DRAIN, FLOOD_CAP_FRAC,
   SNOW_MELT, SNOW_FALL, MELT_WATER, SNOW_LINE, SNOW_FALL_LINE, SNOW_BAND_CAP,
@@ -71,6 +71,10 @@ const CURRENT_WASH_DRIFT_MIN = 0.07;
 const CURRENT_VEHICLE_RESIST = 0.24;
 const CURRENT_HEAVY_RESIST = 0.55;
 const VEHICLE_DEEP_WATER_DAMAGE_DEPTH = NAVIGABLE_DEPTH;
+const DAM_SPILL_HEAD = FLOW_EPS * 2;
+const DAM_SPILL_RATE = 0.24;
+const DAM_SPILL_MAX_OUT = 0.06;
+const DAM_SPILL_DOWNSTREAM_OFFSET = 3;
 
 function flowGround(t, i) {
   return t.height[i] - ((t.tracks && t.tracks[i] > TRACK_PUDDLE_MIN) ? t.tracks[i] * TRACK_DEPRESSION : 0);
@@ -145,6 +149,12 @@ function hasOutflow(t, i, eps = FLOW_EPS) {
     if ((s0 - (flowGround(t, j) + t.water[j])) / dist > eps) return true;
   }
   return false;
+}
+
+function startSafeHasDrainPath(t, i) {
+  if (!hasOutflow(t, i, FLOW_EPS)) return false;
+  const level = flowGround(t, i) + (t.water[i] || 0);
+  return componentHasDrainPathToSea(t, [i], level);
 }
 
 function hasDownhillGroundNeighbor(t, i, gi, eps = UPHILL_RUNOFF_EPS) {
@@ -287,11 +297,11 @@ function simulateCA(t, dtW, world) {
       const amount = RAIN_DEPTH * mult * RAIN_POOL_MULT * rainBiasAt(t, world, i);
       const sink = rainSinkCell(t, i);
       if (sink !== i) {
-        water[i] = Math.min(WATER_MAX_DEPTH, water[i] + amount * RAIN_SINK_LOCAL_FRACTION);
-        water[sink] = Math.min(WATER_MAX_DEPTH, water[sink] + amount * (1 - RAIN_SINK_LOCAL_FRACTION));
+        water[i] = Math.min(WATER_STORAGE_MAX_DEPTH, water[i] + amount * RAIN_SINK_LOCAL_FRACTION);
+        water[sink] = Math.min(WATER_STORAGE_MAX_DEPTH, water[sink] + amount * (1 - RAIN_SINK_LOCAL_FRACTION));
         waterActive.add(sink);
       } else {
-        water[i] = Math.min(WATER_MAX_DEPTH, water[i] + amount);
+        water[i] = Math.min(WATER_STORAGE_MAX_DEPTH, water[i] + amount);
       }
       waterActive.add(i);
     }
@@ -301,7 +311,7 @@ function simulateCA(t, dtW, world) {
       const lakeGain = RAIN_DEPTH * mult * RAIN_LAKE_GAIN;
       for (let i = 0; i < t.lakeMask.length; i++) {
         if (!t.lakeMask[i]) continue;
-        water[i] = Math.min(WATER_MAX_DEPTH, water[i] + lakeGain * rainBiasAt(t, world, i));
+        water[i] = Math.min(WATER_STORAGE_MAX_DEPTH, water[i] + lakeGain * rainBiasAt(t, world, i));
         waterActive.add(i);
       }
     }
@@ -317,7 +327,7 @@ function simulateCA(t, dtW, world) {
           if (Math.hypot(xx, yy) > r + 0.3) continue;
           const i = ny * w + nx;
           if (height[i] <= SEA_LEVEL || height[i] > SNOW_LINE || waterBlock[i] > 0) continue;
-          water[i] = Math.min(WATER_MAX_DEPTH, water[i] + valleyGain * rainBiasAt(t, world, i));
+          water[i] = Math.min(WATER_STORAGE_MAX_DEPTH, water[i] + valleyGain * rainBiasAt(t, world, i));
           waterActive.add(i);
         }
       }
@@ -329,7 +339,7 @@ function simulateCA(t, dtW, world) {
         const tr = t.tracks[i];
         if (tr <= TRACK_PUDDLE_MIN) continue;
         if (t.snow && height[i] > SNOW_LINE) continue;
-        water[i] = Math.min(WATER_MAX_DEPTH, water[i] + RAIN_DEPTH * TRACK_RAIN_MULT * mult * tr * rainBiasAt(t, world, i));
+        water[i] = Math.min(WATER_STORAGE_MAX_DEPTH, water[i] + RAIN_DEPTH * TRACK_RAIN_MULT * mult * tr * rainBiasAt(t, world, i));
         waterActive.add(i);
       }
     }
@@ -386,7 +396,7 @@ function simulateCA(t, dtW, world) {
         if (waterGain <= 0.00001) continue;
         // Schmelzwasser sammelt sich kurz auf der Zelle; die Schnee-Entwässerung am Ende des
         // Schritts kaskadiert es zum Schneerand hinab (Schnee bleibt nie unter Wasser).
-        water[i] = Math.min(WATER_MAX_DEPTH, water[i] + waterGain);
+        water[i] = Math.min(WATER_STORAGE_MAX_DEPTH, water[i] + waterGain);
         waterActive.add(i);
       }
     } else if (precip) {
@@ -413,11 +423,11 @@ function simulateCA(t, dtW, world) {
       const snow = t.snow ? t.snow[i] || 0 : 0;
       const m = Math.min(Math.max(0.0015, snow * 0.08), meltRate);
       if (t.snow && snow > 0) t.snow[i] = Math.max(0, snow - m);
-      water[i] = Math.min(WATER_MAX_DEPTH, water[i] + m * MELT_WATER * 1.45);
+      water[i] = Math.min(WATER_STORAGE_MAX_DEPTH, water[i] + m * MELT_WATER * 1.45);
       waterActive.add(i);
     }
     for (const si of sources) {
-      water[si] = Math.min(WATER_MAX_DEPTH, water[si] + WATER_SOURCE_RATE * (0.65 + fade) * startMelt);
+      water[si] = Math.min(WATER_STORAGE_MAX_DEPTH, water[si] + WATER_SOURCE_RATE * (0.65 + fade) * startMelt);
       waterActive.add(si);
     }
     t.startMeltLeft--;
@@ -432,7 +442,7 @@ function simulateCA(t, dtW, world) {
         : drought ? 0.75 : 1;
     const srcRate = WATER_SOURCE_RATE * sourceWeather;
     for (const si of sources) {
-      water[si] = Math.min(WATER_MAX_DEPTH, water[si] + srcRate);
+      water[si] = Math.min(WATER_STORAGE_MAX_DEPTH, water[si] + srcRate);
       waterActive.add(si);
     }
   }
@@ -526,7 +536,7 @@ function simulateCA(t, dtW, world) {
   const changed = new Set();
   for (const [i, d] of delta) {
     touched.add(i);
-    water[i] = Math.min(WATER_MAX_DEPTH, Math.max(0, water[i] + d));
+    water[i] = Math.min(WATER_STORAGE_MAX_DEPTH, Math.max(0, water[i] + d));
     if (Math.abs(d) > SETTLE_EPS && shouldSimulateWater(t, i)) {
       changed.add(i);
       markActive(t, next, i);
@@ -534,9 +544,10 @@ function simulateCA(t, dtW, world) {
   }
   const relaxed = relaxWaterSurface(t, changed, touched);
   if (relaxed.size) relaxWaterSurface(t, relaxed, touched);
+  releaseDamOutlets(world, next, touched);
   for (const i of touched) {
     const excess = water[i] - baseWater[i];
-    if (t.startSafe && t.startSafe[i] && excess > SETTLE_EPS) {
+    if (t.startSafe && t.startSafe[i] && excess > SETTLE_EPS && startSafeHasDrainPath(t, i)) {
       water[i] = Math.max(baseWater[i], water[i] - excess * 0.72);
       if (water[i] > baseWater[i] + WET_DEPTH * 0.25) markActive(t, next, i);
     } else if (isOpenSeaCell(t, i) && excess > SETTLE_EPS) {
@@ -582,6 +593,93 @@ function simulateCA(t, dtW, world) {
   for (const si of sources) markActive(t, next, si);
 
   t.waterActive = next;
+}
+
+function releaseDamOutlets(world, next, touched) {
+  const t = world.terrain;
+  if (!world.entities || !t.water || !t.waterBlock) return;
+  for (const e of world.entities.values()) {
+    if (e.kind !== 'dam' || e.dead || e.buildProgress < 1 || !e._fortified) continue;
+    const spillLevel = Number.isFinite(e._damSpillLevel) ? e._damSpillLevel : damFallbackSpillLevel(t, e);
+    const route = damSpillRoute(t, e, spillLevel);
+    if (!route) continue;
+    const sourceSurface = Math.max(...route.sources.map(i => flowGround(t, i) + (t.water[i] || 0)));
+    if (sourceSurface <= spillLevel + DAM_SPILL_HEAD) continue;
+    const destSurface = Math.min(...route.dests.map(i => flowGround(t, i) + (t.water[i] || 0)));
+    const head = sourceSurface - Math.max(destSurface, spillLevel - DAM_SPILL_HEAD);
+    if (head <= DAM_SPILL_HEAD) continue;
+    const available = route.sources.reduce((sum, i) => sum + damSpillAvailable(t, i, spillLevel), 0);
+    const out = Math.min(available, DAM_SPILL_MAX_OUT, head * DAM_SPILL_RATE);
+    if (out <= SETTLE_EPS) continue;
+
+    for (const i of route.sources) {
+      const share = damSpillAvailable(t, i, spillLevel) / available;
+      if (share <= 0) continue;
+      t.water[i] = Math.max(t.baseWater?.[i] || 0, (t.water[i] || 0) - out * share);
+      markActive(t, next, i);
+      touched.add(i);
+    }
+    const dests = route.dests.slice().sort((a, b) => (flowGround(t, a) + (t.water[a] || 0)) - (flowGround(t, b) + (t.water[b] || 0)));
+    const receivers = dests.slice(0, Math.max(1, Math.min(dests.length, e.size || 1)));
+    for (const i of receivers) {
+      t.water[i] = Math.min(WATER_STORAGE_MAX_DEPTH, (t.water[i] || 0) + out / receivers.length);
+      markActive(t, next, i);
+      touched.add(i);
+    }
+    const [sx, sy] = [route.sources[0] % t.w, (route.sources[0] / t.w) | 0];
+    const [dx, dy] = [receivers[0] % t.w, (receivers[0] / t.w) | 0];
+    wakeWaterAround(t, Math.min(sx, dx), Math.min(sy, dy), Math.abs(sx - dx) + 1, 3);
+  }
+}
+
+function damFallbackSpillLevel(t, e) {
+  let level = -Infinity;
+  for (const side of DAM_SIDES) {
+    for (const i of damSideCells(t, e, side, 1)) level = Math.max(level, flowGround(t, i));
+  }
+  return Number.isFinite(level) ? level + 0.14 : 1;
+}
+
+const DAM_SIDES = Object.freeze([
+  { dx: 1, dy: 0 }, { dx: -1, dy: 0 }, { dx: 0, dy: 1 }, { dx: 0, dy: -1 },
+]);
+
+function damSpillRoute(t, e, spillLevel) {
+  let best = null;
+  for (const side of DAM_SIDES) {
+    const sources = damSideCells(t, e, side, 1);
+    const dests = damSideCells(t, e, { dx: -side.dx, dy: -side.dy }, DAM_SPILL_DOWNSTREAM_OFFSET)
+      .filter(i => !(t.waterBlock?.[i] > 0));
+    if (!sources.length || !dests.length) continue;
+    const available = sources.reduce((sum, i) => sum + damSpillAvailable(t, i, spillLevel), 0);
+    if (available <= SETTLE_EPS) continue;
+    const sourceSurface = Math.max(...sources.map(i => flowGround(t, i) + (t.water[i] || 0)));
+    const destSurface = Math.min(...dests.map(i => flowGround(t, i) + (t.water[i] || 0)));
+    const head = sourceSurface - destSurface;
+    if (head <= DAM_SPILL_HEAD) continue;
+    const score = available * 10 + head;
+    if (!best || score > best.score) best = { sources, dests, score };
+  }
+  return best;
+}
+
+function damSideCells(t, e, side, offset) {
+  const cells = [];
+  const size = e.size || 1;
+  if (side.dx) {
+    const x = side.dx > 0 ? e.tx + size - 1 + offset : e.tx - offset;
+    for (let y = e.ty; y < e.ty + size; y++) if (inBounds(t, x, y)) cells.push(tIdx(t, x, y));
+  } else {
+    const y = side.dy > 0 ? e.ty + size - 1 + offset : e.ty - offset;
+    for (let x = e.tx; x < e.tx + size; x++) if (inBounds(t, x, y)) cells.push(tIdx(t, x, y));
+  }
+  return cells;
+}
+
+function damSpillAvailable(t, i, spillLevel) {
+  const depth = t.water[i] || 0;
+  const base = t.baseWater?.[i] || 0;
+  return Math.max(0, Math.min(depth - base, flowGround(t, i) + depth - spillLevel));
 }
 
 function settleWaterComponents(t, next) {
@@ -717,7 +815,7 @@ function equalizeStandingComponent(t, cells, next) {
   const level = (lo + hi) * 0.5;
   for (const i of cells) {
     const base = baseWater?.[i] || 0;
-    const target = Math.min(WATER_MAX_DEPTH, Math.max(base, level - flowGround(t, i)));
+    const target = Math.min(WATER_STORAGE_MAX_DEPTH, Math.max(base, level - flowGround(t, i)));
     if (Math.abs((water[i] || 0) - target) <= POOL_LEVEL_EPS) continue;
     water[i] = target;
     markActive(t, next, i);
@@ -763,7 +861,7 @@ function relaxWaterSurface(t, seeds, touched) {
     }
   }
   for (const [i, d] of delta) {
-    water[i] = Math.min(WATER_MAX_DEPTH, Math.max(0, water[i] + d));
+    water[i] = Math.min(WATER_STORAGE_MAX_DEPTH, Math.max(0, water[i] + d));
     touched.add(i);
   }
   return relaxed;
@@ -822,7 +920,7 @@ function erodePooledWater(t, active, dtW, next) {
     const amt = Math.min(WATER_ERODE_MAX_STEP, (depth - WATER_ERODE_DEPTH) * WATER_ERODE_RATE * dtW * slopeBoost * (stalled ? 1.25 : 0.6));
     if (amt <= 0.00003) continue;
     applyHeightDelta(t, i, amt, false);
-    t.water[i] = Math.min(WATER_MAX_DEPTH, depth + amt * 0.65);
+    t.water[i] = Math.min(WATER_STORAGE_MAX_DEPTH, depth + amt * 0.65);
     markActive(t, next, i);
     wakeWaterAround(t, i % t.w, (i / t.w) | 0, 1, 2);
     changed++;
@@ -860,8 +958,8 @@ function drainSnowCaps(t, next) {
       const j = ny * w + nx;
       if (height[j] < lowH) { lowH = height[j]; low = j; }
     }
-    if (low < 0) { water[i] = 0; continue; } // echte Gipfelsenke: Schmelzwasser verdunstet, Schnee bleibt trocken
-    water[low] = Math.min(WATER_MAX_DEPTH, water[low] + water[i]);
+    if (low < 0) continue; // geschlossene Gipfelsenke: kein unsichtbarer Abfluss/keine Verdunstung
+    water[low] = Math.min(WATER_STORAGE_MAX_DEPTH, water[low] + water[i]);
     water[i] = 0;
     markActive(t, next, low);
   }

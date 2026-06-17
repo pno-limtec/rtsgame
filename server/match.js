@@ -19,6 +19,7 @@ export class Match {
     this.factions = factions;
     const initialInsanity = normalizeInsanityLevel(insanity);
     const initialTimeMode = normalizeTimeMode(timeMode);
+    this.matchTimeMode = initialTimeMode;
     const players = this.makePlayers();
     this.world = createWorld({ data, seed, map, players, controls: { insanity: initialInsanity, timeMode: initialTimeMode } });
     this.world.controls = { speed: 1, timeMode: initialTimeMode, aiOnly: true, insanity: initialInsanity };
@@ -38,7 +39,7 @@ export class Match {
   reset({ sameMap = false, insanity = null } = {}) {
     const oldSeats = this.seats || [];
     const nextInsanity = normalizeInsanityLevel(insanity ?? this.world?.controls?.insanity ?? 2);
-    const nextTimeMode = normalizeTimeMode(this.world?.controls?.timeMode);
+    const nextTimeMode = normalizeTimeMode(this.matchTimeMode ?? this.world?.controls?.timeMode);
     if (!sameMap) this.seed = (Date.now() & 0x7fffffff) || 1;
     const oldPlayers = this.world?.players || [];
     const players = this.makePlayers().map(p => {
@@ -78,6 +79,7 @@ export class Match {
       if (occupant) p.name = occupant;
       return { id: p.id, occupant, disconnectAt: null };
     });
+    this.matchTimeMode = normalizeTimeMode(this.world?.controls?.timeMode);
     this.syncSpectatorControls();
   }
 
@@ -154,6 +156,10 @@ export class Match {
     controls.speed = normalizeSpeed(controls.speed) || 1;
     controls.timeMode = normalizeTimeMode(controls.timeMode);
     controls.insanity = normalizeInsanityLevel(controls.insanity ?? 2);
+    if (!controls.aiOnly) {
+      controls.speed = 1;
+      controls.timeMode = normalizeTimeMode(this.matchTimeMode);
+    }
     if (this.world.env) this.world.env.timeMode = controls.timeMode;
     setInsanityLevel(this.world, controls.insanity);
   }
@@ -169,7 +175,8 @@ export class Match {
     }
     if (timeMode != null) {
       const nextTimeMode = normalizeTimeMode(timeMode);
-      if (nextTimeMode !== this.world.controls.timeMode) {
+      if (nextTimeMode !== this.matchTimeMode || nextTimeMode !== this.world.controls.timeMode) {
+        this.matchTimeMode = nextTimeMode;
         this.world.controls.timeMode = nextTimeMode;
         changed = true;
       }
@@ -181,15 +188,16 @@ export class Match {
   setSpectatorControls(patch = {}) {
     this.syncSpectatorControls();
     const wantsEvent = Object.prototype.hasOwnProperty.call(patch, 'event');
+    const canTuneMatchView = this.world.controls.aiOnly !== false;
     let changed = false;
-    if (Object.prototype.hasOwnProperty.call(patch, 'speed')) {
+    if (canTuneMatchView && Object.prototype.hasOwnProperty.call(patch, 'speed')) {
       const speed = normalizeSpeed(patch.speed);
       if (speed && speed !== this.world.controls.speed) {
         this.world.controls.speed = speed;
         changed = true;
       }
     }
-    if (Object.prototype.hasOwnProperty.call(patch, 'timeMode')) {
+    if (canTuneMatchView && Object.prototype.hasOwnProperty.call(patch, 'timeMode')) {
       const timeMode = String(patch.timeMode || 'auto');
       if (TIME_MODES.has(timeMode) && timeMode !== this.world.controls.timeMode) {
         this.world.controls.timeMode = timeMode;

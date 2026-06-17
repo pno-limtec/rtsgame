@@ -46,9 +46,17 @@ async function boot() {
     rawCmd(cmd);
   };
 
+  let gameFogOfWarEnabled = true;
   const applyFogOption = (fallback = false) => {
     const box = document.getElementById('fowstart');
-    renderer.setFogOfWar(box ? !!box.checked : !!fallback, data);
+    gameFogOfWarEnabled = box ? !!box.checked : !!fallback;
+    renderer.setFogOfWar(gameFogOfWarEnabled, data);
+  };
+  const resetLockedSpectatorView = () => {
+    if (!net.spectator || net.controls?.aiOnly !== false) return;
+    renderer.setFogOfWar(gameFogOfWarEnabled, data);
+    ui.renderSpectatorbar();
+    ui.renderTop();
   };
 
   ui.setupLobby((name, seat, opts = {}) => {
@@ -81,6 +89,7 @@ async function boot() {
     ui.renderBuildbar();
     ui.renderSpectatorbar();
   });
+  net.on('controls', resetLockedSpectatorView);
   net.on('viewseat', () => { ui.renderTop(); ui.renderSpectatorbar(); input.selected.clear(); input.selectedTerraJob = null; input.onSelectionChange && input.onSelectionChange(); });
 
   net.connect();

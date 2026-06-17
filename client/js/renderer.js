@@ -3828,6 +3828,12 @@ export class Renderer {
         this.meshes.set(e.id, g); this.scene.add(g);
         this._markShadowsDirty(false);
       }
+      g.userData.etype = e.etype;
+      g.userData.kind = e.kind;
+      g.userData.category = e.category;
+      g.userData.domain = e.domain;
+      g.userData.size = e.size || 1;
+      g.userData.facing = e.facing || 0;
       g.visible = true;
       let y = this.heightAt(e.x, e.y);
       if (e.etype === 'building') {
@@ -4121,8 +4127,23 @@ export class Renderer {
           this.spawnDeathEffect(death, g);
           this._handledDeaths.add(id);
         } else {
-          this.spawnExplosion(g.position.x, g.position.y, g.position.z, g.userData.big ? 3 : 1.2);
-          this.scene.remove(g);
+          const infantry = g.userData.etype === 'unit'
+            && (g.userData.category === 'infantry' || INFANTRY_KINDS.has(g.userData.kind));
+          if (infantry) {
+            this.spawnInfantryFall({
+              id,
+              x: g.position.x,
+              y: g.position.z,
+              etype: 'unit',
+              kind: g.userData.kind,
+              category: 'infantry',
+              domain: g.userData.domain || 'land',
+              facing: g.userData.facing || 0,
+            }, g);
+          } else {
+            this.spawnExplosion(g.position.x, g.position.y, g.position.z, g.userData.big ? 3 : 1.2);
+            this.scene.remove(g);
+          }
         }
         this.meshes.delete(id);
         this._markShadowsDirty(false);
@@ -4741,6 +4762,11 @@ export class Renderer {
   makeMesh(e, colorHex) {
     const g = new THREE.Group();
     g.userData.kind = e.kind;
+    g.userData.etype = e.etype;
+    g.userData.category = e.category;
+    g.userData.domain = e.domain;
+    g.userData.size = e.size || 1;
+    g.userData.facing = e.facing || 0;
     const col = new THREE.Color(colorHex);
     let body;
     if (e.etype === 'building') {
@@ -5761,7 +5787,7 @@ export class Renderer {
     const g = sourceGroup || this._makeFallbackInfantryCorpse(ev);
     if (!sourceGroup) this.scene.add(g);
     this._hideStatusOverlays(g);
-    this._prepareFadingGroup(g, 0.72, 0x302a24, 0.22);
+    this._prepareFadingGroup(g, 0.78, 0x686a6c, 0.72);
     const groundY = this.heightAt(ev.x, ev.y) + 0.035;
     g.visible = true;
     g.position.set(ev.x, groundY, ev.y);
@@ -5771,10 +5797,10 @@ export class Renderer {
     this._addEffect({
       mesh: g,
       life: 0,
-      max: 8.5,
-      opacity: 0.72,
+      max: 12,
+      opacity: 0.78,
       fadeGroup: true,
-      fadeStart: 0.50,
+      fadeStart: 0.64,
       fallBody: body,
       fallStartX: body.rotation.x,
       fallTargetX: body.rotation.x + Math.PI / 2,

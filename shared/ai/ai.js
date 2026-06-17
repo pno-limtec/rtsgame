@@ -2,11 +2,11 @@
 // Dieselbe KI treibt die automatisierten Tests. Zustandsbasiert, datengetrieben.
 import {
   AI_REPLAN_TICKS, PIPE_LINK_RANGE, CONSTRUCT_RANGE, TILE,
-  SLOPE_BUILDER, SLOPE_HEAVY, SLOPE_ON_ROAD,
+  SLOPE_BUILDER, SLOPE_HEAVY, SLOPE_ON_ROAD, WET_DEPTH, FLOOD_DEPTH,
 } from '../constants.js';
 import {
   ownerEntities, canAfford, effectiveCost, dist, canPlaceBuilding, spawnUnit,
-  shouldAiIgnoreTarget, infrastructureCanOverlap,
+  shouldAiIgnoreTarget, infrastructureCanOverlap, applyDamage,
 } from '../world.js';
 import { findPath } from '../pathfinding.js';
 import { validateTunnel } from '../systems/tunnel.js';
@@ -90,8 +90,13 @@ const AI_PRESSURE_STEP_TICKS = 900;     // alle 90s aggressiver
 const AI_STALE_SCORE_EPS = 160;         // Score-Rauschen ignorieren
 const AI_ROUTE_PLAN_COOLDOWN = AI_REPLAN_TICKS;
 const AI_ROUTE_MAX_CELLS = 32;             // Straße in EINEM Zug bis hierher legen (durchgehende Route)
-const INFRA_KINDS = new Set(['road', 'bridge', 'tunnel', 'pipe']); // zählen nicht als Bau-Throttle
+const AI_ROUTE_MAX_DAMS = 2;               // Frontdämme bleiben Akzent, keine Damm-Spam-Linie
+const INFRA_KINDS = new Set(['road', 'bridge', 'tunnel', 'pipe', 'dam']); // zählen nicht als Bau-Throttle
 const AI_ROUTE_PATH_ITER = 30000;
+const AI_DAM_AMBUSH_RANGE = 18;
+const AI_DAM_AMBUSH_WIDTH = 3.25;
+const AI_DAM_AMBUSH_MIN_HEAD = Math.max(0.04, WET_DEPTH * 2);
+const AI_DAM_AMBUSH_MIN_WATER = FLOOD_DEPTH * 0.85;
 const AI_CHEAT_STUCK_TICKS = 900;       // 90s ohne Aufbaufortschritt = Deadlock → KI darf cheaten (früh genug, bevor der Director sie aufgibt)
 const AI_SECONDARY_TICKS = 240;         // Sekundärziele nur alle ~24s einen Schritt → kein Überbau
 const AI_MOAT_RADIUS = 7;               // Wallring-Radius um das HQ
@@ -140,6 +145,7 @@ export function stepAi(world, player, applyCommand) {
   manageDefensiveCoverage(world, player, s, applyCommand);
   manageRecovery(world, player, s, applyCommand);
   manageSecondaryObjective(world, player, s, applyCommand);
+  manageDamAmbush(world, player, s);
   manageArmy(world, player, s, applyCommand);
   manageHarvesters(world, player, applyCommand);
   manageIdleWorkers(world, player, s, applyCommand);
@@ -256,6 +262,85 @@ function buildMoatRing(world, player, s, applyCommand) {
     return true;
   }
   return false;
+}
+
+function manageDamAmbush(world, player, s) {
+  const dams = s.buildings.filter(e => e.kind === 'dam' && e.buildProgress >= 1 && e._fortified && !e.dead);
+  if (!dams.length) return false;
+  const enemies = [...world.entities.values()].filter(e => e.etype === 'unit' && e.owner !== player.id && !e.dead && e.domain === 'land');
+  if (!enemies.length) return false;
+  for (const dam of dams) {
+    const release = damAmbushRelease(world.terrain, dam);
+    if (!release) continue;
+    const victim = enemies.find(u => unitInDamAmbushCorridor(world.terrain, dam, release, u));
+    if (!victim) continue;
+    applyDamage(world, dam, dam.hp + 9999, null, 'demolition', { damAmbush: 1, target: victim.id });
+    world.events?.push({ type: 'ai_dam_breach', player: player.id, dam: dam.id, target: victim.id, x: dam.x, y: dam.y });
+    return true;
+  }
+  return false;
+}
+
+function damAmbushRelease(t, dam) {
+  const spillLevel = Number.isFinite(dam._damSpillLevel) ? dam._damSpillLevel : damAmbushFallbackSpillLevel(t, dam);
+  let best = null;
+  for (const side of DAM_AMBUSH_SIDES) {
+    const sources = damAmbushSideCells(t, dam, side, 1);
+    const dests = damAmbushSideCells(t, dam, { dx: -side.dx, dy: -side.dy }, 2).filter(i => !(t.waterBlock?.[i] > 0));
+    if (!sources.length || !dests.length) continue;
+    const sourceSurface = Math.max(...sources.map(i => (t.height[i] || 0) + (t.water[i] || 0)));
+    const destSurface = Math.min(...dests.map(i => (t.height[i] || 0) + (t.water[i] || 0)));
+    const available = sources.reduce((sum, i) => {
+      const depth = t.water[i] || 0;
+      const base = t.baseWater?.[i] || 0;
+      return sum + Math.max(0, Math.min(depth - base, (t.height[i] || 0) + depth - spillLevel));
+    }, 0);
+    const head = sourceSurface - destSurface;
+    if (sourceSurface <= spillLevel + AI_DAM_AMBUSH_MIN_HEAD || head <= AI_DAM_AMBUSH_MIN_HEAD
+        || available < AI_DAM_AMBUSH_MIN_WATER) continue;
+    const score = available * 8 + head;
+    if (!best || score > best.score) best = { dx: -side.dx, dy: -side.dy, score };
+  }
+  return best;
+}
+
+const DAM_AMBUSH_SIDES = Object.freeze([
+  { dx: 1, dy: 0 }, { dx: -1, dy: 0 }, { dx: 0, dy: 1 }, { dx: 0, dy: -1 },
+]);
+
+function damAmbushSideCells(t, e, side, offset) {
+  const cells = [];
+  const size = e.size || 1;
+  if (side.dx) {
+    const x = side.dx > 0 ? e.tx + size - 1 + offset : e.tx - offset;
+    for (let y = e.ty; y < e.ty + size; y++) if (inBounds(t, x, y)) cells.push(tIdx(t, x, y));
+  } else {
+    const y = side.dy > 0 ? e.ty + size - 1 + offset : e.ty - offset;
+    for (let x = e.tx; x < e.tx + size; x++) if (inBounds(t, x, y)) cells.push(tIdx(t, x, y));
+  }
+  return cells;
+}
+
+function damAmbushFallbackSpillLevel(t, dam) {
+  let level = -Infinity;
+  for (const side of DAM_AMBUSH_SIDES) {
+    for (const i of damAmbushSideCells(t, dam, side, 1)) level = Math.max(level, t.height[i] || 0);
+  }
+  return Number.isFinite(level) ? level + 0.14 : 1;
+}
+
+function unitInDamAmbushCorridor(t, dam, release, unit) {
+  const [tx, ty] = worldToTile(unit.x, unit.y);
+  if (!inBounds(t, tx, ty)) return false;
+  const cx = dam.tx + (dam.size || 1) / 2;
+  const cy = dam.ty + (dam.size || 1) / 2;
+  const vx = tx + 0.5 - cx;
+  const vy = ty + 0.5 - cy;
+  const along = vx * release.dx + vy * release.dy;
+  if (along < 2 || along > AI_DAM_AMBUSH_RANGE) return false;
+  const lateral = Math.abs(vx * -release.dy + vy * release.dx);
+  if (lateral > AI_DAM_AMBUSH_WIDTH) return false;
+  return unit.moveTarget || ['move', 'attackmove', 'guard'].includes(unit.order?.type);
 }
 
 const isWaterLevelSensitiveSite = (e) => e?.etype === 'building' && e.buildProgress < 1
@@ -1526,6 +1611,10 @@ function planRouteInfrastructure(world, player, s, from, to, applyCommand, opts 
         player.ai.routePlanTick = world.tick;
         return true;
       }
+      if (planRouteDam(world, player, from, to, cells, n, applyCommand)) {
+        player.ai.routePlanTick = world.tick;
+        return true;
+      }
     }
     const action = routeCellAction(world, player, prev, { tx, ty }, n, opts);
     if (action) {
@@ -1593,6 +1682,66 @@ function planBridgeSpan(world, player, cells, n, applyCommand) {
   return built;
 }
 
+function planRouteDam(world, player, from, to, cells, n, applyCommand) {
+  const def = world.data.buildings.dam;
+  if (!def || !canAfford(player, effectiveCost(world, player.id, def))) return false;
+  if (routeDamCount(world, player.id, from, to) >= AI_ROUTE_MAX_DAMS) return false;
+  const [ex, ey] = cells[n];
+  const span = bridgeSpanFromEntry(world, ex, ey, 30, player.id);
+  if (!span) return false;
+  const action = routeDamActionNearSpan(world, player.id, def, span, from, to, cells);
+  return action ? issueRouteAction(world, player, action, applyCommand) : false;
+}
+
+function routeDamCount(world, owner, from, to) {
+  let count = 0;
+  for (const e of world.entities.values()) {
+    if (e.owner !== owner || e.dead || e.etype !== 'building' || e.kind !== 'dam') continue;
+    const size = e.size || 1;
+    if (nearLine(e.tx + size / 2, e.ty + size / 2, from.tx, from.ty, to.tx, to.ty, 6)) count++;
+  }
+  return count;
+}
+
+function routeDamActionNearSpan(world, owner, def, span, from, to, routeCells) {
+  const size = def.size || 1;
+  let best = null, bestScore = Infinity;
+  for (const [wx, wy] of span.cells) {
+    for (let dy = -5; dy <= 5; dy++) for (let dx = -5; dx <= 5; dx++) {
+      const tx = wx + dx, ty = wy + dy;
+      if (!damTouchesPersistentWater(world, tx, ty, size)) continue;
+      if (footprintTouchesRoute(tx, ty, size, routeCells)) continue;
+      if (!inAiBuildRadius(world, owner, tx, ty, size)) continue;
+      if (!placeable(world, tx, ty, size, def, owner)) continue;
+      const cx = tx + size / 2, cy = ty + size / 2;
+      const lineD = lineDistance(cx, cy, from.tx, from.ty, to.tx, to.ty);
+      if (lineD > 6) continue;
+      const spanD = Math.hypot(cx - (wx + 0.5), cy - (wy + 0.5));
+      const score = spanD + lineD * 0.35 + Math.hypot(cx - from.tx, cy - from.ty) * 0.02;
+      if (score < bestScore) { bestScore = score; best = { type: 'build', kind: 'dam', tx, ty }; }
+    }
+  }
+  return best;
+}
+
+function damTouchesPersistentWater(world, tx, ty, size) {
+  const t = world.terrain;
+  for (let y = -1; y <= size; y++) for (let x = -1; x <= size; x++) {
+    if (x >= 0 && x < size && y >= 0 && y < size) continue;
+    const nx = tx + x, ny = ty + y;
+    if (!inBounds(t, nx, ny)) continue;
+    if (persistentWaterBlocksLand(t, tIdx(t, nx, ny))) return true;
+  }
+  return false;
+}
+
+function footprintTouchesRoute(tx, ty, size, routeCells) {
+  for (const [rx, ry] of routeCells) {
+    if (rx >= tx && rx < tx + size && ry >= ty && ry < ty + size) return true;
+  }
+  return false;
+}
+
 // Über einen Klippen-Riegel entlang der Route einen gültigen Tunnel finden: Mündung A = letzte
 // begehbare Zelle vor dem Riegel (prev), Mündung B = erste begehbare Zelle dahinter.
 function planTunnelOverRidge(world, cells, n, prev) {
@@ -1656,7 +1805,7 @@ function issueRouteAction(world, player, action, applyCommand) {
   if (existingOrPendingBuilding(world, player.id, action.kind, action.tx, action.ty)) return true;
   if (!placeable(world, action.tx, action.ty, def.size || 1, def, player.id)) return false;
   applyCommand(world, { type: 'build', building: action.kind, tx: action.tx, ty: action.ty }, player.id);
-  return true;
+  return existingOrPendingBuilding(world, player.id, action.kind, action.tx, action.ty);
 }
 
 function routeWorkPending(world, owner, from, to) {
@@ -1702,11 +1851,15 @@ function terraJobPending(world, owner, tx, ty) {
 }
 
 function nearLine(px, py, ax, ay, bx, by, pad) {
+  return lineDistance(px, py, ax, ay, bx, by) <= pad;
+}
+
+function lineDistance(px, py, ax, ay, bx, by) {
   const vx = bx - ax, vy = by - ay;
   const len2 = vx * vx + vy * vy;
-  if (len2 <= 1e-6) return Math.hypot(px - ax, py - ay) <= pad;
+  if (len2 <= 1e-6) return Math.hypot(px - ax, py - ay);
   const u = Math.max(0, Math.min(1, ((px - ax) * vx + (py - ay) * vy) / len2));
-  return Math.hypot(px - (ax + vx * u), py - (ay + vy * u)) <= pad;
+  return Math.hypot(px - (ax + vx * u), py - (ay + vy * u));
 }
 
 function nearestEntityToTile(list, tx, ty) {

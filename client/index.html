@@ -277,6 +277,7 @@
     cursor:pointer; font-size:11px; min-width:0; }
   #spectatorbar button:hover { border-color:var(--accent); }
   #spectatorbar button:disabled { opacity:.45; cursor:not-allowed; }
+  #spectatorbar button[aria-pressed="true"] { border-color:var(--accent); background:#10212b; color:#eefbff; }
   #spectatorbar .spec-iconbtn { display:inline-flex; align-items:center; justify-content:center; gap:4px; min-height:24px; }
   #spectatorbar .spec-segments { display:inline-grid; grid-auto-flow:column; grid-auto-columns:minmax(46px,1fr); gap:2px; min-width:0; }
   #spectatorbar .spec-segments button { padding:3px 4px; }
@@ -445,6 +446,7 @@
     </div>
     <div class="spec-panel">
       <button id="spectatorspeed" type="button" hidden>Tempo x1</button>
+      <button id="spectatorfowtoggle" type="button" hidden>Karte aufdecken</button>
       <span id="spectatortime" class="spec-segments" hidden aria-label="Tageszeit">
         <button type="button" data-spectatortime="auto">Auto</button>
         <button type="button" data-spectatortime="day">Tag</button>

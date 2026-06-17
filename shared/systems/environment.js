@@ -552,8 +552,18 @@ function strikeLightning(world) {
     if (hgt > bestH) { bestH = hgt; best = e; }
   }
   if (best) {
-    applyDamage(world, best, LIGHTNING_DMG * insanityProfile(world).lightningDamage, null);
-    world.events.push({ type: 'lightning', x: best.x, y: best.y, hit: true });
+    applyDamage(world, best, LIGHTNING_DMG * insanityProfile(world).lightningDamage, null, 'lightning');
+    world.events.push({
+      type: 'lightning',
+      x: best.x,
+      y: best.y,
+      hit: true,
+      target: best.id,
+      etype: best.etype,
+      kind: best.kind,
+      category: best.category,
+      domain: best.domain,
+    });
   } else {
     // Kein Ziel: Einschlag in zufälliger Geländezelle (visueller Effekt).
     const i = (world.rng() * t.w * t.h) | 0;

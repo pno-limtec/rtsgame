@@ -23,6 +23,8 @@ const ROAD_BED_RAISE = 0.024; // leichte Aufschüttung: Schutz vor flachem Hochw
 const ROAD_BUILDING_CLEARANCE = 2.5;
 const DAM_CREST_ABOVE_BANK = 0.18;
 const DAM_MIN_TERRAFORM = 0.16;
+const DAM_SPILL_ABOVE_LOW_BANK = 0.055;
+const DAM_SPILL_BELOW_CREST = 0.035;
 
 export function setNextEntityId(id) {
   const n = Math.max(1, Math.floor(Number(id) || 1));
@@ -860,6 +862,13 @@ function stampDam(world, e) {
   const def = e.def;
   const t = world.terrain;
   const target = damCrestTarget(world, e);
+  let lowBank = Infinity;
+  for (let y = -1; y <= e.size; y++) for (let x = -1; x <= e.size; x++) {
+    if (x >= 0 && x < e.size && y >= 0 && y < e.size) continue;
+    const nx = e.tx + x, ny = e.ty + y;
+    if (!inBounds(t, nx, ny)) continue;
+    lowBank = Math.min(lowBank, t.height[tIdx(t, nx, ny)]);
+  }
   const deltas = [];
   for (let y = 0; y < e.size; y++) for (let x = 0; x < e.size; x++) {
     const nx = e.tx + x, ny = e.ty + y;
@@ -873,6 +882,9 @@ function stampDam(world, e) {
     deltas.push(i, Math.max(0, t.height[i] - before));
   }
   e._damTerraform = deltas;
+  e._damSpillLevel = Number.isFinite(lowBank)
+    ? Math.min(target - DAM_SPILL_BELOW_CREST, lowBank + DAM_SPILL_ABOVE_LOW_BANK)
+    : target - DAM_SPILL_BELOW_CREST;
   wakeWaterAround(t, e.tx, e.ty, e.size);
 }
 
@@ -889,6 +901,7 @@ function unstampDam(world, e) {
   const deltas = e._damTerraform || [];
   for (let n = 0; n + 1 < deltas.length; n += 2) applyHeightDelta(t, deltas[n], deltas[n + 1], false);
   e._damTerraform = null;
+  e._damSpillLevel = null;
   wakeWaterAround(t, e.tx, e.ty, e.size);
 }
 
@@ -1113,6 +1126,16 @@ function ignoresEnvironmentalDamage(world, target, attacker, cause) {
   return isUnderwaterPipe(world, target);
 }
 
+const NATURAL_INFANTRY_DAMAGE_CAUSES = new Set(['landslide', 'avalanche', 'rockfall', 'lightning']);
+
+function naturalInfantryDamageAmount(target, amount, cause) {
+  if (target?.etype !== 'unit' || target.category !== 'infantry') return amount;
+  if (!NATURAL_INFANTRY_DAMAGE_CAUSES.has(cause)) return amount;
+  const maxHp = Math.max(1, target.maxHp || target.baseMaxHp || target.hp || 1);
+  const frac = cause === 'lightning' ? 0.55 : cause === 'avalanche' ? 0.45 : 0.36;
+  return Math.min(amount, Math.max(4, maxHp * frac));
+}
+
 export function applyDamage(world, target, dmg, attacker, cause = null, meta = null) {
   if (target.dead || target.hp <= 0) return;
   if (shouldAiIgnoreTarget(world, attacker, target)) return;
@@ -1128,7 +1151,8 @@ export function applyDamage(world, target, dmg, attacker, cause = null, meta = n
     mult *= target.dmgTakenMult || 1; // Fraktions-Panzerung (HLX dünn → >1)
   }
   if (attacker && attacker.owner !== target.owner) mult *= highGroundDamageMult(world, attacker, target);
-  target.hp -= dmg * Math.max(0.2, mult);
+  const amount = naturalInfantryDamageAmount(target, dmg * Math.max(0.2, mult), cause);
+  target.hp -= amount;
   target._lastHit = world.time; // für Helden-Selbstheilung (erst nach Ruhephase)
   if (target.hp <= 0) {
     target.dead = true;
@@ -1144,6 +1168,7 @@ export function applyDamage(world, target, dmg, attacker, cause = null, meta = n
       owner: target.owner,
       category: target.category,
       domain: target.domain,
+      cause,
       facing: target.facing || 0,
       size: target.size || 1,
       ...(meta || {}),

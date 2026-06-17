@@ -815,7 +815,9 @@ export class UI {
       tab.setAttribute('aria-selected', 'true');
     }
     const controls = this.net.controls || {};
+    const viewControlsUnlocked = this.spectatorViewControlsUnlocked();
     const speedBtn = document.getElementById('spectatorspeed');
+    const fowBtn = document.getElementById('spectatorfowtoggle');
     const timeWrap = document.getElementById('spectatortime');
     const eventWrap = document.getElementById('spectatorevents');
     if (eventWrap) {
@@ -833,17 +835,39 @@ export class UI {
     if (speedBtn) {
       const speed = SPECTATOR_SPEEDS.includes(controls.speed) ? controls.speed : 1;
       speedBtn.hidden = false;
-      speedBtn.disabled = false;
+      speedBtn.disabled = !viewControlsUnlocked;
       speedBtn.classList.add('spec-iconbtn');
       setHtmlOnce(speedBtn, `speed:${speed}`, `${iconSvg('speed', 'tinyicon')}<span>x${speed}</span>`);
-      speedBtn.title = 'Simulationsgeschwindigkeit setzen';
+      speedBtn.title = viewControlsUnlocked ? 'Simulationsgeschwindigkeit setzen' : 'Tempo folgt der Spieleinstellung, solange ein Mensch mitspielt';
       if (!speedBtn.dataset.boundSpectatorSpeed) {
         speedBtn.dataset.boundSpectatorSpeed = '1';
         speedBtn.addEventListener('click', () => {
+          if (!this.spectatorViewControlsUnlocked()) return;
           const cur = SPECTATOR_SPEEDS.includes(this.net.controls?.speed) ? this.net.controls.speed : 1;
           const idx = SPECTATOR_SPEEDS.indexOf(cur);
           const next = SPECTATOR_SPEEDS[(idx + 1) % SPECTATOR_SPEEDS.length];
           this.setSpectatorControls({ speed: next });
+        });
+      }
+    }
+    if (fowBtn) {
+      const revealed = this.renderer ? !this.renderer.fowEnabled : false;
+      fowBtn.hidden = false;
+      fowBtn.disabled = !this.renderer || !viewControlsUnlocked;
+      fowBtn.classList.add('spec-iconbtn');
+      fowBtn.setAttribute('aria-pressed', revealed ? 'true' : 'false');
+      setHtmlOnce(fowBtn, `fow:${revealed ? 'open' : 'covered'}`,
+        `${iconSvg('eye', 'tinyicon')}<span>${revealed ? 'Karte offen' : 'Karte aufdecken'}</span>`);
+      fowBtn.title = viewControlsUnlocked
+        ? (revealed ? 'Nebel des Krieges wieder aktivieren' : 'Karte vollständig aufdecken')
+        : 'Nebel des Krieges folgt der Spieleinstellung, solange ein Mensch mitspielt';
+      if (!fowBtn.dataset.boundSpectatorFow) {
+        fowBtn.dataset.boundSpectatorFow = '1';
+        fowBtn.addEventListener('click', () => {
+          if (!this.net.spectator || !this.renderer || !this.spectatorViewControlsUnlocked()) return;
+          this.renderer.setFogOfWar(!this.renderer.fowEnabled, this.data);
+          this.renderSpectatorbar();
+          this.renderTop();
         });
       }
     }
@@ -853,32 +877,45 @@ export class UI {
       for (const btn of timeWrap.querySelectorAll('[data-spectatortime]')) {
         const btnMode = btn.dataset.spectatortime;
         const label = SPECTATOR_TIME_LABEL[btnMode] || btnMode;
-        btn.disabled = false;
+        btn.disabled = !viewControlsUnlocked;
         btn.classList.add('spec-iconbtn');
         setHtmlOnce(btn, `time:${btnMode}:${label}`, `${iconSvg(SPECTATOR_TIME_ICON[btnMode] || 'clock', 'tinyicon')}<span>${label}</span>`);
         btn.setAttribute('aria-pressed', btnMode === mode ? 'true' : 'false');
-        btn.title = `${label} setzen`;
+        btn.title = viewControlsUnlocked ? `${label} setzen` : 'Tag/Nacht folgt der Spieleinstellung, solange ein Mensch mitspielt';
         if (!btn.dataset.boundSpectatorTime) {
           btn.dataset.boundSpectatorTime = '1';
-          btn.addEventListener('click', () => this.setSpectatorControls({ timeMode: btn.dataset.spectatortime }));
+          btn.addEventListener('click', () => {
+            if (!this.spectatorViewControlsUnlocked()) return;
+            this.setSpectatorControls({ timeMode: btn.dataset.spectatortime });
+          });
         }
       }
     }
   }
 
+  spectatorViewControlsUnlocked() {
+    return this.net.spectator && this.net.controls?.aiOnly !== false;
+  }
+
   setSpectatorControls(patch = {}) {
     let changed = false;
     const controls = { ...(this.net.controls || {}) };
-    if (Object.prototype.hasOwnProperty.call(patch, 'speed') && SPECTATOR_SPEEDS.includes(patch.speed)) {
+    const viewControlsUnlocked = this.spectatorViewControlsUnlocked();
+    const outgoing = { ...patch };
+    if (!viewControlsUnlocked) {
+      delete outgoing.speed;
+      delete outgoing.timeMode;
+    }
+    if (viewControlsUnlocked && Object.prototype.hasOwnProperty.call(patch, 'speed') && SPECTATOR_SPEEDS.includes(patch.speed)) {
       controls.speed = patch.speed;
       changed = true;
     }
-    if (Object.prototype.hasOwnProperty.call(patch, 'timeMode') && SPECTATOR_TIME_MODES.includes(patch.timeMode)) {
+    if (viewControlsUnlocked && Object.prototype.hasOwnProperty.call(patch, 'timeMode') && SPECTATOR_TIME_MODES.includes(patch.timeMode)) {
       controls.timeMode = patch.timeMode;
       changed = true;
     }
     if (changed) this.net.controls = controls;
-    this.net.setSpectatorControls(patch);
+    if (Object.keys(outgoing).length) this.net.setSpectatorControls(outgoing);
     if (changed) this.renderSpectatorbar();
   }
 
@@ -986,8 +1023,10 @@ export class UI {
       ? `${this.data.factions[viewed.faction]?.label || 'KI-Spieler'} übernehmen`
       : 'Nur freie KI-Sitze können übernommen werden';
     const fow = !!this.renderer?.fowEnabled;
+    const canTune = this.spectatorViewControlsUnlocked();
+    const fowTitle = canTune ? 'Nebel des Krieges' : 'Nebel des Krieges folgt der Spieleinstellung, solange ein Mensch mitspielt';
     return `<span class="sep"></span><select id="topviewsel" class="topselect" title="Fraktion beobachten">${options}</select>`
-      + `<button id="topfowtoggle" class="topaction ${fow ? '' : 'active'}" type="button" aria-pressed="${fow ? 'false' : 'true'}" title="Nebel des Krieges">${iconSvg('eye', 'tinyicon')}<span>${fow ? 'Nebel an' : 'Nebel aus'}</span></button>`
+      + `<button id="topfowtoggle" class="topaction ${fow ? '' : 'active'}" type="button" aria-pressed="${fow ? 'false' : 'true'}" ${canTune ? '' : 'disabled'} title="${escAttr(fowTitle)}">${iconSvg('eye', 'tinyicon')}<span>${fow ? 'Nebel an' : 'Nebel aus'}</span></button>`
       + `<button id="toptakeover" class="topaction" type="button" ${canTake ? '' : 'disabled'} title="${escAttr(title)}">Steuerung übernehmen</button>`;
   }
 
@@ -1003,8 +1042,9 @@ export class UI {
     if (topView) topView.onchange = () => this.net.setViewSeat(parseInt(topView.value, 10));
     const topFow = document.getElementById('topfowtoggle');
     if (topFow) topFow.onclick = () => {
-      if (!this.net.spectator || !this.renderer) return;
+      if (!this.net.spectator || !this.renderer || !this.spectatorViewControlsUnlocked()) return;
       this.renderer.setFogOfWar(!this.renderer.fowEnabled, this.data);
+      this.renderSpectatorbar();
       this.renderTop();
     };
     const topTake = document.getElementById('toptakeover');

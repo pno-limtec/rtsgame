@@ -1,5 +1,5 @@
 // Geländegenerierung & Abfragen: Höhenkarte, Tile-Typen, dynamisches Wasser.
-import { TILE, SEA_LEVEL, WET_DEPTH, FLOOD_DEPTH, NAVIGABLE_DEPTH, WATER_MAX_DEPTH, SNOW_LINE, SNOW_FALL_LINE, SNOW_INIT, EDGE_SEA } from './constants.js';
+import { TILE, SEA_LEVEL, WET_DEPTH, FLOOD_DEPTH, NAVIGABLE_DEPTH, WATER_STORAGE_MAX_DEPTH, SNOW_LINE, SNOW_FALL_LINE, SNOW_INIT, EDGE_SEA } from './constants.js';
 import { makeRng } from './rng.js';
 
 export const TT = { LAND: 0, HILL: 1, CLIFF: 2, WATER: 3, BRIDGE: 4 };
@@ -444,8 +444,8 @@ export function stabilizeWaterTerrain(height, w, h, water, baseWater, height0 = 
     height[i] = target;
     if (height0) height0[i] = target;
     if (terra) terra[i] = 0;
-    water[i] = Math.min(WATER_MAX_DEPTH, (water[i] || 0) + drop);
-    baseWater[i] = Math.min(WATER_MAX_DEPTH, (baseWater[i] || 0) + drop);
+    water[i] = Math.min(WATER_STORAGE_MAX_DEPTH, (water[i] || 0) + drop);
+    baseWater[i] = Math.min(WATER_STORAGE_MAX_DEPTH, (baseWater[i] || 0) + drop);
     return true;
   };
 
@@ -1211,7 +1211,7 @@ export function applyHeightDelta(t, i, delta, add) {
       // Boden unter vorhandener Wasserfläche bewegt sich: Oberfläche bleibt physikalisch stehen,
       // die Tiefe passt sich an. Ein frisch ausgebaggerter Unterwasser-Graben wird dadurch sofort
       // gefüllt statt als trockenes Loch im Wassermesh zu erscheinen.
-      t.water[i] = Math.max(0, Math.min(WATER_MAX_DEPTH, oldDepth - dh));
+      t.water[i] = Math.max(0, Math.min(WATER_STORAGE_MAX_DEPTH, oldDepth - dh));
     } else if (dh < 0) {
       // Trockene Senke neben Wasser: wenn Nachbaroberflächen bereits höher liegen, bekommt die
       // Zelle eine kleine Startfüllung und wird aktiv, statt bis zum nächsten Zufallstreffer leer
@@ -1226,7 +1226,7 @@ export function applyHeightDelta(t, i, delta, add) {
         if ((t.water?.[j] || 0) <= WET_DEPTH * 0.35) continue;
         level = Math.max(level, t.height[j] + t.water[j]);
       }
-      if (level > hNew + WET_DEPTH * 0.35) t.water[i] = Math.min(WATER_MAX_DEPTH, level - hNew);
+      if (level > hNew + WET_DEPTH * 0.35) t.water[i] = Math.min(WATER_STORAGE_MAX_DEPTH, level - hNew);
     }
     if (t.waterActive) t.waterActive.add(i);
   }

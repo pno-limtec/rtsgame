@@ -18,7 +18,7 @@ import { awardXp, stepRegen } from '../shared/systems/veterancy.js';
 import { stepGarrison } from '../shared/systems/garrison.js';
 import { stepSonar } from '../shared/systems/sonar.js';
 import { stepCombat } from '../shared/systems/combat.js';
-import { TILE, BUILDER_WADE_DEPTH, BUILDER_WADE_TIME, SEA_LEVEL, WET_DEPTH, FLOOD_DEPTH, NAVIGABLE_DEPTH, SUB_DETECT_RANGE, GARRISON_DAMAGE_MULT, MUD_IMPASSABLE, SLOPE_BUILDER, SLOPE_TERRAFORM_BUILDER, TICK_RATE, TERRA_RAISE_COST, TERRA_LOWER_YIELD } from '../shared/constants.js';
+import { TILE, BUILDER_WADE_DEPTH, BUILDER_WADE_TIME, SEA_LEVEL, WET_DEPTH, FLOOD_DEPTH, NAVIGABLE_DEPTH, WATER_MAX_DEPTH, SUB_DETECT_RANGE, GARRISON_DAMAGE_MULT, MUD_IMPASSABLE, SLOPE_BUILDER, SLOPE_TERRAFORM_BUILDER, TICK_RATE, TERRA_RAISE_COST, TERRA_LOWER_YIELD, SNOW_LINE } from '../shared/constants.js';
 import { Net } from '../client/js/net.js';
 
 let pass = 0, fail = 0;
@@ -347,8 +347,21 @@ const seat = match.joinHuman('TestSpieler', 0);
 ok(seat === 0, 'Mensch erhält Sitz 0');
 ok(before === 'ai' && match.player(0).controller === 'human', 'KI-Slot wurde von Mensch übernommen');
 ok(match.player(0).name === 'TestSpieler', 'Spielername übernommen');
-ok(!match.snapshot().controls.aiOnly && match.setSpectatorControls({ speed: 8, timeMode: 'day' }) && match.simSpeed() === 8,
-  'Zuschauer-Kontrollen bleiben mit aktivem Menschen verfügbar');
+const humanControls = match.snapshot().controls;
+ok(!humanControls.aiOnly && humanControls.speed === 1 && humanControls.timeMode === 'auto',
+  'Aktiver Mensch setzt Tempo und Tag/Nachtmodus auf die Spieleinstellung zurück');
+ok(!match.setSpectatorControls({ speed: 8, timeMode: 'day' }) && match.simSpeed() === 1 && match.snapshot().controls.timeMode === 'auto',
+  'Zuschauer kann Tempo und Tag/Nachtmodus mit aktivem Menschen nicht ändern');
+ok(match.setSpectatorControls({ event: 'fog' }) && match.world.env.weather === 'fog',
+  'Zuschauer darf mit aktivem Menschen weiterhin Events auslösen');
+{
+  const fixedDay = new Match({ data, seed: 780, slots: 2, timeMode: 'day' });
+  fixedDay.setSpectatorControls({ speed: 4, timeMode: 'night' });
+  fixedDay.joinHuman('TagSpieler', 0);
+  const c = fixedDay.snapshot().controls;
+  ok(!c.aiOnly && c.speed === 1 && c.timeMode === 'day',
+    'Aktiver Mensch stellt den konfigurierten Tag/Nacht-Startmodus wieder her');
+}
 const unitsBefore = ownerEntities(match.world, 0, 'unit').length;
 ok(unitsBefore > 0, 'Übernommene Fraktion behält ihre Einheiten');
 ok(match.takeoverAi('Zuschauer', 1) === 1 && match.player(1).controller === 'human',
@@ -785,6 +798,109 @@ ok(match.player(0).controller === 'ai', 'Sitz fällt nach Disconnect-Timeout an 
 {
   const w = createWorld({
     data,
+    seed: 96,
+    map: { w: 36, h: 24 },
+    players: [{ id: 0, faction: 'KBN', controller: 'ai' }, { id: 1, faction: 'HLX', controller: 'human' }],
+  });
+  const t = w.terrain;
+  w.entities.clear();
+  for (const p of w.players) {
+    p.resources.ore = 30000;
+    p.resources.materials = 30000;
+    p.resources.fuel = 5000;
+    p.resources.ammo = 5000;
+    p.resources.water = 5000;
+  }
+  for (let i = 0; i < t.type.length; i++) {
+    t.type[i] = TT.LAND; t.height[i] = 0.5; t.height0[i] = 0.5;
+    t.water[i] = 0; t.baseWater[i] = 0; t.block[i] = 0; t.cover[i] = 0; t.coverBuilt[i] = 0;
+    if (t.waterBlock) t.waterBlock[i] = 0;
+    t.ore[i] = 0; if (t.oil) t.oil[i] = 0;
+    if (t.mud) t.mud[i] = 0;
+    if (t.road) t.road[i] = 0;
+    if (t.roadBuilt) t.roadBuilt[i] = 0;
+    if (t.bridge) t.bridge[i] = 0;
+    if (t.tunnel) t.tunnel[i] = 0;
+    if (t.lakeMask) t.lakeMask[i] = 0;
+  }
+  const hq0 = spawnBuilding(w, 0, 'hq', 4, 10); hq0.buildProgress = 1; hq0.hp = hq0.maxHp;
+  const hq1 = spawnBuilding(w, 1, 'hq', 27, 10); hq1.buildProgress = 1; hq1.hp = hq1.maxHp;
+  for (let y = 0; y < t.h; y++) for (const x of [14, 15]) {
+    const i = tIdx(t, x, y);
+    t.type[i] = TT.WATER;
+    t.height[i] = SEA_LEVEL - 0.08;
+    t.height0[i] = t.height[i];
+    t.water[i] = NAVIGABLE_DEPTH * 1.4;
+    t.baseWater[i] = t.water[i];
+  }
+  for (const x of [14, 15]) {
+    const bridge = spawnBuilding(w, 0, 'bridge', x, 12);
+    bridge.buildProgress = 1;
+    applyFortification(w, bridge);
+  }
+  spawnUnit(w, 0, 'tank', hq0.x + 2, hq0.y);
+  initAi(w.players[0]);
+  stepAi(w, w.players[0], applyCommand);
+  const roads = ownerEntities(w, 0, 'building').filter(e => e.kind === 'road');
+  const dams = ownerEntities(w, 0, 'building').filter(e => e.kind === 'dam');
+  ok(roads.length > 0,
+    'KI setzt Straßen auf der Frontachse Richtung Gegner');
+  ok(dams.length === 1 && Math.abs((dams[0].ty + dams[0].size / 2) - 12) <= 6 && dams[0].tx < 17,
+    'KI setzt einen Staudamm neben die Flussquerung Richtung Gegner');
+  ok(!dams.some(d => d.tx <= 14 && d.tx + d.size > 14 && d.ty <= 12 && d.ty + d.size > 12),
+    'KI setzt den Staudamm neben die Fahrspur statt auf die Brücke');
+}
+
+{
+  const w = createWorld({
+    data,
+    seed: 97,
+    map: { w: 36, h: 24 },
+    players: [{ id: 0, faction: 'KBN', controller: 'ai' }, { id: 1, faction: 'HLX', controller: 'human' }],
+  });
+  const t = w.terrain;
+  w.entities.clear();
+  for (const p of w.players) {
+    p.resources.ore = 20000;
+    p.resources.materials = 10000;
+    p.resources.fuel = 5000;
+    p.resources.ammo = 5000;
+    p.resources.water = 5000;
+  }
+  for (let i = 0; i < t.type.length; i++) {
+    const x = i % t.w;
+    t.type[i] = TT.LAND; t.height[i] = 0.5 + x * 0.004; t.height0[i] = t.height[i];
+    t.water[i] = 0; t.baseWater[i] = 0; t.block[i] = 0; t.cover[i] = 0; t.coverBuilt[i] = 0;
+    if (t.waterBlock) t.waterBlock[i] = 0;
+    t.ore[i] = 0; if (t.oil) t.oil[i] = 0;
+    if (t.mud) t.mud[i] = 0;
+    if (t.road) t.road[i] = 0;
+    if (t.roadBuilt) t.roadBuilt[i] = 0;
+    if (t.bridge) t.bridge[i] = 0;
+    if (t.tunnel) t.tunnel[i] = 0;
+    if (t.lakeMask) t.lakeMask[i] = 0;
+  }
+  const hq0 = spawnBuilding(w, 0, 'hq', 4, 10); hq0.buildProgress = 1; hq0.hp = hq0.maxHp;
+  const hq1 = spawnBuilding(w, 1, 'hq', 29, 10); hq1.buildProgress = 1; hq1.hp = hq1.maxHp;
+  const dam = spawnBuilding(w, 0, 'dam', 18, 10); dam.buildProgress = 1; dam.hp = dam.maxHp;
+  applyFortification(w, dam);
+  for (const y of [10, 11]) {
+    const i = tIdx(t, 20, y);
+    t.water[i] = 0.46;
+    t.waterActive.add(i);
+  }
+  const [ex, ey] = tileToWorld(12, 10);
+  const enemy = spawnUnit(w, 1, 'truck', ex, ey);
+  enemy.moveTarget = { x: enemy.x - 6, y: enemy.y };
+  initAi(w.players[0]);
+  stepAi(w, w.players[0], applyCommand);
+  ok(dam.dead && w.events.some(ev => ev.type === 'ai_dam_breach' && ev.dam === dam.id && ev.target === enemy.id),
+    'KI sprengt einen gefuellten Staudamm, wenn gegnerische Landeinheiten unterhalb vorbeifahren');
+}
+
+{
+  const w = createWorld({
+    data,
     seed: 93,
     map: { w: 32, h: 24 },
     players: [{ id: 0, faction: 'KBN', controller: 'ai' }, { id: 1, faction: 'HLX', controller: 'human' }],
@@ -1134,14 +1250,18 @@ ok(match.player(0).controller === 'ai', 'Sitz fällt nach Disconnect-Timeout an 
   }
   ok(damReset, 'Staudamm-Rückbau setzt Höhe und Wassersperre exakt zurück');
 
+  applyFortification(wDam, testDam);
   for (let y = 15; y <= 25; y++) dmt.waterBlock[tIdx(dmt, 20, y)] = 1;
   const damSrc = tIdx(dmt, 27, 20);
-  for (let k = 0; k < 90; k++) { dmt.water[damSrc] += 0.09; dmt.waterActive.add(damSrc); wDam.tick++; stepWater(wDam); }
+  for (let k = 0; k < 20; k++) { dmt.water[damSrc] += 0.09; dmt.waterActive.add(damSrc); wDam.tick++; stepWater(wDam); }
   const blockedDown = dmt.water[tIdx(dmt, 18, 20)], blockedUp = dmt.water[tIdx(dmt, 24, 20)];
   ok(blockedUp > WET_DEPTH && blockedDown < blockedUp * 0.25, 'Staudamm sperrt den direkten Durchfluss');
   for (let k = 0; k < 260; k++) { dmt.water[damSrc] += 0.09; dmt.waterActive.add(damSrc); wDam.tick++; stepWater(wDam); }
+  let outletFlow = 0;
+  for (let y = 17; y <= 22; y++) for (let x = 10; x <= 19; x++) outletFlow = Math.max(outletFlow, dmt.water[tIdx(dmt, x, y)]);
   const sideFlow = Math.max(dmt.water[tIdx(dmt, 20, 14)], dmt.water[tIdx(dmt, 21, 14)], dmt.water[tIdx(dmt, 20, 26)], dmt.water[tIdx(dmt, 21, 26)]);
-  ok(sideFlow > WET_DEPTH, 'Aufgestautes Wasser fließt seitlich um die Staudamm-Enden');
+  ok(outletFlow > WET_DEPTH, 'Staudamm gibt Wasser bei erreichtem Stauziel weiter unten im Ablasskorridor ab');
+  ok(sideFlow < outletFlow, 'Staudamm bevorzugt den unteren Ablass statt seitlich um die Enden zu ueberlaufen');
 
   // Fluten tötet Landeinheiten, nicht aber Luft/See.
   const fc = tIdx(t2, 28, 24);
@@ -1328,6 +1448,24 @@ ok(match.player(0).controller === 'ai', 'Sitz fällt nach Disconnect-Timeout an 
     'Infanterie-Wassertod liefert Washout-Metadaten fürs Wegschwemmen');
   ok(!wv.events.some(ev => ev.type === 'death' && ev.id === waterInfVictim.id),
     'Infanterie-Wassertod erzeugt keinen normalen Death-Event');
+  const naturalInfVictim = spawnUnit(wv, 1, 'rifleman', 24, 20);
+  const naturalHp = naturalInfVictim.hp;
+  applyDamage(wv, naturalInfVictim, naturalHp * 10, null, 'rockfall', { rockfall: 1 });
+  ok(!naturalInfVictim.dead && naturalInfVictim.hp > 0 && naturalInfVictim.hp < naturalHp,
+    'Naturereignisse verwunden Fußsoldaten zuerst statt sie sofort explodieren zu lassen');
+  ok(!wv.events.some(ev => ev.type === 'death' && ev.id === naturalInfVictim.id),
+    'Ein einzelner Felssturz-Overkill erzeugt keinen Infanterie-Tod');
+  for (let k = 0; k < 6 && !naturalInfVictim.dead; k++) {
+    applyDamage(wv, naturalInfVictim, naturalHp * 10, null, 'rockfall', { rockfall: 1 });
+  }
+  const naturalDeath = wv.events.find(ev => ev.type === 'death' && ev.id === naturalInfVictim.id);
+  ok(naturalDeath?.category === 'infantry' && naturalDeath.cause === 'rockfall',
+    'Mehrfach verwundete Fußsoldaten sterben als Infanterie-Death statt als Explosion');
+  const lightningInfVictim = spawnUnit(wv, 1, 'rifleman', 25, 20);
+  const lightningHp = lightningInfVictim.hp;
+  applyDamage(wv, lightningInfVictim, lightningHp * 10, null, 'lightning');
+  ok(!lightningInfVictim.dead && lightningInfVictim.hp > 0 && lightningInfVictim.hp < lightningHp,
+    'Blitzschlag verwundet Fußsoldaten ohne Instant-Kill');
 
   // 10c) Beförderung verbessert Schaden, max. HP und Sicht und heilt teilweise.
   const promoted = spawnUnit(wv, 0, 'rifleman', 10, 10);
@@ -1747,6 +1885,73 @@ ok(match.player(0).controller === 'ai', 'Sitz fällt nach Disconnect-Timeout an 
     `Abflussloses Loch behaelt seinen Pegel ohne Quelle (${holeLevel0.toFixed(3)} -> ${holeLevel1.toFixed(3)})`);
   ok(Math.abs(et.terra[hole] || 0) < 0.001,
     'Abflussloses Loch wird durch stehendes Wasser nicht endlos tiefer erodiert');
+
+  // (d3a) Sehr tiefe Löcher dürfen mehr als die normale Gameplay-Tiefe speichern:
+  // die Storage-Kappe darf keinen Pegel abschneiden, solange der Rand noch nicht erreicht ist.
+  const deepW = createWorld({ data, seed: 5655, map: { w: 32, h: 32 }, players: [{ id: 0, faction: 'KBN', controller: 'human' }] });
+  const dpt = deepW.terrain, dpx = 15, dpy = 15, deepHole = dpy * dpt.w + dpx, deepFeed = dpy * dpt.w + dpx - 1;
+  dpt.sources.length = 0; dpt.waterActive.clear();
+  for (let i = 0; i < dpt.water.length; i++) {
+    dpt.type[i] = TT.LAND; dpt.height[i] = 0.84; dpt.height0[i] = 0.84;
+    dpt.water[i] = 0; dpt.baseWater[i] = 0; dpt.waterBlock[i] = 0; dpt.block[i] = 0;
+    if (dpt.lakeMask) dpt.lakeMask[i] = 0;
+    if (dpt.startSafe) dpt.startSafe[i] = 0;
+  }
+  dpt.height[deepHole] = dpt.height0[deepHole] = 0.02;
+  dpt.height[deepFeed] = dpt.height0[deepFeed] = 0.86;
+  for (let k = 0; k < 30; k++) {
+    dpt.water[deepFeed] += 0.04;
+    dpt.waterActive.add(deepFeed);
+    stepWater(deepW); deepW.tick++;
+  }
+  const deepLevel = dpt.height[deepHole] + dpt.water[deepHole];
+  ok(dpt.water[deepHole] > WATER_MAX_DEPTH + 0.08 && deepLevel < 0.84,
+    `Sehr tiefes Loch speichert Wasser oberhalb der normalen Tiefenkappe (${dpt.water[deepHole].toFixed(3)}, Pegel ${deepLevel.toFixed(3)})`);
+
+  // (d3b) Auch auf der startSafe-Basisterrasse darf ein echtes Loch nicht durch die
+  // Basis-Entwässerung leergepumpt werden, solange es keinen physikalischen Ablauf hat.
+  const safeHoleW = createWorld({ data, seed: 5656, map: { w: 32, h: 32 }, players: [{ id: 0, faction: 'KBN', controller: 'human' }] });
+  const sht = safeHoleW.terrain, shx = 15, shy = 15, safeHole = shy * sht.w + shx;
+  sht.sources.length = 0; sht.waterActive.clear();
+  for (let i = 0; i < sht.water.length; i++) {
+    sht.type[i] = TT.LAND; sht.height[i] = 0.84; sht.height0[i] = 0.84;
+    sht.water[i] = 0; sht.baseWater[i] = 0; sht.waterBlock[i] = 0; sht.block[i] = 0;
+    if (sht.lakeMask) sht.lakeMask[i] = 0;
+    if (sht.startSafe) sht.startSafe[i] = 0;
+  }
+  sht.height[safeHole] = sht.height0[safeHole] = 0.32;
+  sht.water[safeHole] = 0.22;
+  sht.startSafe[safeHole] = 1;
+  sht.waterActive.add(safeHole);
+  const safeHoleLevel0 = sht.height[safeHole] + sht.water[safeHole];
+  for (let k = 0; k < 120; k++) { stepWater(safeHoleW); safeHoleW.tick++; }
+  const safeHoleLevel1 = sht.height[safeHole] + sht.water[safeHole];
+  ok(Math.abs(safeHoleLevel1 - safeHoleLevel0) < 0.004,
+    `Abflussloses Loch auf der Basisterrasse behaelt seinen Pegel (${safeHoleLevel0.toFixed(3)} -> ${safeHoleLevel1.toFixed(3)})`);
+
+  // (d3c) Verschneite Gipfelsenken ohne tieferen Nachbarn behalten Wasser ebenfalls;
+  // die Schnee-Entwässerung darf dort keinen versteckten Verdunstungsabfluss simulieren.
+  const snowHoleW = createWorld({ data, seed: 5757, map: { w: 24, h: 24 }, players: [{ id: 0, faction: 'KBN', controller: 'human' }] });
+  const snt = snowHoleW.terrain, snx = 12, sny = 12, snowHole = sny * snt.w + snx;
+  snt.sources.length = 0; snt.waterActive.clear();
+  for (let i = 0; i < snt.water.length; i++) {
+    snt.type[i] = TT.LAND; snt.height[i] = SNOW_LINE + 0.24; snt.height0[i] = snt.height[i];
+    snt.water[i] = 0; snt.baseWater[i] = 0; snt.waterBlock[i] = 0; snt.block[i] = 0;
+    if (snt.lakeMask) snt.lakeMask[i] = 0;
+    if (snt.startSafe) snt.startSafe[i] = 0;
+    if (snt.snow) snt.snow[i] = 0;
+  }
+  snt.height[snowHole] = snt.height0[snowHole] = SNOW_LINE + 0.06;
+  snt.water[snowHole] = 0.14;
+  if (snt.snow) snt.snow[snowHole] = 0.1;
+  snt.snowIdx = [snowHole];
+  snt._snowDrainOrder = null;
+  snt.waterActive.add(snowHole);
+  const snowHoleLevel0 = snt.height[snowHole] + snt.water[snowHole];
+  for (let k = 0; k < 80; k++) { stepWater(snowHoleW); snowHoleW.tick++; }
+  const snowHoleLevel1 = snt.height[snowHole] + snt.water[snowHole];
+  ok(Math.abs(snowHoleLevel1 - snowHoleLevel0) < 0.004,
+    `Verschneite Gipfelsenke ohne Ablauf behaelt ihren Pegel (${snowHoleLevel0.toFixed(3)} -> ${snowHoleLevel1.toFixed(3)})`);
 
   // (d4) Hat temporäres Wasser einen offenen Ablauf zum Kartenrand/Meer, darf es nicht als
   // dauerhafte Pfützenfläche liegen bleiben.
