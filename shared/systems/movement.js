@@ -547,7 +547,7 @@ function separation(world) {
   }
 }
 
-function desiredSpacing(a, b) {
+export function desiredSpacing(a, b) {
   if (a.category === 'infantry' && b.category === 'infantry' && a.domain === 'land' && b.domain === 'land') return 0.18;
   if (a.category === 'vehicle' || b.category === 'vehicle' || a.heavy || b.heavy) return 2.1;
   if (a.domain === 'water' || b.domain === 'water') return 2.4;

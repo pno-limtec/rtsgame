@@ -20,6 +20,7 @@ import { loadData } from '../shared/data-node.js';
 import { createWorld, step, applyCommand } from '../shared/sim.js';
 import { spawnUnit } from '../shared/world.js';
 import { worldToTile, tileToWorld, tIdx, inBounds, TT } from '../shared/terrain.js';
+import { desiredSpacing } from '../shared/systems/movement.js';
 
 const data = loadData();
 
@@ -130,14 +131,19 @@ for (let s = 0; s < N; s++) {
   const meanJitter = perUnitJitter.reduce((a, b) => a + b, 0) / units.length;
   const maxJitter = Math.max(...perUnitJitter);
 
-  // Mindest-Paarabstand am Ende vs. Soll (Infanterie 1.35, mit Fahrzeug 2.1). Overlap-Quote = wie
-  // weit der engste Abstand unter dem kleinsten Soll (1.35) liegt.
-  let minPair = Infinity;
+  // Mindest-Paarabstand am Ende UND Overlap-Quote — beides gegen den PAAR-SPEZIFISCHEN Soll-Abstand
+  // aus movement.js (`desiredSpacing`, Single Source of Truth: Infanterie↔Infanterie 0.18 m, mit
+  // Fahrzeug 2.1, Wasser 2.4, sonst 1.35). Overlap = wie weit der am stärksten verletzte Paarabstand
+  // UNTER seinem eigenen Soll liegt (0 = jedes Paar ≥ Soll, 1 = exakt aufeinander). So wird eng
+  // gepackte Infanterie, die ABSICHTLICH dicht steht, nicht fälschlich als „Ineinanderrutschen"
+  // gewertet — gemessen wird nur echtes Unterschreiten des jeweiligen Soll-Abstands.
+  let minPair = Infinity, overlap = 0;
   for (let a = 0; a < alive.length; a++) for (let b = a + 1; b < alive.length; b++) {
     const d = dist(alive[a], alive[b]);
     if (d < minPair) minPair = d;
+    const want = desiredSpacing(alive[a], alive[b]);
+    overlap = Math.max(overlap, Math.max(0, (want - d) / want));
   }
-  const overlap = Math.max(0, (1.35 - minPair) / 1.35); // 0 = kein Überlapp, 1 = exakt aufeinander
 
   validSeeds++;
   worstMeanJitter = Math.max(worstMeanJitter, meanJitter);
