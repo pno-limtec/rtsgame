@@ -526,14 +526,49 @@ export function makeBuildingMesh(kind, size, mats) {
       break;
     }
     case 'dam': {
-      g.add(box(s * 0.98, 2.8, s * 0.55, dark, 0, 1.4, 0));                  // Mauer
-      g.add(box(s * 0.98, 0.3, s * 0.7, metal, 0, 2.85, 0));                 // Krone
-      g.add(box(s * 0.3, 1.0, s * 0.3, body, s * 0.28, 3.4, 0));             // Schalthaus
-      for (let i = 0; i < 3; i++) {
-        const outlet = cyl(0.14, 0.14, 0.5, metal, -s * 0.3 + i * s * 0.3, 0.5, s * 0.3, 8);
-        g.add(outlet); addAnim(g, 'spinZ', outlet, { speed: 1.7 + i * 0.25 });
-      } // Ausläufe
-      windows(g, win, s * 0.22, 0.4, s * 0.28, 3.5, s * 0.15 + 0.02);
+      // Wasserkraftwerk-Staudamm: gebatterte Schwergewichtsmauer mit gestufter Luftseite,
+      // aufgestautem Reservoir hinten, Überlauf-Schützen auf der Krone, Einlauf-Türmen,
+      // Druckrohren über die Front zum Maschinenhaus am Fuß und schäumendem Turbinenauslauf.
+      // Stromrichtung: -z = Stauseite (Reservoir), +z = Luftseite/Unterwasser (Auslauf).
+      g.add(box(s * 1.02, 0.5, s * 0.95, dark, 0, 0.25, 0));                  // Fundament-Sohle
+      g.add(box(s * 0.98, 3.3, s * 0.4, dark, 0, 2.05, -s * 0.08));           // Hauptmauer (rückgeneigt)
+      for (let i = 0; i < 3; i++) {                                           // gestufte Luftseite (Schwergewicht)
+        g.add(box(s * (0.98 - i * 0.04), 0.72, s * 0.22, dark, 0, 0.66 + i * 0.72, s * 0.18 - i * 0.07));
+      }
+      g.add(box(s * 1.0, 0.24, s * 0.36, metal, 0, 3.82, -s * 0.08));         // Kronen-Fahrbahn
+      g.add(box(s * 1.0, 0.07, 0.05, hazard, 0, 3.95, -s * 0.08 + s * 0.17)); // Warnstreifen Kronenkante
+      for (const rz of [-s * 0.16, s * 0.16]) {                              // Kronen-Geländer
+        g.add(box(s * 1.0, 0.14, 0.04, body, 0, 4.0, -s * 0.08 + rz));
+      }
+      // aufgestautes Reservoir auf der Stauseite (hoher Wasserspiegel hinter der Krone)
+      const lake = box(s * 1.0, 0.14, s * 0.5, water, 0, 3.35, -s * 0.42);
+      g.add(lake); addAnim(g, 'bobY', lake, { speed: 0.8, amp: 0.05 });
+      for (let i = 0; i < 4; i++) {                                           // Überlauf-Schützen (Stauseite)
+        const gate = box(s * 0.18, 0.78, 0.12, body, -s * 0.36 + i * s * 0.24, 3.42, -s * 0.08 - s * 0.2);
+        g.add(gate);
+        g.add(box(s * 0.18, 0.07, 0.13, hazard, -s * 0.36 + i * s * 0.24, 3.74, -s * 0.08 - s * 0.205)); // Schützen-Oberkante
+        if (i % 2 === 0) addAnim(g, 'bobY', gate, { speed: 1.1, amp: 0.06, phase: i }); // hebende Schütze
+      }
+      for (const sx of [-s * 0.33, s * 0.33]) {                              // Einlauf-/Steuertürme auf der Krone
+        g.add(box(s * 0.17, 1.05, s * 0.17, body, sx, 4.32, -s * 0.08));
+        g.add(box(s * 0.21, 0.18, s * 0.21, dark, sx, 4.93, -s * 0.08));      // Turmkranz
+        windows(g, win, s * 0.1, 0.4, sx, 4.4, s * 0.085 - 0.04);
+      }
+      for (const sx of [-s * 0.22, s * 0.22]) {                              // Druckrohre über die Luftseite
+        const pen = cyl(0.17, 0.17, 3.35, metal, sx, 2.05, s * 0.18, 8);
+        pen.rotation.x = 0.58; g.add(pen);
+        g.add(cyl(0.21, 0.21, 0.18, dark, sx, 0.62, s * 0.46, 8));            // Rohr-Krümmer am Maschinenhaus
+      }
+      g.add(box(s * 0.78, 0.78, s * 0.32, body, 0, 0.6, s * 0.46));           // Maschinenhaus am Fuß
+      g.add(box(s * 0.78, 0.12, s * 0.34, roof, 0, 1.05, s * 0.46));          // Maschinenhaus-Dach
+      windows(g, win, s * 0.6, 0.42, 0, 0.62, s * 0.46 + s * 0.16 + 0.02);    // Generatorhalle-Fenster
+      for (let i = 0; i < 3; i++) {                                           // Turbinen-Auslässe (drehende Wirbel)
+        const outlet = cyl(0.15, 0.15, 0.5, metal, -s * 0.28 + i * s * 0.28, 0.42, s * 0.62, 8);
+        outlet.rotation.x = Math.PI / 2; g.add(outlet);
+        addAnim(g, 'spinZ', outlet, { speed: 1.7 + i * 0.25 });
+        const churn = box(s * 0.22, 0.16, 0.4, water, -s * 0.28 + i * s * 0.28, 0.2, s * 0.78); // schäumendes Unterwasser
+        g.add(churn); addAnim(g, 'bobY', churn, { speed: 2.6 + i * 0.3, amp: 0.07, phase: i });
+      }
       break;
     }
     case 'levee': {
