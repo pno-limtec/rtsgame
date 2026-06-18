@@ -15,6 +15,10 @@ import {
   inBounds, tIdx, isPassable, TT, roadAtIdx, forestBlocks,
 } from '../terrain.js';
 
+// Kern-Funktionsklassen (Wirtschaft/Produktion/Logistik): bei naturbedingtem Defizit-Verlust dieser
+// Klassen greift die Katastrophen-Erholung (pickRecoverySpot) — siehe manageBuild, NUR unter Chaos.
+const CORE_BUILD_ROLES = new Set(['economy', 'production', 'logistics']);
+
 // Grobe Build-Order (Priorität von oben nach unten).
 const BUILD_ORDER = [
   // 1) Wirtschafts- & Militärkern
@@ -554,6 +558,13 @@ function manageBuild(world, player, s, applyCommand) {
       // Pumpwerke möglichst ans Gewässer stellen (volle Förderrate), sonst Grundwasser in der Basis.
       else if (def.pump && s.coastal) spot = pickCoastalSpot(world, player, s, def.size || 1, def) || pickBuildSpot(world, s.hq, def.size || 1, def);
       else spot = pickBuildSpot(world, s.hq, def.size || 1, def);
+      // Katastrophen-Erholung (Ziel H): scheiterte die Standard-Platzierung für ein Kern-Gebäude
+      // (Wirtschaft/Produktion/Logistik) auf zerwühltem Basis-Terrain, suche unter Chaos-Wetter
+      // (insanity≥3) erschöpfend nach JEDEM freien Platz im Bauradius. Toter Pfad bei Normalspiel.
+      if (!spot && CORE_BUILD_ROLES.has(def.role) && !def.requiresWater && !def.requiresOil
+        && (world?.env?.insanity ?? world?.controls?.insanity ?? 2) >= 3) {
+        spot = pickRecoverySpot(world, s.hq, def.size || 1, def, player.id);
+      }
       if (spot) {
         if (prepareBuildRoute(world, player, s, spot, def, applyCommand)) return true;
         applyCommand(world, { type: 'build', building: step.kind, tx: spot[0], ty: spot[1] }, player.id);
@@ -1929,7 +1940,7 @@ function nearestBy(list, scoreFn) {
 }
 
 // Bauplatz im Bauradius des HQ in Spirale suchen.
-function pickBuildSpot(world, hq, size, def = null) {
+export function pickBuildSpot(world, hq, size, def = null) {
   const hqDef = world.data.buildings.hq;
   const radius = hqDef.buildRadius || 16;
   const cx = hq.tx + hq.size / 2, cy = hq.ty + hq.size / 2;
@@ -1941,6 +1952,31 @@ function pickBuildSpot(world, hq, size, def = null) {
     if (placeable(world, tx, ty, size, def, hq.owner)) return [tx, ty];
   }
   return null;
+}
+
+// Katastrophen-Erholung (Ziel H): erschöpfende, DETERMINISTISCHE Bauplatzsuche für den Wiederaufbau
+// eines naturbedingt verlorenen Kern-Gebäudes. Auf von Lawinen/Steinschlag zerwühltem Basis-Terrain
+// findet die zufällige pickBuildSpot-Stichprobe (60 Versuche im halben Bauradius) oft KEINEN flachen
+// Platz, obwohl im HQ-Bauradius noch einer existiert → der Wiederaufbau scheitert und die KI nimmt den
+// Verlust hin (gemessene Wurzel, disaster-check insanity 3). Diese Suche scannt JEDE Zelle im vollen
+// HQ-Bauradius und liefert die HQ-nächste platzierbare Zelle. Verbraucht KEIN world.rng (reiner Scan)
+// → reproduzierbar; wird in manageBuild NUR unter Chaos-Wetter (insanity≥3) aufgerufen → bei Normal-
+// spiel (insanity≤2, so laufen smoke/match-sim/coverage) toter Pfad, also bit-identisch/RNG-neutral.
+export function pickRecoverySpot(world, hq, size, def, owner) {
+  if (!hq) return null;
+  const hqDef = world.data.buildings.hq;
+  const radius = Math.ceil(hqDef.buildRadius || 16);
+  const cx = hq.tx + hq.size / 2, cy = hq.ty + hq.size / 2;
+  let best = null, bestD = Infinity;
+  for (let ty = Math.round(cy - radius); ty <= Math.round(cy + radius); ty++) {
+    for (let tx = Math.round(cx - radius); tx <= Math.round(cx + radius); tx++) {
+      const d = (tx + size / 2 - cx) ** 2 + (ty + size / 2 - cy) ** 2;
+      if (d >= bestD) continue;                                  // schon näher gefunden → überspringen
+      if (!placeable(world, tx, ty, size, def, owner)) continue;
+      bestD = d; best = [tx, ty];
+    }
+  }
+  return best;
 }
 
 // Befestigungen in einem Bogen zwischen HQ und nächstem Feind platzieren (Frontverteidigung).
