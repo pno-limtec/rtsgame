@@ -257,9 +257,9 @@ export function stepEnvironment(world) {
     for (const e of world.entities.values()) {
       if (e.etype !== 'unit' || e.dead) continue;
       if ((e.domain === 'water' || e.domain === 'amphibious') && !e.submerged) {
-        applyDamage(world, e, WAVE_DPS * DT * profile.damage, null);
+        applyDamage(world, e, WAVE_DPS * DT * profile.damage, null, 'storm');
       } else if (e.domain === 'air') {
-        applyDamage(world, e, STORM_AIR_DPS * DT * profile.damage, null);
+        applyDamage(world, e, STORM_AIR_DPS * DT * profile.damage, null, 'storm');
       }
     }
   }
