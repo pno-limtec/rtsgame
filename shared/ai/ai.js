@@ -1350,19 +1350,50 @@ function manageArmy(world, player, s, applyCommand) {
       player.ai.waveSize = pressure > 0 ? Math.max(3, player.ai.waveSize - 1) : Math.min(18, player.ai.waveSize + 1); // Wellen wachsen im Normalspiel
     }
   } else if (s.hq && idle.length) {
-    // Leerlauf-Truppen zur Verteidigung sammeln — bevorzugt in Deckung (Schützengraben).
+    // Leerlauf-Truppen beschäftigen statt parken (Ziel A: KI lässt Einheiten nicht untätig stehen).
+    // Infanterie zieht in Deckung (Schützengraben, Deckungsbonus). Übrige Kampf-Einheiten
+    // PATROUILLIEREN bei Ruhe (pressure 0) den Basis-Perimeter — Bewegung statt statischem HQ-Guard,
+    // fängt durchsickernde feindliche Infanterie ab (die auch bei Fahrzeug-Disconnect die Basis
+    // erreicht). Unter Druck wird stattdessen am HQ gesammelt (geschlossene Verteidigung).
     const trench = s.buildings.find(b => b.kind === 'trench' && b.buildProgress >= 1);
     for (const u of idle) {
-      // Infanterie zieht in den nächsten Graben (Deckungsbonus), andere bewachen das HQ.
-      const anchor = (trench && u.category === 'infantry') ? trench : s.hq;
-      if (dist(u, anchor) > (anchor === trench ? 3 : 16))
-        applyCommand(world, { type: 'move', units: [u.id], x: anchor.x + (anchor === trench ? 0 : 4), y: anchor.y + (anchor === trench ? 0 : 4) }, player.id);
-      else u.order = { type: 'guard' };
+      if (trench && u.category === 'infantry') {
+        if (dist(u, trench) > 3)
+          applyCommand(world, { type: 'move', units: [u.id], x: trench.x, y: trench.y }, player.id);
+        else u.order = { type: 'guard' };
+      } else if (pressure === 0) {
+        patrolPerimeter(world, player, s.hq, u, applyCommand);
+      } else if (dist(u, s.hq) > 16) {
+        applyCommand(world, { type: 'move', units: [u.id], x: s.hq.x + 4, y: s.hq.y + 4 }, player.id);
+      } else u.order = { type: 'guard' };
     }
   }
 
   manageAirWing(world, player, air, applyCommand);
   manageNavy(world, player, naval, applyCommand);
+}
+
+// Perimeter-Patrouille für ansonsten untätige Kampf-Einheiten (Ziel A der selfplay-polish-Routine:
+// „wer nicht kämpft, soll … patrouillieren / sich neu positionieren"). Rotierender 8-Stationen-Ring
+// um das HQ. Deterministisch (KEIN world.rng) → RNG-Strom anderer Partien bleibt unverändert.
+// attackMove: greift Feinde unterwegs an; bei Ankunft → idle → nächste Runde nächste Station
+// (Dauerpatrouille statt statischem Guard). Stationen sind auf die Karte geklemmt.
+function patrolPerimeter(world, player, hq, u, applyCommand) {
+  const N = 8, R = 18;                          // 8 Stationen, ~9 Kacheln Radius um die Basis
+  const phase = Math.floor(world.tick / 150);   // Ring rotiert ~alle 15 s eine Station weiter
+  const t = world.terrain;
+  const maxX = (t.w - 2) * TILE, maxY = (t.h - 2) * TILE, lo = 2 * TILE;
+  const stationAt = (k) => {
+    const ang = (k / N) * Math.PI * 2;
+    return {
+      x: Math.min(maxX, Math.max(lo, hq.x + Math.cos(ang) * R)),
+      y: Math.min(maxY, Math.max(lo, hq.y + Math.sin(ang) * R)),
+    };
+  };
+  const idx = (u.id + phase) % N;
+  let p = stationAt(idx);
+  if (dist(u, p) < 5) p = stationAt((idx + 1) % N);   // schon da → nächste Station (bleibt in Bewegung)
+  applyCommand(world, { type: 'move', units: [u.id], x: p.x, y: p.y, attackMove: true }, player.id);
 }
 
 // Luft-Doktrin: nicht auf Landwellen warten; kleine Rotten fliegen eigenständig.
