@@ -176,15 +176,34 @@ export function makeBuildingMesh(kind, size, mats) {
       break;
     }
     case 'bridge': {
-      g.add(box(s * 1.02, 0.18, s * 0.92, roof, 0, 0.26, 0));               // breites, ebenes Deck
-      g.add(box(s * 1.04, 0.18, 0.12, dark, 0, 0.48, -s * 0.43));
-      g.add(box(s * 1.04, 0.18, 0.12, dark, 0, 0.48, s * 0.43));
-      for (const x of [-s * 0.38, 0, s * 0.38]) {
-        g.add(cyl(0.05, 0.06, 0.62, metal, x, 0.31, -s * 0.34, 6));
-        g.add(cyl(0.05, 0.06, 0.62, metal, x, 0.31, s * 0.34, 6));
+      // Feste Stahl-Fachwerkbrücke: hoch gegründete Tragkonstruktion mit massiven Pfeilern,
+      // tiefen Längsträgern, Diagonal-Fachwerk, vertikalen Streben und Portalrahmen an den
+      // Enden. Bewusst HOCH & MASSIV — sofort unterscheidbar vom flachen, schwimmenden
+      // Ponton (case 'pontoon'): solide Last-Brücke vs. behelfsmäßiger Schwimmsteg.
+      const deckY = 0.5;
+      for (const x of [-s * 0.34, s * 0.34]) {                              // 2 massive Fundamentpfeiler
+        g.add(box(0.42, deckY, s * 0.6, dark, x, deckY / 2, 0));            // Pfeilerschaft
+        g.add(box(0.6, 0.13, s * 0.7, metal, x, 0.065, 0));                 // Sohlplatte
       }
-      g.add(box(s * 0.24, 0.045, 0.05, hazard, -s * 0.22, 0.39, 0));
-      g.add(box(s * 0.24, 0.045, 0.05, hazard, s * 0.22, 0.39, 0));
+      g.add(box(s * 1.08, 0.2, s * 0.78, roof, 0, deckY + 0.1, 0));         // dicke, ebene Fahrbahn
+      for (const z of [-s * 0.35, s * 0.35]) {                             // seitliche Tragwerke beidseits
+        g.add(box(s * 1.08, 0.32, 0.12, dark, 0, deckY - 0.04, z));         // tiefer Längs-Hauptträger
+        g.add(box(s * 1.08, 0.08, 0.1, metal, 0, deckY + 0.62, z));         // Obergurt/Geländerholm
+        for (let i = 0; i <= 4; i++) {                                      // vertikale Streben
+          const px = -s * 0.44 + i * (s * 0.88 / 4);
+          g.add(box(0.08, 0.64, 0.08, body, px, deckY + 0.32, z));
+        }
+        for (let i = 0; i < 4; i++) {                                       // Diagonal-Fachwerk (X-Verband)
+          const bx = -s * 0.33 + i * (s * 0.66 / 3);
+          const d = box(0.52, 0.07, 0.07, metal, bx, deckY + 0.32, z);
+          d.rotation.z = (i % 2 ? 1 : -1) * 0.62; g.add(d);
+        }
+      }
+      for (const x of [-s * 0.46, s * 0.46]) {                             // Portalrahmen-Querriegel an den Enden
+        g.add(box(0.12, 0.16, s * 0.86, body, x, deckY + 0.66, 0));
+      }
+      for (const px of [-s * 0.26, 0, s * 0.26])                           // Fahrbahn-Mittellinie
+        g.add(box(s * 0.14, 0.04, 0.06, hazard, px, deckY + 0.21, 0));
       break;
     }
     case 'pontoon': {
