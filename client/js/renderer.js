@@ -110,6 +110,8 @@ const PIPE_BRIDGE_WIDTH = TILE * 1.8;
 const PIPE_BRIDGE_LIFT = 1.05;
 const PIPE_FLEX_SAG = 0.34;        // Durchhang des flexiblen Schlauchs am Pumpwerk-/Depot-Anschluss
 const PIPE_FLEX_RADIUS = 0.13;     // dünner als das starre Rohr (0.17) — wirkt wie ein Schlauch
+const ROAD_SURFACE_OFFSET = 0.12;
+const ROAD_FOUNDATION_GROUND_LIFT = 0.012;
 const BRIDGE_DECK_WIDTH = TILE * 1.8; // zweispurig: zwei Fahrzeuge können sich sichtbar begegnen
 const BRIDGE_LANE_OFFSET = TILE * 0.36;
 const BRIDGE_DECK_LIFT = 0.55;     // leicht erhöht über Ufer/Wasser
@@ -125,6 +127,11 @@ const DAM_TOP_ABOVE_BANK = HEIGHT_SCALE * 0.18;
 const DAM_MIN_VISIBLE_HEIGHT = HEIGHT_SCALE * 0.18;
 const DAM_END_OVERLAP = TILE * 0.55;
 const DAM_BASE_SINK = 0.08;
+const DAM_CREST_CAP_HEIGHT = TILE * 0.10;
+const DAM_PARAPET_WIDTH = TILE * 0.12;
+const DAM_PARAPET_HEIGHT = TILE * 0.22;
+const DAM_BUTTRESS_SPACING = TILE * 2.25;
+const DAM_BUTTRESS_WIDTH = TILE * 0.22;
 const ZERO_OFFSET = { x: 0, z: 0 }; // wiederverwendeter Null-Spurversatz (kein Garbage pro Frame)
 const INFANTRY_KINDS = new Set(['engineer', 'rifleman', 'at_soldier', 'aa_soldier']);
 const AIR_UNIT_KINDS = new Set(['recon_drone', 'gunship', 'bomber', 'cloud_seeder', 'transport_air']);
@@ -804,8 +811,8 @@ export class Renderer {
 
     // Straßen-/Brücken-/Pipeline-Overlays: ein zusammenhängendes Mesh pro Netz statt
     // einzelner Kacheln/Objektstücke. Die Spiellogik bleibt zellbasiert, nur die Optik glättet.
-    // Straßenbelag halbtransparent (50 %), damit das Gelände darunter durchscheint.
-    this.roadMat = new THREE.MeshLambertMaterial({ color: 0x3b3f44, transparent: true, opacity: 0.5, depthWrite: false });
+    // Straßen bekommen einen soliden Unterbau, damit unebenes Gelände nicht durch den Belag clippt.
+    this.roadMat = new THREE.MeshStandardMaterial({ color: 0x363b40, roughness: 0.88, metalness: 0.0 });
     this.roadMesh = new THREE.Mesh(this._makeEmptyOverlayGeometry(), this.roadMat);
     this.roadMesh.renderOrder = 2;
     this.roadMesh.receiveShadow = true;
@@ -2806,6 +2813,89 @@ export class Renderer {
     return line;
   }
 
+  _roadGroundY(x, z) {
+    const smooth = this._terrainHeightSmoothAt(x, z);
+    return Math.max(this.heightAt(x, z), Number.isFinite(smooth) ? smooth : -Infinity);
+  }
+
+  _makeRoadFoundationGeometry(cells, opts = {}) {
+    const list = Array.from(cells || []);
+    if (!list.length) return this._makeEmptyOverlayGeometry();
+    const width = opts.width ?? TILE * 1.5;
+    const offset = opts.offset ?? ROAD_SURFACE_OFFSET;
+    const set = new Set(list);
+    const positions = [], indices = [];
+    const topPoint = (x, y, z) => [x, y, z];
+    const groundPoint = (x, z) => [x, this._roadGroundY(x, z) + ROAD_FOUNDATION_GROUND_LIFT, z];
+    const addQuad = (a, b, c, d) => {
+      const n = positions.length / 3;
+      positions.push(a[0], a[1], a[2], b[0], b[1], b[2], c[0], c[1], c[2], d[0], d[1], d[2]);
+      indices.push(n, n + 1, n + 2, n, n + 2, n + 3);
+    };
+    const topYFor = (points, lift = 0) => {
+      let y = -Infinity;
+      for (const [x, z] of points) y = Math.max(y, this._roadGroundY(x, z));
+      return (Number.isFinite(y) ? y : 0) + offset + lift;
+    };
+    const addSegment = (x0, z0, x1, z1) => {
+      const dx = x1 - x0, dz = z1 - z0, len = Math.hypot(dx, dz);
+      if (len <= 0.001) return;
+      const px = -dz / len * width * 0.5, pz = dx / len * width * 0.5;
+      const a = [x0 + px, z0 + pz], b = [x1 + px, z1 + pz], c = [x1 - px, z1 - pz], d = [x0 - px, z0 - pz];
+      const m = [(x0 + x1) * 0.5, (z0 + z1) * 0.5];
+      const topY = topYFor([a, b, c, d, [x0, z0], [x1, z1], m]);
+      const ta = topPoint(a[0], topY, a[1]), tb = topPoint(b[0], topY, b[1]);
+      const tc = topPoint(c[0], topY, c[1]), td = topPoint(d[0], topY, d[1]);
+      addQuad(ta, tb, tc, td);
+      addQuad(td, tc, groundPoint(c[0], c[1]), groundPoint(d[0], d[1]));
+      addQuad(tb, ta, groundPoint(a[0], a[1]), groundPoint(b[0], b[1]));
+    };
+    const addCap = (x, z) => {
+      const r = width * 0.53, seg = 12;
+      const ring2 = [];
+      for (let n = 0; n < seg; n++) {
+        const a = (n / seg) * Math.PI * 2;
+        ring2.push([x + Math.cos(a) * r, z + Math.sin(a) * r]);
+      }
+      const topY = topYFor([[x, z], ...ring2], 0.006);
+      const c = positions.length / 3;
+      positions.push(x, topY, z);
+      const ring = ring2.map(([rx, rz]) => {
+        const idx = positions.length / 3;
+        positions.push(rx, topY, rz);
+        return idx;
+      });
+      for (let n = 0; n < seg; n++) indices.push(c, ring[(n + 1) % seg], ring[n]);
+      for (let n = 0; n < seg; n++) {
+        const p0 = ring2[n], p1 = ring2[(n + 1) % seg];
+        addQuad(
+          topPoint(p0[0], topY, p0[1]),
+          topPoint(p1[0], topY, p1[1]),
+          groundPoint(p1[0], p1[1]),
+          groundPoint(p0[0], p0[1]),
+        );
+      }
+    };
+    const directions = [[1, 0], [0, 1], [1, 1], [1, -1]];
+    for (const idx of list) {
+      const gx = idx % this.mapW, gy = (idx / this.mapW) | 0;
+      const x = gx * TILE, z = gy * TILE;
+      addCap(x, z);
+      for (const [dx, dy] of directions) {
+        const nx = gx + dx, ny = gy + dy;
+        if (nx < 0 || ny < 0 || nx >= this.mapW || ny >= this.mapH) continue;
+        if (!set.has(ny * this.mapW + nx)) continue;
+        addSegment(x, z, nx * TILE, ny * TILE);
+      }
+    }
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+    geo.setIndex(indices);
+    geo.computeVertexNormals();
+    geo.computeBoundingSphere();
+    return geo;
+  }
+
   _makeRibbonGeometry(cells, opts = {}) {
     const width = opts.width ?? TILE * 0.72;
     const offset = opts.offset ?? 0.08;
@@ -3050,6 +3140,76 @@ export class Renderer {
       positions.push(a[0], a[1], a[2], b[0], b[1], b[2], c[0], c[1], c[2], d[0], d[1], d[2]);
       indices.push(n, n + 1, n + 2, n, n + 2, n + 3);
     };
+    const addSlopedBox = (sx, sz, sy, ex, ez, ey, ux, uz, boxWidth, thickness, lateral = 0) => {
+      const px = -uz, pz = ux;
+      const half = boxWidth * 0.5;
+      const scx = sx + px * lateral, scz = sz + pz * lateral;
+      const ecx = ex + px * lateral, ecz = ez + pz * lateral;
+      const l0 = [scx + px * half, sy, scz + pz * half];
+      const l1 = [ecx + px * half, ey, ecz + pz * half];
+      const r1 = [ecx - px * half, ey, ecz - pz * half];
+      const r0 = [scx - px * half, sy, scz - pz * half];
+      const bl0 = [l0[0], sy - thickness, l0[2]];
+      const bl1 = [l1[0], ey - thickness, l1[2]];
+      const br1 = [r1[0], ey - thickness, r1[2]];
+      const br0 = [r0[0], sy - thickness, r0[2]];
+      addQuad(l0, l1, r1, r0);
+      addQuad(br0, br1, bl1, bl0);
+      addQuad(r0, r1, br1, br0);
+      addQuad(l1, l0, bl0, bl1);
+      addQuad(l0, r0, br0, bl0);
+      addQuad(r1, l1, bl1, br1);
+    };
+    const addFacePanel = (cx, cz, ux, uz, px, pz, halfLen, topY, bottomY, lateral) => {
+      const ox = px * lateral, oz = pz * lateral;
+      const ax = ux * halfLen, az = uz * halfLen;
+      addQuad(
+        [cx - ax + ox, topY, cz - az + oz],
+        [cx + ax + ox, topY, cz + az + oz],
+        [cx + ax + ox, bottomY, cz + az + oz],
+        [cx - ax + ox, bottomY, cz - az + oz],
+      );
+    };
+    const addDamDetails = (sx, sz, ex, ez, baseY, topY, ux, uz, px, pz, baseHalf, crestHalf) => {
+      const len = Math.hypot(ex - sx, ez - sz);
+      if (len <= 0.001) return;
+      addSlopedBox(sx, sz, topY + DAM_CREST_CAP_HEIGHT, ex, ez, topY + DAM_CREST_CAP_HEIGHT,
+        ux, uz, DAM_CREST_WIDTH + DAM_PARAPET_WIDTH * 2, DAM_CREST_CAP_HEIGHT);
+      const railOffset = crestHalf + DAM_PARAPET_WIDTH * 0.5;
+      for (const side of [-1, 1]) {
+        addSlopedBox(sx, sz, topY + DAM_CREST_CAP_HEIGHT + DAM_PARAPET_HEIGHT,
+          ex, ez, topY + DAM_CREST_CAP_HEIGHT + DAM_PARAPET_HEIGHT,
+          ux, uz, DAM_PARAPET_WIDTH, DAM_PARAPET_HEIGHT, railOffset * side);
+      }
+      const gateCount = Math.max(1, Math.min(12, Math.floor(len / (TILE * 2.2))));
+      const gateHalf = Math.min(TILE * 0.42, len / (gateCount * 3));
+      const gateTop = topY - TILE * 0.10;
+      const gateBottom = Math.max(baseY + TILE * 0.40, topY - Math.min(TILE * 1.45, (topY - baseY) * 0.58));
+      for (let i = 0; i < gateCount; i++) {
+        const along = len * ((i + 0.5) / gateCount) - len * 0.5;
+        const cx = (sx + ex) * 0.5 + ux * along;
+        const cz = (sz + ez) * 0.5 + uz * along;
+        addFacePanel(cx, cz, ux, uz, px, pz, gateHalf, gateTop, gateBottom, crestHalf + TILE * 0.035);
+        addFacePanel(cx, cz, ux, uz, px, pz, gateHalf, gateTop, gateBottom, -crestHalf - TILE * 0.035);
+      }
+      const ribCount = Math.max(1, Math.min(14, Math.floor(len / DAM_BUTTRESS_SPACING)));
+      const ribTopY = topY - TILE * 0.12;
+      const ribBottomY = baseY + TILE * 0.28;
+      if (ribTopY > ribBottomY + TILE * 0.25) {
+        for (let i = 0; i < ribCount; i++) {
+          const along = len * ((i + 0.5) / ribCount) - len * 0.5;
+          const cx = (sx + ex) * 0.5 + ux * along;
+          const cz = (sz + ez) * 0.5 + uz * along;
+          for (const side of [-1, 1]) {
+            addSlopedBox(
+              cx + px * crestHalf * 0.82 * side, cz + pz * crestHalf * 0.82 * side, ribTopY,
+              cx + px * baseHalf * 0.98 * side, cz + pz * baseHalf * 0.98 * side, ribBottomY,
+              px * side, pz * side, DAM_BUTTRESS_WIDTH, TILE * 0.16,
+            );
+          }
+        }
+      }
+    };
     const connected = (a, b) => {
       const ax1 = a.tx, ax2 = a.tx + a.size - 1, ay1 = a.ty, ay2 = a.ty + a.size - 1;
       const bx1 = b.tx, bx2 = b.tx + b.size - 1, by1 = b.ty, by2 = b.ty + b.size - 1;
@@ -3120,6 +3280,7 @@ export class Renderer {
       addQuad(sRB, eRB, eLB, sLB);
       addQuad(sLB, sLT, sRT, sRB);
       addQuad(eRB, eRT, eLT, eLB);
+      addDamDetails(sx, sz, ex, ez, baseY, topY, ux, uz, px, pz, baseHalf, crestHalf);
     }
     const geo = positions.length ? new THREE.BufferGeometry() : this._makeEmptyOverlayGeometry();
     if (positions.length) {
@@ -3160,8 +3321,8 @@ export class Renderer {
     this._roadCellSet = new Set(cells);   // für Rechtsverkehr-Spurversatz der Fahrzeuge
     // Im Nebel: nur Straßen im eigenen Sichtfeld zeigen (gegnerische Straßen verschwinden).
     if (this.fowEnabled) cells = cells.filter(idx => this._infraCellVisible(idx % this.mapW, (idx / this.mapW) | 0));
-    // Breite Fahrbahn (zweispurig): Fahrzeuge können sich begegnen und rechts aneinander vorbeifahren.
-    this._replaceMeshGeometry(this.roadMesh, this._makeRibbonGeometry(cells, { width: TILE * 1.5, offset: 0.085 }));
+    // Breite Fahrbahn (zweispurig) mit Unterbau: Fahrzeuge können sich begegnen, Gelände clippt nicht durch.
+    this._replaceMeshGeometry(this.roadMesh, this._makeRoadFoundationGeometry(cells, { width: TILE * 1.5 }));
   }
 
   // Straßen im Bau: alle unfertigen Road-Zellen als ein blaues Band statt einzelner Bau-Modelle.
@@ -4868,7 +5029,7 @@ export class Renderer {
       g.userData.lift = 0; g.userData.big = e.size >= 3;
       // Schwimmende Wasserbauten (Pumpwerk/Werft/Ponton) bekommen KEIN Betonfundament — sie sitzen auf
       // der Wasseroberfläche; ein tief reichender Sockel würde unter Wasser herausstechen.
-      const low = ['wall', 'trench', 'levee', 'pipe', 'bridge', 'road', 'tunnel', 'earth_pile', 'ore_pile'].includes(e.kind)
+      const low = ['wall', 'trench', 'levee', 'pipe', 'bridge', 'dam', 'road', 'tunnel', 'earth_pile', 'ore_pile'].includes(e.kind)
         || WATER_BUILDINGS.has(e.kind);
       // Fundament: Gebäude stehen gerade (Gruppe auf höchster Ecke), der Betonsockel
       // reicht tief nach unten und schließt am Hang den Spalt zum Gelände.

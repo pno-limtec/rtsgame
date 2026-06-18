@@ -12,7 +12,7 @@ import { stepEconomy } from '../shared/systems/economy.js';
 import { stepSupport } from '../shared/systems/support.js';
 import { stepProduction } from '../shared/systems/production.js';
 import { serializeSnapshot } from '../server/snapshot.js';
-import { stepMovement, setMoveGoal } from '../shared/systems/movement.js';
+import { stepMovement, setMoveGoal, desiredSpacing } from '../shared/systems/movement.js';
 import { findPath } from '../shared/pathfinding.js';
 import { stepAi, initAi } from '../shared/ai/ai.js';
 import { awardXp, stepRegen } from '../shared/systems/veterancy.js';
@@ -618,6 +618,26 @@ if (myUnit) {
   for (let k = 0; k < 12; k++) { buildSpatial(w, 8); stepMovement(w); }
   ok(Math.hypot(tightA.x - tightB.x, tightA.y - tightB.y) < 0.22,
     'Fußtruppen dürfen eng nebeneinander stehen bleiben');
+
+  const vw = createWorld({ data, seed: 213, map: { w: 48, h: 48 }, players: [{ id: 0, faction: 'KBN', controller: 'human' }] });
+  const vt = vw.terrain;
+  vw.entities.clear();
+  for (let i = 0; i < vt.type.length; i++) {
+    vt.type[i] = TT.LAND; vt.height[i] = 0.5; vt.water[i] = 0; vt.baseWater[i] = 0; vt.block[i] = 0; vt.cover[i] = 0;
+    vt.mud[i] = 0; vt.road[i] = 0; vt.roadBuilt[i] = 0;
+  }
+  const jammed = [];
+  for (let k = 0; k < 12; k++) jammed.push(spawnUnit(vw, 0, 'tank', 16, 16));
+  applyCommand(vw, { type: 'move', units: jammed.map(u => u.id), x: 32, y: 16 }, 0);
+  for (let k = 0; k < 20; k++) { buildSpatial(vw, 8); stepMovement(vw); vw.tick++; }
+  let worstMovingOverlap = 0;
+  for (let a = 0; a < jammed.length; a++) for (let b = a + 1; b < jammed.length; b++) {
+    const d = Math.hypot(jammed[a].x - jammed[b].x, jammed[a].y - jammed[b].y);
+    const want = desiredSpacing(jammed[a], jammed[b]);
+    worstMovingOverlap = Math.max(worstMovingOverlap, Math.max(0, (want - d) / want));
+  }
+  ok(worstMovingOverlap <= 0.55,
+    'Dicht verkeilte Fahrzeuggruppen lösen sich beim Losfahren schnell genug voneinander');
 
   const normalFoot = spawnUnit(w, 0, 'rifleman', 6, 48);
   const mudFoot = spawnUnit(w, 0, 'rifleman', 6, 54);

@@ -512,7 +512,7 @@ function separation(world) {
     if (e.etype !== 'unit' || e.dead || e.domain === 'air') continue;
     if (e.inTunnel) continue; // in der Röhre teilen sich Einheiten den engen Gang — keine Separation
     const cx = Math.floor(e.x / cell), cy = Math.floor(e.y / cell);
-    let px = 0, py = 0;
+    let px = 0, py = 0, pressure = 0;
     for (let y = -1; y <= 1; y++) for (let x = -1; x <= 1; x++) {
       const b = grid.get((cx + x) + ',' + (cy + y)); if (!b) continue;
       for (const o of b) {
@@ -524,13 +524,25 @@ function separation(world) {
           if (dd <= 1e-6) {
             const a = hashAngle(e.id, o.id);
             px += Math.cos(a) * 0.45; py += Math.sin(a) * 0.45;
+            pressure = Math.max(pressure, 1);
           } else {
             const dist = Math.sqrt(dd);
             const push = (want - dist) / want;
             px += (ddx / dist) * push;
             py += (ddy / dist) * push;
+            pressure = Math.max(pressure, push);
           }
         }
+      }
+    }
+    if (pressure > 0 && e.moveTarget && e.category !== 'infantry') {
+      const tx = e.moveTarget.x - e.x, ty = e.moveTarget.y - e.y;
+      const td = Math.hypot(tx, ty);
+      if (td > 0.5) {
+        const side = (e.id & 1) ? -1 : 1;
+        const lane = Math.min(0.45, pressure * 0.32);
+        px += (-ty / td) * lane * side;
+        py += (tx / td) * lane * side;
       }
     }
     const mag = Math.hypot(px, py);
@@ -538,8 +550,9 @@ function separation(world) {
       // Separation darf Einheiten nicht in unpassierbares Gelände drücken (z. B. Schiffe an Land).
       // Fahrzeuge nur sanft schieben — starke Seitwärts-Schübe sehen aus wie Seitwärtsfahren.
       const isVeh = e.category !== 'infantry';
-      const strength = e.moveTarget ? (isVeh ? 0.1 : 0.16) : (isVeh ? 0.06 : 0.08);
-      const step = Math.min(isVeh ? 0.1 : 0.2, mag * strength);
+      const movingVeh = isVeh && e.moveTarget;
+      const strength = e.moveTarget ? (isVeh ? 0.18 : 0.16) : (isVeh ? 0.06 : 0.08);
+      const step = Math.min(movingVeh ? 0.22 : isVeh ? 0.1 : 0.2, mag * strength);
       const nx = e.x + (px / mag) * step, ny = e.y + (py / mag) * step;
       const [stx, sty] = worldToTile(nx, ny);
       if (isPassable(world.terrain, e.domain, stx, sty, e.category) && !forestBlocks(world.terrain, e.domain, stx, sty, { category: e.category, roughCrawler: e.kind === 'tractor' })) { e.x = nx; e.y = ny; }
